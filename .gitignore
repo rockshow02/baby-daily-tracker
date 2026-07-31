@@ -1,0 +1,23 @@
+# --- Backend (Python/Flask) ---
+backend/__pycache__/
+backend/**/__pycache__/
+*.pyc
+backend/.env
+backend/venv/
+backend/instance/*.db
+backend/uploads/
+
+# --- Frontend (React/Vite) ---
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Sisa file testing/debug (kalau ada) ---
+*.log
