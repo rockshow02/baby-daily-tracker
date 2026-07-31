@@ -13,6 +13,8 @@ from models import (
     ChildCaregiver,
 )
 from utils.access import get_accessible_child
+from utils.auth import get_current_user_id
+from utils.timezone_utils import to_wib_naive
 
 backup_bp = Blueprint("backup", __name__)
 
@@ -20,7 +22,7 @@ EXPORT_VERSION = 1
 
 
 def _owned_child(child_id):
-    user_id = session.get("user_id")
+    user_id = get_current_user_id()
     if not user_id:
         return None
     return get_accessible_child(child_id, user_id)
@@ -203,7 +205,7 @@ def import_json():
     sedang login. Selalu bikin anak BARU (tidak menimpa anak yang sudah ada),
     biar aman kalau backup-nya diimport lebih dari sekali.
     """
-    user_id = session.get("user_id")
+    user_id = get_current_user_id()
     if not user_id:
         return jsonify({"error": "Belum login"}), 401
 
@@ -240,7 +242,7 @@ def import_json():
     for l in data.get("feeding_logs", []):
         db.session.add(FeedingLog(
             child_id=child.id,
-            timestamp=datetime.fromisoformat(l["timestamp"]),
+            timestamp=to_wib_naive(l["timestamp"]),
             feed_type=l["feed_type"], duration_minutes=l.get("duration_minutes"),
             volume_ml=l.get("volume_ml"), breast_side=l.get("breast_side"), notes=l.get("notes"),
         ))
@@ -248,35 +250,35 @@ def import_json():
     for l in data.get("sleep_logs", []):
         db.session.add(SleepLog(
             child_id=child.id,
-            start_time=datetime.fromisoformat(l["start_time"]),
-            end_time=datetime.fromisoformat(l["end_time"]) if l.get("end_time") else None,
+            start_time=to_wib_naive(l["start_time"]),
+            end_time=to_wib_naive(l["end_time"]) if l.get("end_time") else None,
             sleep_type=l.get("sleep_type", "siang"), notes=l.get("notes"),
         ))
 
     for l in data.get("diaper_logs", []):
         db.session.add(DiaperLog(
-            child_id=child.id, timestamp=datetime.fromisoformat(l["timestamp"]),
+            child_id=child.id, timestamp=to_wib_naive(l["timestamp"]),
             diaper_type=l["diaper_type"], consistency=l.get("consistency"),
             color=l.get("color"), notes=l.get("notes"),
         ))
 
     for l in data.get("pumping_logs", []):
         db.session.add(PumpingLog(
-            child_id=child.id, timestamp=datetime.fromisoformat(l["timestamp"]),
+            child_id=child.id, timestamp=to_wib_naive(l["timestamp"]),
             duration_minutes=l.get("duration_minutes"), volume_ml=l.get("volume_ml"),
             breast_side=l.get("breast_side"), notes=l.get("notes"),
         ))
 
     for l in data.get("activity_logs", []):
         db.session.add(ActivityLog(
-            child_id=child.id, timestamp=datetime.fromisoformat(l["timestamp"]),
+            child_id=child.id, timestamp=to_wib_naive(l["timestamp"]),
             activity_type=l["activity_type"], duration_minutes=l.get("duration_minutes"),
             notes=l.get("notes"),
         ))
 
     for l in data.get("temperature_logs", []):
         db.session.add(TemperatureLog(
-            child_id=child.id, timestamp=datetime.fromisoformat(l["timestamp"]),
+            child_id=child.id, timestamp=to_wib_naive(l["timestamp"]),
             temperature_celsius=l["temperature_celsius"], method=l.get("method", "ketiak"),
             notes=l.get("notes"),
         ))
@@ -309,7 +311,7 @@ def import_json():
             illness_id = illness_objs[local_id].id
         db.session.add(MedicationLog(
             child_id=child.id, illness_id=illness_id,
-            timestamp=datetime.fromisoformat(l["timestamp"]),
+            timestamp=to_wib_naive(l["timestamp"]),
             medication_name=l["medication_name"], dosage=l.get("dosage"), notes=l.get("notes"),
         ))
 
@@ -333,7 +335,7 @@ def import_json():
 
     for l in data.get("mood_logs", []):
         db.session.add(MoodLog(
-            child_id=child.id, timestamp=datetime.fromisoformat(l["timestamp"]),
+            child_id=child.id, timestamp=to_wib_naive(l["timestamp"]),
             mood=l["mood"], notes=l.get("notes"),
         ))
 

@@ -23,7 +23,14 @@ def to_wib_naive(iso_str):
     Parse ISO string dari client. Kalau ada info timezone (mis. browser kirim
     .toISOString() yang selalu UTC dengan 'Z'), convert ke WIB dulu.
     Kalau naive (tanpa timezone), anggap sudah wall-clock WIB apa adanya.
+
+    Catatan: datetime.fromisoformat() baru bisa parsing akhiran 'Z' langsung
+    mulai Python 3.11 — di versi lebih lama (mis. 3.10 yang umum dipakai di
+    PythonAnywhere) itu bikin ValueError. Makanya 'Z' diganti '+00:00' dulu
+    manual, biar konsisten jalan di semua versi Python 3.x.
     """
+    if iso_str.endswith("Z"):
+        iso_str = iso_str[:-1] + "+00:00"
     dt = datetime.fromisoformat(iso_str)
     if dt.tzinfo is None:
         return dt
