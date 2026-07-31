@@ -10,6 +10,7 @@ from extensions import db
 from models import Child, VaccineSchedule, ChildVaccination, ChildCaregiver, ChildInvite, User
 from utils.timezone_utils import today_wib
 from utils.access import get_accessible_child, get_accessible_children, get_caregiver_role
+from utils.auth import get_current_user_id
 
 children_bp = Blueprint("children", __name__)
 
@@ -18,7 +19,7 @@ MAX_PHOTO_SIZE_MB = 5
 
 
 def _require_login():
-    return session.get("user_id")
+    return get_current_user_id()
 
 
 def _owned_child(child_id, user_id):

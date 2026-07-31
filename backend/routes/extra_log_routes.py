@@ -3,6 +3,7 @@ from flask import Blueprint, request, jsonify, session
 from extensions import db
 from models import Child, PumpingLog, ActivityLog
 from utils.access import get_accessible_child
+from utils.auth import get_current_user_id
 from utils.timezone_utils import now_wib, today_wib, to_wib_naive
 
 extra_log_bp = Blueprint("extra_log", __name__)
@@ -11,7 +12,7 @@ ACTIVITY_TYPES = {"stroll", "bathing"}
 
 
 def _get_owned_child_or_none(child_id):
-    user_id = session.get("user_id")
+    user_id = get_current_user_id()
     if not user_id:
         return None
     return get_accessible_child(child_id, user_id)

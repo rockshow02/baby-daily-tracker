@@ -3,67 +3,150 @@ from datetime import datetime
 from flask import Blueprint, request, jsonify, session
 
 from extensions import db
-from models import Child, MoodLog, MilestoneLog
+from models import Child, DoctorVisitLog, TemperatureLog, IllnessLog, MedicationLog
 from utils.access import get_accessible_child
-from utils.timezone_utils import now_wib, to_wib_naive
-from utils.milestone_reference import evaluate_milestone, MILESTONE_REFERENCE
+from utils.auth import get_current_user_id
+from utils.timezone_utils import now_wib, today_wib, to_wib_naive
+from utils.temperature_calc import classify_temperature
 
-mood_milestone_bp = Blueprint("mood_milestone", __name__)
-
-VALID_MOODS = {"ceria", "baik", "sedih", "menangis"}
-VALID_MILESTONE_TYPES = set(MILESTONE_REFERENCE.keys()) | {"custom"}
+health_bp = Blueprint("health", __name__)
 
 
 def _owned_child(child_id):
-    user_id = session.get("user_id")
+    user_id = get_current_user_id()
     if not user_id:
         return None
     return get_accessible_child(child_id, user_id)
 
 
-# ---------- MOOD ----------
+def _parse_date(date_str):
+    return datetime.strptime(date_str, "%Y-%m-%d").date()
 
-@mood_milestone_bp.route("/children/<int:child_id>/mood-logs", methods=["GET"])
-def list_mood_logs(child_id):
+
+# ---------- KUNJUNGAN DOKTER ----------
+
+@health_bp.route("/children/<int:child_id>/doctor-visits", methods=["GET"])
+def list_doctor_visits(child_id):
     child = _owned_child(child_id)
     if not child:
         return jsonify({"error": "Anak tidak ditemukan"}), 404
-
-    date_str = request.args.get("date")
-    query = MoodLog.query.filter_by(child_id=child_id)
-    if date_str:
-        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        query = query.filter(db.func.date(MoodLog.timestamp) == target_date)
-
-    logs = query.order_by(MoodLog.timestamp.desc()).limit(200).all()
-    return jsonify([log.to_dict() for log in logs])
+    visits = (
+        DoctorVisitLog.query.filter_by(child_id=child_id)
+        .order_by(DoctorVisitLog.visit_date.desc())
+        .all()
+    )
+    return jsonify([v.to_dict() for v in visits])
 
 
-@mood_milestone_bp.route("/children/<int:child_id>/mood-logs", methods=["POST"])
-def create_mood_log(child_id):
+@health_bp.route("/children/<int:child_id>/doctor-visits", methods=["POST"])
+def create_doctor_visit(child_id):
     child = _owned_child(child_id)
     if not child:
         return jsonify({"error": "Anak tidak ditemukan"}), 404
 
     data = request.get_json() or {}
-    mood = data.get("mood")
-    if mood not in VALID_MOODS:
-        return jsonify({"error": f"mood harus salah satu dari: {', '.join(VALID_MOODS)}"}), 400
+    if not data.get("visit_date"):
+        return jsonify({"error": "visit_date wajib diisi"}), 400
 
-    log = MoodLog(
+    visit = DoctorVisitLog(
+        child_id=child_id,
+        visit_date=_parse_date(data["visit_date"]),
+        doctor_name=data.get("doctor_name"),
+        clinic_name=data.get("clinic_name"),
+        reason=data.get("reason"),
+        diagnosis=data.get("diagnosis"),
+        next_visit_date=_parse_date(data["next_visit_date"]) if data.get("next_visit_date") else None,
+        notes=data.get("notes"),
+    )
+    db.session.add(visit)
+    db.session.commit()
+    return jsonify(visit.to_dict()), 201
+
+
+@health_bp.route("/doctor-visits/<int:visit_id>", methods=["PUT", "DELETE"])
+def update_or_delete_doctor_visit(visit_id):
+    visit = DoctorVisitLog.query.get_or_404(visit_id)
+    child = _owned_child(visit.child_id)
+    if not child:
+        return jsonify({"error": "Tidak diizinkan"}), 403
+
+    if request.method == "DELETE":
+        db.session.delete(visit)
+        db.session.commit()
+        return jsonify({"success": True})
+
+    data = request.get_json() or {}
+    if "visit_date" in data:
+        visit.visit_date = _parse_date(data["visit_date"])
+    if "doctor_name" in data:
+        visit.doctor_name = data["doctor_name"]
+    if "clinic_name" in data:
+        visit.clinic_name = data["clinic_name"]
+    if "reason" in data:
+        visit.reason = data["reason"]
+    if "diagnosis" in data:
+        visit.diagnosis = data["diagnosis"]
+    if "next_visit_date" in data:
+        visit.next_visit_date = _parse_date(data["next_visit_date"]) if data["next_visit_date"] else None
+    if "notes" in data:
+        visit.notes = data["notes"]
+    db.session.commit()
+    return jsonify(visit.to_dict())
+
+
+# ---------- SUHU TUBUH ----------
+
+@health_bp.route("/children/<int:child_id>/temperature-logs", methods=["GET"])
+def list_temperature_logs(child_id):
+    child = _owned_child(child_id)
+    if not child:
+        return jsonify({"error": "Anak tidak ditemukan"}), 404
+
+    logs = (
+        TemperatureLog.query.filter_by(child_id=child_id)
+        .order_by(TemperatureLog.timestamp.desc())
+        .limit(100)
+        .all()
+    )
+    result = []
+    for log in logs:
+        data = log.to_dict()
+        data["status"] = classify_temperature(log.temperature_celsius, log.method)
+        result.append(data)
+    return jsonify(result)
+
+
+@health_bp.route("/children/<int:child_id>/temperature-logs", methods=["POST"])
+def create_temperature_log(child_id):
+    child = _owned_child(child_id)
+    if not child:
+        return jsonify({"error": "Anak tidak ditemukan"}), 404
+
+    data = request.get_json() or {}
+    temp = data.get("temperature_celsius")
+    if temp is None:
+        return jsonify({"error": "temperature_celsius wajib diisi"}), 400
+    if not (30 <= float(temp) <= 43):
+        return jsonify({"error": "Suhu tidak wajar (30-43°C)"}), 400
+
+    log = TemperatureLog(
         child_id=child_id,
         timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
-        mood=mood,
+        temperature_celsius=temp,
+        method=data.get("method", "ketiak"),
         notes=data.get("notes"),
     )
     db.session.add(log)
     db.session.commit()
-    return jsonify(log.to_dict()), 201
+
+    result = log.to_dict()
+    result["status"] = classify_temperature(log.temperature_celsius, log.method)
+    return jsonify(result), 201
 
 
-@mood_milestone_bp.route("/mood-logs/<int:log_id>", methods=["PUT", "DELETE"])
-def update_or_delete_mood_log(log_id):
-    log = MoodLog.query.get_or_404(log_id)
+@health_bp.route("/temperature-logs/<int:log_id>", methods=["PUT", "DELETE"])
+def update_or_delete_temperature_log(log_id):
+    log = TemperatureLog.query.get_or_404(log_id)
     child = _owned_child(log.child_id)
     if not child:
         return jsonify({"error": "Tidak diizinkan"}), 403
@@ -76,81 +159,68 @@ def update_or_delete_mood_log(log_id):
     data = request.get_json() or {}
     if "timestamp" in data:
         log.timestamp = to_wib_naive(data["timestamp"])
-    if "mood" in data:
-        if data["mood"] not in VALID_MOODS:
-            return jsonify({"error": f"mood harus salah satu dari: {', '.join(VALID_MOODS)}"}), 400
-        log.mood = data["mood"]
+    if "temperature_celsius" in data:
+        temp = data["temperature_celsius"]
+        if not (30 <= float(temp) <= 43):
+            return jsonify({"error": "Suhu tidak wajar (30-43°C)"}), 400
+        log.temperature_celsius = temp
+    if "method" in data:
+        log.method = data["method"]
     if "notes" in data:
         log.notes = data["notes"]
     db.session.commit()
-    return jsonify(log.to_dict())
+
+    result = log.to_dict()
+    result["status"] = classify_temperature(log.temperature_celsius, log.method)
+    return jsonify(result)
 
 
-# ---------- MILESTONE ----------
+# ---------- SAKIT / PENYAKIT ----------
 
-def _age_months_at(birth_date, on_date):
-    days = (on_date - birth_date).days
-    return days / 30.4375
-
-
-@mood_milestone_bp.route("/children/<int:child_id>/milestone-logs", methods=["GET"])
-def list_milestone_logs(child_id):
+@health_bp.route("/children/<int:child_id>/illness-logs", methods=["GET"])
+def list_illness_logs(child_id):
     child = _owned_child(child_id)
     if not child:
         return jsonify({"error": "Anak tidak ditemukan"}), 404
-
     logs = (
-        MilestoneLog.query.filter_by(child_id=child_id)
-        .order_by(MilestoneLog.achieved_date.desc())
+        IllnessLog.query.filter_by(child_id=child_id)
+        .order_by(IllnessLog.start_date.desc())
         .all()
     )
     result = []
     for log in logs:
         data = log.to_dict()
-        age_months = _age_months_at(child.birth_date, log.achieved_date)
-        data["age_months"] = round(age_months, 1)
-        data["evaluation"] = evaluate_milestone(log.milestone_type, age_months)
+        data["medications"] = [m.to_dict() for m in log.medications]
         result.append(data)
     return jsonify(result)
 
 
-@mood_milestone_bp.route("/children/<int:child_id>/milestone-logs", methods=["POST"])
-def create_milestone_log(child_id):
+@health_bp.route("/children/<int:child_id>/illness-logs", methods=["POST"])
+def create_illness_log(child_id):
     child = _owned_child(child_id)
     if not child:
         return jsonify({"error": "Anak tidak ditemukan"}), 404
 
     data = request.get_json() or {}
-    milestone_type = data.get("milestone_type")
-    if milestone_type not in VALID_MILESTONE_TYPES:
-        return jsonify({"error": f"milestone_type harus salah satu dari: {', '.join(VALID_MILESTONE_TYPES)}"}), 400
-    if milestone_type == "custom" and not data.get("custom_label"):
-        return jsonify({"error": "custom_label wajib diisi untuk milestone custom"}), 400
-    if not data.get("achieved_date"):
-        return jsonify({"error": "achieved_date wajib diisi"}), 400
+    if not data.get("illness_name") or not data.get("start_date"):
+        return jsonify({"error": "illness_name dan start_date wajib diisi"}), 400
 
-    achieved_date = datetime.strptime(data["achieved_date"], "%Y-%m-%d").date()
-
-    log = MilestoneLog(
+    log = IllnessLog(
         child_id=child_id,
-        milestone_type=milestone_type,
-        custom_label=data.get("custom_label") if milestone_type == "custom" else None,
-        achieved_date=achieved_date,
+        illness_name=data["illness_name"],
+        start_date=_parse_date(data["start_date"]),
+        end_date=_parse_date(data["end_date"]) if data.get("end_date") else None,
+        symptoms=data.get("symptoms"),
         notes=data.get("notes"),
     )
     db.session.add(log)
     db.session.commit()
-
-    result = log.to_dict()
-    age_months = _age_months_at(child.birth_date, achieved_date)
-    result["age_months"] = round(age_months, 1)
-    result["evaluation"] = evaluate_milestone(milestone_type, age_months)
-    return jsonify(result), 201
+    return jsonify(log.to_dict()), 201
 
 
-@mood_milestone_bp.route("/milestone-logs/<int:log_id>", methods=["PUT", "DELETE"])
-def update_or_delete_milestone_log(log_id):
-    log = MilestoneLog.query.get_or_404(log_id)
+@health_bp.route("/illness-logs/<int:log_id>", methods=["PUT", "DELETE"])
+def update_or_delete_illness_log(log_id):
+    log = IllnessLog.query.get_or_404(log_id)
     child = _owned_child(log.child_id)
     if not child:
         return jsonify({"error": "Tidak diizinkan"}), 403
@@ -161,26 +231,88 @@ def update_or_delete_milestone_log(log_id):
         return jsonify({"success": True})
 
     data = request.get_json() or {}
-    if "milestone_type" in data:
-        if data["milestone_type"] not in VALID_MILESTONE_TYPES:
-            return jsonify({"error": f"milestone_type harus salah satu dari: {', '.join(VALID_MILESTONE_TYPES)}"}), 400
-        log.milestone_type = data["milestone_type"]
-    if "custom_label" in data:
-        log.custom_label = data["custom_label"] if log.milestone_type == "custom" else None
-    if "achieved_date" in data:
-        log.achieved_date = datetime.strptime(data["achieved_date"], "%Y-%m-%d").date()
+    if "illness_name" in data:
+        log.illness_name = data["illness_name"]
+    if "start_date" in data:
+        log.start_date = _parse_date(data["start_date"])
+    if "end_date" in data:
+        # dipakai buat tandai "sudah sembuh"
+        log.end_date = _parse_date(data["end_date"]) if data["end_date"] else None
+    if "symptoms" in data:
+        log.symptoms = data["symptoms"]
     if "notes" in data:
         log.notes = data["notes"]
     db.session.commit()
-
-    result = log.to_dict()
-    age_months = _age_months_at(child.birth_date, log.achieved_date)
-    result["age_months"] = round(age_months, 1)
-    result["evaluation"] = evaluate_milestone(log.milestone_type, age_months)
-    return jsonify(result)
+    return jsonify(log.to_dict())
 
 
-@mood_milestone_bp.route("/milestone-reference", methods=["GET"])
-def milestone_reference():
-    """Daftar tipe milestone standar + acuannya, buat ditampilkan di form."""
-    return jsonify(MILESTONE_REFERENCE)
+# ---------- OBAT ----------
+
+@health_bp.route("/children/<int:child_id>/medication-logs", methods=["GET"])
+def list_medication_logs(child_id):
+    child = _owned_child(child_id)
+    if not child:
+        return jsonify({"error": "Anak tidak ditemukan"}), 404
+
+    query = MedicationLog.query.filter_by(child_id=child_id)
+    date_str = request.args.get("date")
+    if date_str:
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        query = query.filter(db.func.date(MedicationLog.timestamp) == target_date)
+
+    logs = query.order_by(MedicationLog.timestamp.desc()).limit(100).all()
+    return jsonify([m.to_dict() for m in logs])
+
+
+@health_bp.route("/children/<int:child_id>/medication-logs", methods=["POST"])
+def create_medication_log(child_id):
+    child = _owned_child(child_id)
+    if not child:
+        return jsonify({"error": "Anak tidak ditemukan"}), 404
+
+    data = request.get_json() or {}
+    if not data.get("medication_name"):
+        return jsonify({"error": "medication_name wajib diisi"}), 400
+
+    illness_id = data.get("illness_id")
+    if illness_id:
+        illness = IllnessLog.query.filter_by(id=illness_id, child_id=child_id).first()
+        if not illness:
+            return jsonify({"error": "illness_id tidak valid"}), 400
+
+    log = MedicationLog(
+        child_id=child_id,
+        illness_id=illness_id,
+        medication_name=data["medication_name"],
+        dosage=data.get("dosage"),
+        timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
+        notes=data.get("notes"),
+    )
+    db.session.add(log)
+    db.session.commit()
+    return jsonify(log.to_dict()), 201
+
+
+@health_bp.route("/medication-logs/<int:log_id>", methods=["PUT", "DELETE"])
+def update_or_delete_medication_log(log_id):
+    log = MedicationLog.query.get_or_404(log_id)
+    child = _owned_child(log.child_id)
+    if not child:
+        return jsonify({"error": "Tidak diizinkan"}), 403
+
+    if request.method == "DELETE":
+        db.session.delete(log)
+        db.session.commit()
+        return jsonify({"success": True})
+
+    data = request.get_json() or {}
+    if "timestamp" in data:
+        log.timestamp = to_wib_naive(data["timestamp"])
+    if "medication_name" in data:
+        log.medication_name = data["medication_name"]
+    if "dosage" in data:
+        log.dosage = data["dosage"]
+    if "notes" in data:
+        log.notes = data["notes"]
+    db.session.commit()
+    return jsonify(log.to_dict())

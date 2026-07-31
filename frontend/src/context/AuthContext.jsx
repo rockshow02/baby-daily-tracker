@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState } from "react";
-import { api } from "../api/client";
+import { api, setToken, clearToken, getToken } from "../api/client";
 
 const AuthContext = createContext(null);
 
@@ -8,28 +8,43 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    // kalau nggak ada token tersimpan sama sekali, nggak usah nembak /me
+    // (biar langsung ke layar login, nggak nunggu network round-trip percuma)
+    if (!getToken()) {
+      setLoading(false);
+      return;
+    }
     api
       .me()
       .then(setUser)
-      .catch(() => setUser(null))
+      .catch(() => {
+        setUser(null);
+        clearToken();
+      })
       .finally(() => setLoading(false));
   }, []);
 
   const login = async (email, password) => {
     const u = await api.login({ email, password });
+    setToken(u.token);
     setUser(u);
     return u;
   };
 
   const register = async (name, email, password) => {
     const u = await api.register({ name, email, password });
+    setToken(u.token);
     setUser(u);
     return u;
   };
 
   const logout = async () => {
-    await api.logout();
-    setUser(null);
+    try {
+      await api.logout();
+    } finally {
+      clearToken();
+      setUser(null);
+    }
   };
 
   return (

@@ -5,6 +5,7 @@ from flask import Blueprint, request, jsonify, session
 from extensions import db
 from models import Child, GrowthMeasurement
 from utils.access import get_accessible_child
+from utils.auth import get_current_user_id
 from utils.timezone_utils import today_wib
 from utils.growth_calc import evaluate_measurement, get_reference, value_at_zscore
 
@@ -12,7 +13,7 @@ growth_bp = Blueprint("growth", __name__)
 
 
 def _owned_child(child_id):
-    user_id = session.get("user_id")
+    user_id = get_current_user_id()
     if not user_id:
         return None
     return get_accessible_child(child_id, user_id)

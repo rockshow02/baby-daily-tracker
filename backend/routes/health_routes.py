@@ -5,6 +5,7 @@ from flask import Blueprint, request, jsonify, session
 from extensions import db
 from models import Child, DoctorVisitLog, TemperatureLog, IllnessLog, MedicationLog
 from utils.access import get_accessible_child
+from utils.auth import get_current_user_id
 from utils.timezone_utils import now_wib, today_wib, to_wib_naive
 from utils.temperature_calc import classify_temperature
 
@@ -12,7 +13,7 @@ health_bp = Blueprint("health", __name__)
 
 
 def _owned_child(child_id):
-    user_id = session.get("user_id")
+    user_id = get_current_user_id()
     if not user_id:
         return None
     return get_accessible_child(child_id, user_id)

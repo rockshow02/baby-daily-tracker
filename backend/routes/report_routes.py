@@ -14,6 +14,7 @@ from models import (
     DoctorVisitLog, IllnessLog,
 )
 from utils.access import get_accessible_child
+from utils.auth import get_current_user_id
 from utils.timezone_utils import today_wib
 from utils.growth_calc import evaluate_measurement
 
@@ -21,7 +22,7 @@ report_bp = Blueprint("report", __name__)
 
 
 def _owned_child(child_id):
-    user_id = session.get("user_id")
+    user_id = get_current_user_id()
     if not user_id:
         return None
     return get_accessible_child(child_id, user_id)

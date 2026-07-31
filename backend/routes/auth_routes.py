@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify, session
 
 from extensions import db
 from models import User
+from utils.auth import generate_token, get_current_user_id
 
 auth_bp = Blueprint("auth", __name__)
 
@@ -28,7 +29,9 @@ def register():
     session.permanent = True
     session["user_id"] = user.id
 
-    return jsonify(user.to_dict()), 201
+    result = user.to_dict()
+    result["token"] = generate_token(user.id)
+    return jsonify(result), 201
 
 
 @auth_bp.route("/login", methods=["POST"])
@@ -43,7 +46,10 @@ def login():
 
     session.permanent = True
     session["user_id"] = user.id
-    return jsonify(user.to_dict())
+
+    result = user.to_dict()
+    result["token"] = generate_token(user.id)
+    return jsonify(result)
 
 
 @auth_bp.route("/logout", methods=["POST"])
@@ -54,7 +60,7 @@ def logout():
 
 @auth_bp.route("/me", methods=["GET"])
 def me():
-    user_id = session.get("user_id")
+    user_id = get_current_user_id()
     if not user_id:
         return jsonify({"error": "Belum login"}), 401
     user = User.query.get(user_id)
@@ -66,7 +72,7 @@ def me():
 
 @auth_bp.route("/me", methods=["PUT"])
 def update_me():
-    user_id = session.get("user_id")
+    user_id = get_current_user_id()
     if not user_id:
         return jsonify({"error": "Belum login"}), 401
     user = User.query.get(user_id)
@@ -85,7 +91,7 @@ def update_me():
 
 @auth_bp.route("/me/password", methods=["PUT"])
 def change_password():
-    user_id = session.get("user_id")
+    user_id = get_current_user_id()
     if not user_id:
         return jsonify({"error": "Belum login"}), 401
     user = User.query.get(user_id)

@@ -1,9 +1,27 @@
 const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
+const TOKEN_KEY = "babytracker_token";
+
+export function getToken() {
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+export function setToken(token) {
+  if (token) localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function clearToken() {
+  localStorage.removeItem(TOKEN_KEY);
+}
+
 async function request(path, options = {}) {
+  const token = getToken();
+  const headers = { "Content-Type": "application/json", ...options.headers };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
   const res = await fetch(`${BASE_URL}${path}`, {
     credentials: "include",
-    headers: { "Content-Type": "application/json" },
+    headers,
     ...options,
   });
 
@@ -57,9 +75,12 @@ export const api = {
   uploadChildPhoto: async (childId, file) => {
     const formData = new FormData();
     formData.append("photo", file);
+    const token = getToken();
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
     const res = await fetch(`${BASE_URL}/children/${childId}/photo`, {
       method: "POST",
       credentials: "include",
+      headers,
       body: formData,
     });
     const data = await res.json();

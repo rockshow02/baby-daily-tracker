@@ -7,13 +7,14 @@ from models import (
     Child, FeedingLog, SleepLog, DiaperLog, PumpingLog, ActivityLog, MoodLog,
 )
 from utils.access import get_accessible_child
+from utils.auth import get_current_user_id
 from utils.timezone_utils import today_wib
 
 stats_bp = Blueprint("stats", __name__)
 
 
 def _owned_child(child_id):
-    user_id = session.get("user_id")
+    user_id = get_current_user_id()
     if not user_id:
         return None
     return get_accessible_child(child_id, user_id)

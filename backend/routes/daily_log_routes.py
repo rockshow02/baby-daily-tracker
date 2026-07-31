@@ -5,13 +5,14 @@ from flask import Blueprint, request, jsonify, session
 from extensions import db
 from models import Child, FeedingLog, SleepLog, DiaperLog
 from utils.access import get_accessible_child
+from utils.auth import get_current_user_id
 from utils.summary_engine import build_daily_summary
 
 daily_log_bp = Blueprint("daily_log", __name__)
 
 
 def _get_owned_child_or_none(child_id):
-    user_id = session.get("user_id")
+    user_id = get_current_user_id()
     if not user_id:
         return None
     return get_accessible_child(child_id, user_id)
