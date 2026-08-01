@@ -39,6 +39,11 @@ export default defineConfig({
         ],
       },
       workbox: {
+        // update service worker langsung ambil alih begitu ketemu versi baru,
+        // nggak nunggu semua tab lama ketutup dulu — biar HP nggak nyangkut
+        // di versi JS lama (khususnya Safari/iOS yang lumayan agresif nyimpen cache)
+        skipWaiting: true,
+        clientsClaim: true,
         // API request (ke backend Flask) jangan di-cache offline — data harus selalu fresh
         navigateFallbackDenylist: [/^\/api\//],
         globPatterns: ["**/*.{js,css,html,png,svg,ico}"],
