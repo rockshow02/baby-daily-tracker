@@ -3,6 +3,7 @@ from flask import Blueprint, request, jsonify, session
 from extensions import db
 from models import User
 from utils.auth import generate_token, get_current_user_id
+from utils.telegram import send_telegram_message
 
 auth_bp = Blueprint("auth", __name__)
 
@@ -85,8 +86,30 @@ def update_me():
         if not name:
             return jsonify({"error": "Nama tidak boleh kosong"}), 400
         user.name = name
+    if "telegram_chat_id" in data:
+        user.telegram_chat_id = (data["telegram_chat_id"] or "").strip() or None
     db.session.commit()
     return jsonify(user.to_dict())
+
+
+@auth_bp.route("/me/telegram/test", methods=["POST"])
+def test_telegram():
+    user_id = get_current_user_id()
+    if not user_id:
+        return jsonify({"error": "Belum login"}), 401
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"error": "Belum login"}), 401
+    if not user.telegram_chat_id:
+        return jsonify({"error": "Chat ID Telegram belum diisi"}), 400
+
+    ok = send_telegram_message(
+        user.telegram_chat_id,
+        f"👋 Halo {user.name}! Notifikasi Baby Daily Tracker berhasil tersambung.",
+    )
+    if not ok:
+        return jsonify({"error": "Gagal kirim pesan. Cek lagi Chat ID-nya, atau pastikan kamu udah pernah kirim pesan ke bot-nya dulu."}), 400
+    return jsonify({"success": True})
 
 
 @auth_bp.route("/me/password", methods=["PUT"])

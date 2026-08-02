@@ -12,6 +12,7 @@ class User(db.Model):
     name = db.Column(db.String(100), nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False, index=True)
     password_hash = db.Column(db.String(255), nullable=False)
+    telegram_chat_id = db.Column(db.String(50), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     children = db.relationship("Child", backref="owner", lazy="dynamic", cascade="all, delete-orphan")
@@ -23,7 +24,7 @@ class User(db.Model):
         return check_password_hash(self.password_hash, password)
 
     def to_dict(self):
-        return {"id": self.id, "name": self.name, "email": self.email}
+        return {"id": self.id, "name": self.name, "email": self.email, "telegram_chat_id": self.telegram_chat_id}
 
 
 class Child(db.Model):
@@ -631,6 +632,7 @@ class Article(db.Model):
     source = db.Column(db.String(100), nullable=True)  # cth. "IDAI", "WHO", "Kemenkes RI"
     source_url = db.Column(db.String(500), nullable=True)  # kalau diisi, card jadi redirect ke sumber asli
     order_index = db.Column(db.Integer, default=0)
+    last_tip_shown_at = db.Column(db.DateTime, nullable=True)  # buat rotasi tips di reminder Telegram
 
     def to_dict(self):
         return {

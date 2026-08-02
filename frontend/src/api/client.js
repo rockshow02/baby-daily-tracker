@@ -51,6 +51,7 @@ export const api = {
   logout: () => request("/auth/logout", { method: "POST" }),
   updateProfile: (payload) =>
     request("/auth/me", { method: "PUT", body: JSON.stringify(payload) }),
+  testTelegram: () => request("/auth/me/telegram/test", { method: "POST" }),
   changePassword: (currentPassword, newPassword) =>
     request("/auth/me/password", {
       method: "PUT",

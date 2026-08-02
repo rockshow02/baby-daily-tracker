@@ -3,6 +3,12 @@ import { api } from "../api/client";
 
 export default function UserProfileScreen({ user, onUserUpdated }) {
   const [name, setName] = useState(user.name);
+  const [telegramChatId, setTelegramChatId] = useState(user.telegram_chat_id || "");
+  const [savingTelegram, setSavingTelegram] = useState(false);
+  const [telegramSaved, setTelegramSaved] = useState(false);
+  const [telegramError, setTelegramError] = useState("");
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState("");
   const [savingName, setSavingName] = useState(false);
   const [nameSaved, setNameSaved] = useState(false);
   const [nameError, setNameError] = useState("");
@@ -72,6 +78,37 @@ export default function UserProfileScreen({ user, onUserUpdated }) {
     }
   };
 
+  const handleSaveTelegram = async (e) => {
+    e.preventDefault();
+    setTelegramError("");
+    setTelegramSaved(false);
+    setTestResult("");
+    setSavingTelegram(true);
+    try {
+      const updated = await api.updateProfile({ telegram_chat_id: telegramChatId });
+      onUserUpdated(updated);
+      setTelegramSaved(true);
+      setTimeout(() => setTelegramSaved(false), 2000);
+    } catch (err) {
+      setTelegramError(err.message);
+    } finally {
+      setSavingTelegram(false);
+    }
+  };
+
+  const handleTestTelegram = async () => {
+    setTestResult("");
+    setTesting(true);
+    try {
+      await api.testTelegram();
+      setTestResult("✓ Berhasil! Cek chat Telegram kamu.");
+    } catch (err) {
+      setTestResult("✗ " + err.message);
+    } finally {
+      setTesting(false);
+    }
+  };
+
   return (
     <div className="min-h-screen px-6 pt-8 pb-16">
       <h1 className="mb-1 text-3xl font-display text-ink">Profil Saya</h1>
@@ -127,6 +164,57 @@ export default function UserProfileScreen({ user, onUserUpdated }) {
             {savingPassword ? "Menyimpan..." : passwordSaved ? "Password Diperbarui ✓" : "Ganti Password"}
           </button>
         </form>
+      </div>
+
+      <div className="p-4 mb-4 border bg-void-card border-void-hairline rounded-xl2 shadow-soft">
+        <p className="mb-3 font-mono text-xs tracking-wider uppercase text-ink-faint">Notifikasi Telegram</p>
+        <details className="mb-3">
+          <summary className="text-xs cursor-pointer text-feed">Cara dapetin Chat ID</summary>
+          <ol className="mt-2 space-y-1 text-xs list-decimal list-inside text-ink-muted">
+            <li>Cari bot yang udah dibuatkan (tanya admin/pemilik project kalau belum tau namanya)</li>
+            <li>Kirim pesan apa aja ke bot itu, misal "halo"</li>
+            <li>
+              Buka link{" "}
+              <code className="px-1 rounded bg-void">
+                https://api.telegram.org/bot&lt;TOKEN&gt;/getUpdates
+              </code>{" "}
+              di browser (ganti TOKEN sesuai punya bot)
+            </li>
+            <li>Cari angka di bagian <code className="px-1 rounded bg-void">"chat":{"{"}"id": ...{"}"}</code>, itu Chat ID kamu</li>
+            <li>Paste angka itu di bawah ini</li>
+          </ol>
+        </details>
+        <form onSubmit={handleSaveTelegram} className="flex gap-2">
+          <input
+            type="text"
+            placeholder="Chat ID Telegram"
+            value={telegramChatId}
+            onChange={(e) => setTelegramChatId(e.target.value)}
+            className="flex-1 bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink text-sm placeholder:text-ink-faint"
+          />
+          <button
+            type="submit"
+            disabled={savingTelegram}
+            className="px-4 py-2.5 rounded-lg bg-feed text-white text-sm font-semibold disabled:opacity-50 whitespace-nowrap"
+          >
+            {savingTelegram ? "..." : telegramSaved ? "Tersimpan ✓" : "Simpan"}
+          </button>
+        </form>
+        {telegramError && <p className="mt-2 text-xs text-warn">{telegramError}</p>}
+        {user.telegram_chat_id && (
+          <button
+            onClick={handleTestTelegram}
+            disabled={testing}
+            className="mt-3 text-xs font-medium text-feed disabled:opacity-50"
+          >
+            {testing ? "Mengirim..." : "Kirim Pesan Test"}
+          </button>
+        )}
+        {testResult && <p className="mt-2 text-xs text-ink-muted">{testResult}</p>}
+        <p className="text-[11px] text-ink-faint mt-3">
+          Reminder harian bakal dikirim kalau: vaksin wajib jatuh tempo, kontrol dokter besok, atau
+          belum ada catatan menyusui 6+ jam.
+        </p>
       </div>
 
       <div className="p-4 border bg-void-card border-void-hairline rounded-xl2 shadow-soft">
