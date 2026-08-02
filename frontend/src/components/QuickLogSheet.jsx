@@ -1,4 +1,5 @@
 import { useState } from "react";
+import SteppedDateTimeInput from "./SteppedDateTimeInput";
 
 const toLocalInputValue = (date) => {
   const pad = (n) => String(n).padStart(2, "0");
@@ -140,12 +141,11 @@ export default function QuickLogSheet({ type, onClose, onSubmit, onDelete, editi
         {type !== "sleep" && (
           <div className="mb-4">
             <label className="block text-xs text-ink-muted mb-1.5">Waktu kejadian</label>
-            <input
-              type="datetime-local"
+            <SteppedDateTimeInput
               value={eventTime}
-              onChange={(e) => setEventTime(e.target.value)}
+              onChange={setEventTime}
               max={toLocalInputValue(new Date())}
-              className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink font-mono text-sm mb-2"
+              className="mb-2"
             />
             <div className="flex gap-2 flex-wrap">
               {[
@@ -254,21 +254,16 @@ export default function QuickLogSheet({ type, onClose, onSubmit, onDelete, editi
               ))}
             </div>
             <label className="block text-xs text-ink-muted mb-1.5">Mulai tidur</label>
-            <input
-              type="datetime-local"
+            <SteppedDateTimeInput
               value={startTime}
-              onChange={(e) => setStartTime(e.target.value)}
-              className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink font-mono text-sm"
+              onChange={setStartTime}
+              max={toLocalInputValue(new Date())}
+              className="mb-2"
             />
             <label className="block text-xs text-ink-muted mb-1.5">
               Selesai tidur <span className="text-ink-faint">(kosongkan jika masih tidur)</span>
             </label>
-            <input
-              type="datetime-local"
-              value={endTime}
-              onChange={(e) => setEndTime(e.target.value)}
-              className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink font-mono text-sm"
-            />
+            <SteppedDateTimeInput value={endTime} onChange={setEndTime} max={toLocalInputValue(new Date())} />
           </div>
         )}
 

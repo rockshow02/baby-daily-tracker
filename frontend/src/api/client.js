@@ -262,6 +262,8 @@ export const api = {
     }),
   feedingPrediction: (childId) =>
     request(`/children/${childId}/feeding-prediction`),
+  wakeWindowPrediction: (childId) =>
+    request(`/children/${childId}/wake-window-prediction`),
 
   // pumping (perah ASI)
   listPumping: (childId, date) =>
