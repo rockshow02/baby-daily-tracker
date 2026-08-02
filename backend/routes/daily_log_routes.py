@@ -4,11 +4,11 @@ from utils.timezone_utils import now_wib, today_wib, to_wib_naive
 from flask import Blueprint, request, jsonify, session
 
 from extensions import db
-from models import Child, FeedingLog, SleepLog, DiaperLog, User
+from models import Child, FeedingLog, SleepLog, DiaperLog, User, WakeWindowGuideline
 from utils.telegram import notify_other_caregivers
 from utils.access import get_accessible_child
 from utils.auth import get_current_user_id
-from utils.summary_engine import build_daily_summary
+from utils.summary_engine import build_daily_summary, get_age_in_days
 
 daily_log_bp = Blueprint("daily_log", __name__)
 
@@ -348,4 +348,69 @@ def feeding_prediction(child_id):
         "minutes_until_next": round(minutes_until_next),
         "is_overdue": minutes_until_next < 0,
         "sample_size": len(recent_logs),
+    })
+
+
+@daily_log_bp.route("/children/<int:child_id>/wake-window-prediction", methods=["GET"])
+def wake_window_prediction(child_id):
+    """
+    Prediksi kapan bayi kemungkinan mulai ngantuk lagi, berdasarkan acuan
+    "wake window" (rentang waktu terjaga yang umum) sesuai usia — BUKAN
+    dari rata-rata interval kayak feeding_prediction, karena wake window
+    itu emang lebih ke acuan tumbuh kembang standar per usia.
+    """
+    child = _get_owned_child_or_none(child_id)
+    if not child:
+        return jsonify({"error": "Anak tidak ditemukan"}), 404
+
+    last_sleep = SleepLog.query.filter_by(child_id=child_id).order_by(SleepLog.start_time.desc()).first()
+
+    if not last_sleep:
+        return jsonify({
+            "has_prediction": False,
+            "message": "Belum ada catatan tidur sama sekali.",
+        })
+
+    if not last_sleep.end_time:
+        return jsonify({
+            "has_prediction": False,
+            "is_currently_sleeping": True,
+            "sleep_started_at": last_sleep.start_time.isoformat() + "+07:00",
+            "message": "Lagi tidur sekarang.",
+        })
+
+    age_days = get_age_in_days(child.birth_date, today_wib())
+    guideline = (
+        WakeWindowGuideline.query.filter(
+            WakeWindowGuideline.age_min_days <= age_days,
+            WakeWindowGuideline.age_max_days >= age_days,
+        )
+        .first()
+    )
+
+    if not guideline:
+        return jsonify({
+            "has_prediction": False,
+            "message": "Belum ada acuan wake window buat usia ini.",
+        })
+
+    last_wake_at = last_sleep.end_time
+    predicted_min = last_wake_at + timedelta(minutes=guideline.min_wake_minutes)
+    predicted_max = last_wake_at + timedelta(minutes=guideline.max_wake_minutes)
+    now = now_wib()
+
+    minutes_until_min = (predicted_min - now).total_seconds() / 60
+    minutes_until_max = (predicted_max - now).total_seconds() / 60
+
+    return jsonify({
+        "has_prediction": True,
+        "is_currently_sleeping": False,
+        "last_wake_at": last_wake_at.isoformat() + "+07:00",
+        "predicted_min_at": predicted_min.isoformat() + "+07:00",
+        "predicted_max_at": predicted_max.isoformat() + "+07:00",
+        "minutes_until_min": round(minutes_until_min),
+        "minutes_until_max": round(minutes_until_max),
+        "is_overdue": minutes_until_max < 0,
+        "is_in_window": minutes_until_min <= 0 <= minutes_until_max,
+        "guideline_label": guideline.label,
     })

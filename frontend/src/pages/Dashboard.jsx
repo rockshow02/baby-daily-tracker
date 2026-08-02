@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { api } from "../api/client";
 import DailyRadialClock from "../components/DailyRadialClock";
 import FeedingPredictionCard from "../components/FeedingPredictionCard";
+import WakeWindowCard from "../components/WakeWindowCard";
 import NextVaccineCard from "../components/NextVaccineCard";
 import RelatedArticles from "../components/RelatedArticles";
 import StatusPill from "../components/StatusPill";
@@ -206,18 +207,18 @@ export default function Dashboard({ child, onOpenProfile }) {
               <img
                 src={api.photoUrl(child.photo_filename)}
                 alt={child.name}
-                className="object-cover w-12 h-12 border rounded-full border-void-hairline"
+                className="w-12 h-12 rounded-full object-cover border border-void-hairline"
               />
             )}
             <div>
               <p className="font-mono text-xs text-ink-faint tracking-[0.2em] uppercase">
                 {summary ? formatAge(summary.age_days) : "..."}
               </p>
-              <h1 className="text-3xl font-display text-ink">{child.nickname || child.name}</h1>
+              <h1 className="font-display text-3xl text-ink">{child.nickname || child.name}</h1>
             </div>
           </div>
-          <div className="flex items-center gap-2 px-1 py-1 border rounded-full bg-void-card border-void-hairline">
-            <button onClick={() => shiftDate(-1)} className="flex items-center justify-center w-8 h-8 text-ink-muted">
+          <div className="flex items-center gap-2 bg-void-card border border-void-hairline rounded-full px-1 py-1">
+            <button onClick={() => shiftDate(-1)} className="w-8 h-8 flex items-center justify-center text-ink-muted">
               ‹
             </button>
             <span className="font-mono text-xs text-ink-muted min-w-[64px] text-center">
@@ -226,7 +227,7 @@ export default function Dashboard({ child, onOpenProfile }) {
             <button
               onClick={() => shiftDate(1)}
               disabled={isToday}
-              className="flex items-center justify-center w-8 h-8 text-ink-muted disabled:opacity-30"
+              className="w-8 h-8 flex items-center justify-center text-ink-muted disabled:opacity-30"
             >
               ›
             </button>
@@ -260,26 +261,26 @@ export default function Dashboard({ child, onOpenProfile }) {
             <span className="text-base">🤱</span>
             <span className="text-[11px] text-ink font-semibold">{nursingCount}x</span>
           </div>
-          <div className="flex-shrink-0 w-px h-8 bg-void-hairline" />
+          <div className="w-px h-8 bg-void-hairline flex-shrink-0" />
           <div className="flex flex-col items-center flex-shrink-0">
             <span className="text-base">🍼</span>
             <span className="text-[11px] text-ink font-semibold">
-              {bottleCount}x <span className="font-normal text-ink-faint">{bottleMl}ml</span>
+              {bottleCount}x <span className="text-ink-faint font-normal">{bottleMl}ml</span>
             </span>
           </div>
-          <div className="flex-shrink-0 w-px h-8 bg-void-hairline" />
+          <div className="w-px h-8 bg-void-hairline flex-shrink-0" />
           <div className="flex flex-col items-center flex-shrink-0">
             <span className="text-base">🌙</span>
             <span className="text-[11px] text-ink font-semibold">
               {sleepH}j {sleepM}m
             </span>
           </div>
-          <div className="flex-shrink-0 w-px h-8 bg-void-hairline" />
+          <div className="w-px h-8 bg-void-hairline flex-shrink-0" />
           <div className="flex flex-col items-center flex-shrink-0">
             <span className="text-base">💧</span>
             <span className="text-[11px] text-ink font-semibold">{wetCount}x</span>
           </div>
-          <div className="flex-shrink-0 w-px h-8 bg-void-hairline" />
+          <div className="w-px h-8 bg-void-hairline flex-shrink-0" />
           <div className="flex flex-col items-center flex-shrink-0">
             <span className="text-base">💩</span>
             <span className="text-[11px] text-ink font-semibold">{dirtyCount}x</span>
@@ -294,6 +295,7 @@ export default function Dashboard({ child, onOpenProfile }) {
       {isToday && (
         <div className="px-6">
           <FeedingPredictionCard childId={child.id} refreshKey={feedingLogs.length} />
+          <WakeWindowCard childId={child.id} refreshKey={sleepLogs.length} />
         </div>
       )}
 
@@ -312,7 +314,7 @@ export default function Dashboard({ child, onOpenProfile }) {
           </div>
           <button
             onClick={onOpenProfile}
-            className="flex-shrink-0 ml-3 text-xs font-medium text-feed whitespace-nowrap"
+            className="text-xs text-feed font-medium whitespace-nowrap flex-shrink-0 ml-3"
           >
             Lihat Selengkapnya →
           </button>
@@ -320,12 +322,12 @@ export default function Dashboard({ child, onOpenProfile }) {
       </div>
 
       {/* radial clock */}
-      <div className="flex justify-center px-6 py-4">
+      <div className="px-6 py-4 flex justify-center">
         <DailyRadialClock feedingLogs={feedingLogs} sleepLogs={sleepLogs} diaperLogs={diaperLogs} />
       </div>
 
       {/* legend */}
-      <div className="flex justify-center gap-4 mb-6 -mt-2">
+      <div className="flex justify-center gap-4 -mt-2 mb-6">
         <span className="flex items-center gap-1.5 text-xs text-ink-muted">
           <span className="w-2 h-2 rounded-full bg-feed" /> Menyusui
         </span>
@@ -339,7 +341,7 @@ export default function Dashboard({ child, onOpenProfile }) {
 
       {/* status pills */}
       {summary?.guideline_label ? (
-        <div className="flex gap-3 px-6 pb-1 overflow-x-auto">
+        <div className="px-6 flex gap-3 overflow-x-auto pb-1">
           <StatusPill
             icon="🍼"
             title="Menyusui"
@@ -368,23 +370,23 @@ export default function Dashboard({ child, onOpenProfile }) {
           />
         </div>
       ) : (
-        summary?.message && <p className="px-6 text-sm text-center text-ink-faint">{summary.message}</p>
+        summary?.message && <p className="px-6 text-sm text-ink-faint text-center">{summary.message}</p>
       )}
 
       {/* riwayat */}
       <div className="px-6 mt-8">
         <h2 className="font-mono text-xs text-ink-faint tracking-[0.2em] uppercase mb-3">Riwayat</h2>
         {loading ? (
-          <p className="text-sm text-ink-faint">Memuat...</p>
+          <p className="text-ink-faint text-sm">Memuat...</p>
         ) : historyItems.length === 0 ? (
-          <p className="text-sm text-ink-faint">Belum ada catatan {isToday ? "hari ini" : "di tanggal ini"}.</p>
+          <p className="text-ink-faint text-sm">Belum ada catatan {isToday ? "hari ini" : "di tanggal ini"}.</p>
         ) : (
           <div className="space-y-2">
             {historyItems.map((item) => (
               <div
                 key={`${item.kind}-${item.id}`}
                 onClick={() => openEdit(item)}
-                className="flex items-center justify-between px-4 py-3 border cursor-pointer bg-void-card border-void-hairline rounded-xl2 active:bg-void-raised"
+                className="flex items-center justify-between bg-void-card border border-void-hairline rounded-xl2 px-4 py-3 cursor-pointer active:bg-void-raised"
               >
                 <div className="flex items-center gap-3">
                   <span className={`w-2 h-2 rounded-full ${dotColor(item.kind)}`} />
@@ -399,7 +401,7 @@ export default function Dashboard({ child, onOpenProfile }) {
                       {item.kind === "bathing" && "Mandi"}
                       {item.kind === "vitamin" && (item.medication_name || "Vitamin D")}
                     </p>
-                    <p className="font-mono text-xs text-ink-faint">
+                    <p className="text-xs text-ink-faint font-mono">
                       {item.kind === "sleep" ? sleepTimeRangeLabel(item, date) : timeOf(item.at)}
                       {item.kind === "feeding" && item.duration_minutes && ` · ${item.duration_minutes} mnt`}
                       {item.kind === "feeding" && item.volume_ml && ` · ${item.volume_ml} ml`}
@@ -431,7 +433,7 @@ export default function Dashboard({ child, onOpenProfile }) {
                       e.stopPropagation();
                       handleDelete(item.kind, item.id);
                     }}
-                    className="px-2 py-1 text-xs text-ink-faint"
+                    className="text-ink-faint text-xs px-2 py-1"
                     aria-label="Hapus catatan"
                   >
                     Hapus
@@ -448,7 +450,7 @@ export default function Dashboard({ child, onOpenProfile }) {
       </div>
 
       {/* quick log bar */}
-      <div className="fixed bottom-0 left-0 right-0 px-6 pt-4 pb-6 bg-gradient-to-t from-void via-void to-transparent">
+      <div className="fixed bottom-0 left-0 right-0 px-6 pb-6 pt-4 bg-gradient-to-t from-void via-void to-transparent">
         <div className="max-w-sm mx-auto grid grid-cols-4 gap-2.5">
           <button
             onClick={() => { setEditingItem(null); setSheetType("feeding"); }}
@@ -485,9 +487,9 @@ export default function Dashboard({ child, onOpenProfile }) {
       {showMoreMenu && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center sm:justify-center">
           <div className="absolute inset-0 bg-black/60" onClick={() => setShowMoreMenu(false)} />
-          <div className="relative w-full p-6 pb-8 border-t sm:max-w-sm bg-void-card sm:border border-void-hairline rounded-t-xl2 sm:rounded-xl2">
-            <div className="w-10 h-1 mx-auto mb-5 rounded-full bg-void-hairline sm:hidden" />
-            <h2 className="mb-5 text-2xl font-display text-ink">Aktivitas Lainnya</h2>
+          <div className="relative w-full sm:max-w-sm bg-void-card border-t sm:border border-void-hairline rounded-t-xl2 sm:rounded-xl2 p-6 pb-8">
+            <div className="w-10 h-1 bg-void-hairline rounded-full mx-auto mb-5 sm:hidden" />
+            <h2 className="font-display text-2xl text-ink mb-5">Aktivitas Lainnya</h2>
             <div className="grid grid-cols-3 gap-3">
               {OTHER_ACTIVITIES.map((a) => (
                 <button
@@ -497,7 +499,7 @@ export default function Dashboard({ child, onOpenProfile }) {
                     setEditingItem(null);
                     setSheetType(a.type);
                   }}
-                  className="flex flex-col items-center gap-2 py-4 text-xs border bg-void border-void-hairline rounded-xl2 text-ink-muted"
+                  className="flex flex-col items-center gap-2 bg-void border border-void-hairline rounded-xl2 py-4 text-xs text-ink-muted"
                 >
                   <span className="text-2xl">{a.icon}</span>
                   {a.label}
@@ -506,7 +508,7 @@ export default function Dashboard({ child, onOpenProfile }) {
             </div>
             <button
               onClick={() => setShowMoreMenu(false)}
-              className="w-full py-3 mt-6 text-sm border rounded-lg border-void-hairline text-ink-muted"
+              className="w-full py-3 mt-6 rounded-lg border border-void-hairline text-ink-muted text-sm"
             >
               Batal
             </button>

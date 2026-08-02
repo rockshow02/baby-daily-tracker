@@ -682,3 +682,29 @@ class Article(db.Model):
             "source": self.source,
             "source_url": self.source_url,
         }
+
+
+class WakeWindowGuideline(db.Model):
+    """
+    Tabel acuan statis (di-seed sekali, bukan data user) — rentang waktu
+    bayi biasanya bisa terjaga sebelum ngantuk lagi, per kelompok usia.
+    Acuan umum konsensus pediatric sleep (mirip yang dipakai fitur
+    "wake window"/"SweetSpot" di app-app tracker bayi populer).
+    """
+    __tablename__ = "wake_window_guidelines"
+
+    id = db.Column(db.Integer, primary_key=True)
+    age_min_days = db.Column(db.Integer, nullable=False)
+    age_max_days = db.Column(db.Integer, nullable=False)
+    label = db.Column(db.String(50), nullable=False)
+
+    min_wake_minutes = db.Column(db.Integer, nullable=False)
+    max_wake_minutes = db.Column(db.Integer, nullable=False)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "label": self.label,
+            "min_wake_minutes": self.min_wake_minutes,
+            "max_wake_minutes": self.max_wake_minutes,
+        }
