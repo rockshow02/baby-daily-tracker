@@ -270,7 +270,7 @@ export default function Dashboard({ child, onOpenProfile }) {
           </div>
           <div className="flex-shrink-0 w-px h-8 bg-void-hairline" />
           <div className="flex flex-col items-center flex-shrink-0">
-            <span className="text-base">💧</span>
+            <span className="text-base">🩲</span>
             <span className="text-[11px] text-ink font-semibold">{wetCount}x</span>
           </div>
           <div className="flex-shrink-0 w-px h-8 bg-void-hairline" />
@@ -353,7 +353,7 @@ export default function Dashboard({ child, onOpenProfile }) {
             status={summary.sleep.status}
           />
           <StatusPill
-            icon="💧"
+            icon="🩲"
             title="BAK (pipis)"
             actual={summary.wet_diaper.actual}
             unit="x"
@@ -403,6 +403,9 @@ export default function Dashboard({ child, onOpenProfile }) {
                         ` · ${item.duration_minutes} mnt`}
                       {(item.kind === "stroll" || item.kind === "bathing") && item.notes && ` · ${item.notes}`}
                     </p>
+                    {item.created_by_name && (
+                      <p className="text-[11px] text-ink-faint mt-0.5">oleh {item.created_by_name}</p>
+                    )}
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
@@ -459,7 +462,7 @@ export default function Dashboard({ child, onOpenProfile }) {
             onClick={() => { setEditingItem(null); setSheetType("diaper"); }}
             className="flex flex-col items-center gap-1.5 bg-diaper text-white rounded-xl2 py-3.5 font-medium text-xs"
           >
-            <span className="text-xl">💧</span>
+            <span className="text-xl">🩲</span>
             Popok
           </button>
           <button

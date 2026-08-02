@@ -4,10 +4,39 @@ const RING_FEED = RADIUS;
 const RING_SLEEP = RADIUS - 18;
 const RING_DIAPER = RADIUS - 36;
 
-// jam 0 diletakkan di atas (jam 12), searah jarum jam
+/**
+ * Ambil jam:menit dalam WIB, TIDAK bergantung timezone device — beda dari
+ * date.getHours()/getMinutes() yang ngikutin timezone device/browser.
+ * Kalau device nggak di-set WIB, itu bikin jarum & jam digital di sini
+ * nunjuk ke posisi yang salah.
+ */
+function wibHourMinute(date) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Jakarta",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  const map = {};
+  parts.forEach((p) => (map[p.type] = p.value));
+  return { hour: Number(map.hour), minute: Number(map.minute) };
+}
+
+// jam 0 diletakkan di atas (jam 12), searah jarum jam — dipakai buat
+// posisi TITIK aktivitas (menyusui/tidur/popok), skala 24 jam biar nggak
+// ketuker pagi vs sore/malam sepanjang hari
 function angleForTime(date) {
-  const hours = date.getHours() + date.getMinutes() / 60;
+  const { hour, minute } = wibHourMinute(date);
+  const hours = hour + minute / 60;
   return (hours / 24) * 360 - 90;
+}
+
+// khusus buat JARUM waktu sekarang: skala 12 jam kayak jam dinding beneran
+// (puter penuh tiap 12 jam), BEDA dari angleForTime yang 24 jam di atas
+function angleForNowHand(date) {
+  const { hour, minute } = wibHourMinute(date);
+  const hours12 = (hour % 12) + minute / 60;
+  return (hours12 / 12) * 360 - 90;
 }
 
 function pointOnRing(ring, angleDeg) {
@@ -27,9 +56,65 @@ function polarArc(ring, startAngle, endAngle) {
 
 const HOUR_MARKS = [0, 6, 12, 18];
 
+/**
+ * Titik-titik yang waktunya berdekatan (mis. 2x menyusui dalam beberapa
+ * menit) posisinya jadi nyaris sama persis di lingkaran dan saling
+ * ketumpuk. Fungsi ini "menyebarkan" titik yang sudutnya terlalu deket
+ * (di bawah MIN_GAP_DEG) dengan geser radius-nya dikit keluar secara
+ * bertahap, biar tetap semua kelihatan tanpa nutupin satu sama lain.
+ */
+function declutterAngles(items, baseRing) {
+  const MIN_GAP_DEG = 7;
+  const sorted = [...items].sort((a, b) => a.angle - b.angle);
+  const placed = [];
+
+  sorted.forEach((item) => {
+    let ring = baseRing;
+    let bump = 0;
+    // selama masih ketabrak sama titik yang udah ditempatin di ring yang sama, geser keluar
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const collision = placed.some(
+        (p) => p.ring === ring && Math.abs(p.angle - item.angle) < MIN_GAP_DEG
+      );
+      if (!collision) break;
+      bump += 1;
+      ring = baseRing + bump * 6;
+    }
+    placed.push({ ...item, ring });
+  });
+
+  return placed;
+}
+
 export default function DailyRadialClock({ feedingLogs, sleepLogs, diaperLogs }) {
   const now = new Date();
-  const nowAngle = angleForTime(now);
+  const nowAngle = angleForNowHand(now);
+
+  const feedPoints = declutterAngles(
+    feedingLogs.map((log) => ({ id: log.id, angle: angleForTime(new Date(log.timestamp)) })),
+    RING_FEED
+  );
+  const diaperPoints = declutterAngles(
+    diaperLogs.map((log) => ({ id: log.id, angle: angleForTime(new Date(log.timestamp)) })),
+    RING_DIAPER
+  );
+
+  // jarum ala jam dinding: bentuk lancip solid (lebar di pangkal, runcing
+  // di ujung) + ekor pendek di sisi berlawanan poros, kayak jam analog beneran
+  const handLength = RADIUS + 4;
+  const handTip = pointOnRing(handLength, nowAngle);
+  const handTail = pointOnRing(-14, nowAngle);
+  const handBaseWidth = 2;
+  const perpAngle = nowAngle + 90;
+  const baseLeft = {
+    x: CENTER + handBaseWidth * Math.cos((perpAngle * Math.PI) / 180),
+    y: CENTER + handBaseWidth * Math.sin((perpAngle * Math.PI) / 180),
+  };
+  const baseRight = {
+    x: CENTER - handBaseWidth * Math.cos((perpAngle * Math.PI) / 180),
+    y: CENTER - handBaseWidth * Math.sin((perpAngle * Math.PI) / 180),
+  };
 
   return (
     <div className="relative flex items-center justify-center">
@@ -83,34 +168,40 @@ export default function DailyRadialClock({ feedingLogs, sleepLogs, diaperLogs })
           );
         })}
 
-        {/* menyusui sebagai titik */}
-        {feedingLogs.map((log) => {
-          const p = pointOnRing(RING_FEED, angleForTime(new Date(log.timestamp)));
-          return <circle key={`feed-${log.id}`} cx={p.x} cy={p.y} r="4" fill="#FFA733" />;
+        {/* menyusui sebagai titik, disebar kalau ketumpuk */}
+        {feedPoints.map((pt) => {
+          const p = pointOnRing(pt.ring, pt.angle);
+          return <circle key={`feed-${pt.id}`} cx={p.x} cy={p.y} r="3.5" fill="#FFA733" stroke="#FFF8F0" strokeWidth="1" />;
         })}
 
-        {/* popok sebagai titik */}
-        {diaperLogs.map((log) => {
-          const p = pointOnRing(RING_DIAPER, angleForTime(new Date(log.timestamp)));
-          return <circle key={`diaper-${log.id}`} cx={p.x} cy={p.y} r="3.5" fill="#4FC9A8" />;
+        {/* popok sebagai titik, disebar kalau ketumpuk */}
+        {diaperPoints.map((pt) => {
+          const p = pointOnRing(pt.ring, pt.angle);
+          return <circle key={`diaper-${pt.id}`} cx={p.x} cy={p.y} r="3" fill="#4FC9A8" stroke="#FFF8F0" strokeWidth="1" />;
         })}
 
-        {/* jarum waktu sekarang */}
+        {/* jarum waktu sekarang: lancip solid + ekor kecil ala jam analog */}
+        <polygon
+          points={`${baseLeft.x},${baseLeft.y} ${baseRight.x},${baseRight.y} ${handTip.x},${handTip.y}`}
+          fill="#4A3F35"
+        />
         <line
           x1={CENTER}
           y1={CENTER}
-          x2={pointOnRing(RADIUS + 6, nowAngle).x}
-          y2={pointOnRing(RADIUS + 6, nowAngle).y}
+          x2={handTail.x}
+          y2={handTail.y}
           stroke="#4A3F35"
-          strokeWidth="1.5"
-          opacity="0.5"
+          strokeWidth="2"
+          strokeLinecap="round"
         />
+        <circle cx={CENTER} cy={CENTER} r="4" fill="#4A3F35" />
+        <circle cx={CENTER} cy={CENTER} r="1.6" fill="#FFF8F0" />
       </svg>
 
       <div className="absolute flex flex-col items-center">
-        <span className="font-mono text-xs text-ink-faint tracking-widest uppercase">Sekarang</span>
-        <span className="font-display text-3xl text-ink">
-          {now.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" })}
+        <span className="font-mono text-xs tracking-widest uppercase text-ink-faint">Sekarang</span>
+        <span className="text-3xl font-display text-ink">
+          {now.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Jakarta" })}
         </span>
       </div>
     </div>

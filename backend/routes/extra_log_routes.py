@@ -1,7 +1,8 @@
 from flask import Blueprint, request, jsonify, session
 
 from extensions import db
-from models import Child, PumpingLog, ActivityLog
+from models import Child, PumpingLog, ActivityLog, User
+from utils.telegram import notify_other_caregivers
 from utils.access import get_accessible_child
 from utils.auth import get_current_user_id
 from utils.timezone_utils import now_wib, today_wib, to_wib_naive
@@ -54,6 +55,7 @@ def create_pumping_log(child_id):
 
     data = request.get_json() or {}
     log = PumpingLog(
+        created_by_user_id=get_current_user_id(),
         child_id=child_id,
         timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
         duration_minutes=data.get("duration_minutes"),
@@ -63,6 +65,7 @@ def create_pumping_log(child_id):
     )
     db.session.add(log)
     db.session.commit()
+    notify_other_caregivers(child, get_current_user_id(), f"🍼 {User.query.get(get_current_user_id()).name} mencatat perah ASI untuk {child.nickname or child.name}.")
     return jsonify(log.to_dict()), 201
 
 
@@ -126,6 +129,7 @@ def create_activity_log(child_id):
         return jsonify({"error": f"activity_type harus salah satu dari: {', '.join(ACTIVITY_TYPES)}"}), 400
 
     log = ActivityLog(
+        created_by_user_id=get_current_user_id(),
         child_id=child_id,
         activity_type=activity_type,
         timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
@@ -134,6 +138,7 @@ def create_activity_log(child_id):
     )
     db.session.add(log)
     db.session.commit()
+    notify_other_caregivers(child, get_current_user_id(), f"🚶 {User.query.get(get_current_user_id()).name} mencatat aktivitas untuk {child.nickname or child.name}.")
     return jsonify(log.to_dict()), 201
 
 

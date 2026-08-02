@@ -3,7 +3,8 @@ from datetime import datetime
 from flask import Blueprint, request, jsonify, session
 
 from extensions import db
-from models import Child, MoodLog, MilestoneLog
+from models import Child, MoodLog, MilestoneLog, User
+from utils.telegram import notify_other_caregivers
 from utils.access import get_accessible_child
 from utils.auth import get_current_user_id
 from utils.timezone_utils import now_wib, to_wib_naive
@@ -52,6 +53,7 @@ def create_mood_log(child_id):
         return jsonify({"error": f"mood harus salah satu dari: {', '.join(VALID_MOODS)}"}), 400
 
     log = MoodLog(
+        created_by_user_id=get_current_user_id(),
         child_id=child_id,
         timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
         mood=mood,
@@ -59,6 +61,7 @@ def create_mood_log(child_id):
     )
     db.session.add(log)
     db.session.commit()
+    notify_other_caregivers(child, get_current_user_id(), f"😊 {User.query.get(get_current_user_id()).name} mencatat mood untuk {child.nickname or child.name}.")
     return jsonify(log.to_dict()), 201
 
 
@@ -133,6 +136,7 @@ def create_milestone_log(child_id):
     achieved_date = datetime.strptime(data["achieved_date"], "%Y-%m-%d").date()
 
     log = MilestoneLog(
+        created_by_user_id=get_current_user_id(),
         child_id=child_id,
         milestone_type=milestone_type,
         custom_label=data.get("custom_label") if milestone_type == "custom" else None,
@@ -141,6 +145,7 @@ def create_milestone_log(child_id):
     )
     db.session.add(log)
     db.session.commit()
+    notify_other_caregivers(child, get_current_user_id(), f"✨ {User.query.get(get_current_user_id()).name} mencatat momen penting untuk {child.nickname or child.name}.")
 
     result = log.to_dict()
     age_months = _age_months_at(child.birth_date, achieved_date)

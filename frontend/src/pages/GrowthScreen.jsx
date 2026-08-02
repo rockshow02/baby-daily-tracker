@@ -217,6 +217,9 @@ export default function GrowthScreen({ child }) {
                   {m.head_circumference_cm != null && ` · LK ${m.head_circumference_cm} cm`}
                 </p>
                 {m.notes && <p className="text-xs text-ink-faint mt-0.5">{m.notes}</p>}
+                {m.created_by_name && (
+                  <p className="text-[11px] text-ink-faint mt-0.5">oleh {m.created_by_name}</p>
+                )}
               </div>
               <button
                 onClick={(e) => {

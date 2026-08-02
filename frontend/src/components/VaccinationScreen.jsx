@@ -231,7 +231,7 @@ export default function VaccinationScreen({ child }) {
                       type="text"
                       value={notesValue}
                       onChange={(e) => setNotesValue(e.target.value)}
-                      placeholder="Catatan (opsional), cth. rekomendasi dr. Sarah"
+                      placeholder="Catatan (opsional), cth. rekomendasi dr. Erlin"
                       className="w-full bg-void border border-void-hairline rounded-lg px-2 py-1.5 text-ink text-xs placeholder:text-ink-faint"
                     />
                     <div className="flex items-center gap-2">
@@ -271,7 +271,7 @@ export default function VaccinationScreen({ child }) {
               type="text"
               value={confirmNotes}
               onChange={(e) => setConfirmNotes(e.target.value)}
-              placeholder="cth. Rekomendasi dr. Sarah, dipercepat karena akan bepergian"
+              placeholder="cth. Rekomendasi dr. Erlin, dipercepat karena akan bepergian"
               className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink placeholder:text-ink-faint text-sm mb-4"
             />
             <div className="flex gap-3">
