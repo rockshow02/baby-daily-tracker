@@ -30,6 +30,19 @@ COLUMNS_TO_ENSURE = [
     ("users", "telegram_chat_id", "VARCHAR(50)"),
     ("children", "nickname", "VARCHAR(30)"),
     ("articles", "last_tip_shown_at", "DATETIME"),
+    # fitur "log siapa yang catat" - atribusi per entri
+    ("feeding_logs", "created_by_user_id", "INTEGER"),
+    ("sleep_logs", "created_by_user_id", "INTEGER"),
+    ("diaper_logs", "created_by_user_id", "INTEGER"),
+    ("pumping_logs", "created_by_user_id", "INTEGER"),
+    ("activity_logs", "created_by_user_id", "INTEGER"),
+    ("growth_measurements", "created_by_user_id", "INTEGER"),
+    ("doctor_visit_logs", "created_by_user_id", "INTEGER"),
+    ("temperature_logs", "created_by_user_id", "INTEGER"),
+    ("illness_logs", "created_by_user_id", "INTEGER"),
+    ("medication_logs", "created_by_user_id", "INTEGER"),
+    ("mood_logs", "created_by_user_id", "INTEGER"),
+    ("milestone_logs", "created_by_user_id", "INTEGER"),
 ]
 
 

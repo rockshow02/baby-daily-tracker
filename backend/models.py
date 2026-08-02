@@ -81,6 +81,8 @@ class FeedingLog(db.Model):
 
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
 
     def to_dict(self):
         return {
@@ -92,6 +94,7 @@ class FeedingLog(db.Model):
             "volume_ml": self.volume_ml,
             "breast_side": self.breast_side,
             "notes": self.notes,
+            "created_by_name": self.creator.name if self.creator else None,
         }
 
 
@@ -108,6 +111,8 @@ class SleepLog(db.Model):
 
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
 
     @property
     def duration_minutes(self):
@@ -124,6 +129,7 @@ class SleepLog(db.Model):
             "sleep_type": self.sleep_type,
             "duration_minutes": self.duration_minutes,
             "notes": self.notes,
+            "created_by_name": self.creator.name if self.creator else None,
         }
 
 
@@ -143,6 +149,8 @@ class DiaperLog(db.Model):
 
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
 
     def to_dict(self):
         return {
@@ -153,6 +161,7 @@ class DiaperLog(db.Model):
             "consistency": self.consistency,
             "color": self.color,
             "notes": self.notes,
+            "created_by_name": self.creator.name if self.creator else None,
         }
 
 
@@ -276,6 +285,8 @@ class PumpingLog(db.Model):
 
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
 
     child = db.relationship("Child", backref=db.backref("pumping_logs", lazy="dynamic", cascade="all, delete-orphan"))
 
@@ -288,6 +299,7 @@ class PumpingLog(db.Model):
             "volume_ml": self.volume_ml,
             "breast_side": self.breast_side,
             "notes": self.notes,
+            "created_by_name": self.creator.name if self.creator else None,
         }
 
 
@@ -309,6 +321,8 @@ class ActivityLog(db.Model):
 
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
 
     child = db.relationship("Child", backref=db.backref("activity_logs", lazy="dynamic", cascade="all, delete-orphan"))
 
@@ -320,6 +334,7 @@ class ActivityLog(db.Model):
             "timestamp": self.timestamp.isoformat() + "+07:00",
             "duration_minutes": self.duration_minutes,
             "notes": self.notes,
+            "created_by_name": self.creator.name if self.creator else None,
         }
 
 
@@ -357,6 +372,8 @@ class GrowthMeasurement(db.Model):
 
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
 
     child = db.relationship(
         "Child", backref=db.backref("growth_measurements", lazy="dynamic", cascade="all, delete-orphan")
@@ -371,6 +388,7 @@ class GrowthMeasurement(db.Model):
             "height_cm": self.height_cm,
             "head_circumference_cm": self.head_circumference_cm,
             "notes": self.notes,
+            "created_by_name": self.creator.name if self.creator else None,
         }
 
 
@@ -390,6 +408,8 @@ class DoctorVisitLog(db.Model):
 
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
 
     child = db.relationship(
         "Child", backref=db.backref("doctor_visit_logs", lazy="dynamic", cascade="all, delete-orphan")
@@ -406,6 +426,7 @@ class DoctorVisitLog(db.Model):
             "diagnosis": self.diagnosis,
             "next_visit_date": self.next_visit_date.isoformat() if self.next_visit_date else None,
             "notes": self.notes,
+            "created_by_name": self.creator.name if self.creator else None,
         }
 
 
@@ -422,6 +443,8 @@ class TemperatureLog(db.Model):
 
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
 
     child = db.relationship(
         "Child", backref=db.backref("temperature_logs", lazy="dynamic", cascade="all, delete-orphan")
@@ -435,6 +458,7 @@ class TemperatureLog(db.Model):
             "temperature_celsius": self.temperature_celsius,
             "method": self.method,
             "notes": self.notes,
+            "created_by_name": self.creator.name if self.creator else None,
         }
 
 
@@ -452,6 +476,8 @@ class IllnessLog(db.Model):
 
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
 
     child = db.relationship(
         "Child", backref=db.backref("illness_logs", lazy="dynamic", cascade="all, delete-orphan")
@@ -470,6 +496,7 @@ class IllnessLog(db.Model):
             "symptoms": self.symptoms,
             "notes": self.notes,
             "is_ongoing": self.end_date is None,
+            "created_by_name": self.creator.name if self.creator else None,
         }
 
 
@@ -487,6 +514,8 @@ class MedicationLog(db.Model):
 
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
 
     child = db.relationship(
         "Child", backref=db.backref("medication_logs", lazy="dynamic", cascade="all, delete-orphan")
@@ -501,6 +530,7 @@ class MedicationLog(db.Model):
             "dosage": self.dosage,
             "timestamp": self.timestamp.isoformat() + "+07:00",
             "notes": self.notes,
+            "created_by_name": self.creator.name if self.creator else None,
         }
 
 
@@ -516,6 +546,8 @@ class MoodLog(db.Model):
 
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
 
     child = db.relationship("Child", backref=db.backref("mood_logs", lazy="dynamic", cascade="all, delete-orphan"))
 
@@ -526,6 +558,7 @@ class MoodLog(db.Model):
             "timestamp": self.timestamp.isoformat() + "+07:00",
             "mood": self.mood,
             "notes": self.notes,
+            "created_by_name": self.creator.name if self.creator else None,
         }
 
 
@@ -543,6 +576,8 @@ class MilestoneLog(db.Model):
 
     notes = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
 
     child = db.relationship(
         "Child", backref=db.backref("milestone_logs", lazy="dynamic", cascade="all, delete-orphan")
@@ -556,6 +591,7 @@ class MilestoneLog(db.Model):
             "custom_label": self.custom_label,
             "achieved_date": self.achieved_date.isoformat(),
             "notes": self.notes,
+            "created_by_name": self.creator.name if self.creator else None,
         }
 
 

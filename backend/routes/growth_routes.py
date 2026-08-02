@@ -3,7 +3,8 @@ from datetime import datetime
 from flask import Blueprint, request, jsonify, session
 
 from extensions import db
-from models import Child, GrowthMeasurement
+from models import Child, GrowthMeasurement, User
+from utils.telegram import notify_other_caregivers
 from utils.access import get_accessible_child
 from utils.auth import get_current_user_id
 from utils.timezone_utils import today_wib
@@ -83,6 +84,7 @@ def create_growth_measurement(child_id):
         return jsonify({"error": "Lingkar kepala tidak wajar (20-60 cm)"}), 400
 
     measurement = GrowthMeasurement(
+        created_by_user_id=get_current_user_id(),
         child_id=child_id,
         measured_date=datetime.strptime(measured_date_str, "%Y-%m-%d").date(),
         weight_kg=weight_kg,
@@ -92,6 +94,7 @@ def create_growth_measurement(child_id):
     )
     db.session.add(measurement)
     db.session.commit()
+    notify_other_caregivers(child, get_current_user_id(), f"📈 {User.query.get(get_current_user_id()).name} mencatat data pertumbuhan untuk {child.nickname or child.name}.")
     return jsonify(_enrich(measurement, child)), 201
 
 

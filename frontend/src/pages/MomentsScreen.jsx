@@ -131,6 +131,9 @@ export default function MomentsScreen({ child }) {
                       <div>
                         <p className="text-sm text-ink">{info?.label}</p>
                         <p className="font-mono text-xs text-ink-faint">{fmtDateTime(m.timestamp)}</p>
+                        {m.created_by_name && (
+                          <p className="text-[11px] text-ink-faint mt-0.5">oleh {m.created_by_name}</p>
+                        )}
                       </div>
                     </div>
                     <button
@@ -189,6 +192,9 @@ export default function MomentsScreen({ child }) {
                       </p>
                     )}
                     {ms.notes && <p className="mt-1 text-xs text-ink-muted">{ms.notes}</p>}
+                    {ms.created_by_name && (
+                      <p className="text-[11px] text-ink-faint mt-1">oleh {ms.created_by_name}</p>
+                    )}
                   </div>
                 );
               })}

@@ -3,7 +3,8 @@ from datetime import datetime
 from flask import Blueprint, request, jsonify, session
 
 from extensions import db
-from models import Child, DoctorVisitLog, TemperatureLog, IllnessLog, MedicationLog
+from models import Child, DoctorVisitLog, TemperatureLog, IllnessLog, MedicationLog, User
+from utils.telegram import notify_other_caregivers
 from utils.access import get_accessible_child
 from utils.auth import get_current_user_id
 from utils.timezone_utils import now_wib, today_wib, to_wib_naive
@@ -49,6 +50,7 @@ def create_doctor_visit(child_id):
         return jsonify({"error": "visit_date wajib diisi"}), 400
 
     visit = DoctorVisitLog(
+        created_by_user_id=get_current_user_id(),
         child_id=child_id,
         visit_date=_parse_date(data["visit_date"]),
         doctor_name=data.get("doctor_name"),
@@ -60,6 +62,7 @@ def create_doctor_visit(child_id):
     )
     db.session.add(visit)
     db.session.commit()
+    notify_other_caregivers(child, get_current_user_id(), f"🩺 {User.query.get(get_current_user_id()).name} mencatat kunjungan dokter untuk {child.nickname or child.name}.")
     return jsonify(visit.to_dict()), 201
 
 
@@ -130,6 +133,7 @@ def create_temperature_log(child_id):
         return jsonify({"error": "Suhu tidak wajar (30-43°C)"}), 400
 
     log = TemperatureLog(
+        created_by_user_id=get_current_user_id(),
         child_id=child_id,
         timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
         temperature_celsius=temp,
@@ -138,6 +142,7 @@ def create_temperature_log(child_id):
     )
     db.session.add(log)
     db.session.commit()
+    notify_other_caregivers(child, get_current_user_id(), f"🌡️ {User.query.get(get_current_user_id()).name} mencatat suhu tubuh untuk {child.nickname or child.name}.")
 
     result = log.to_dict()
     result["status"] = classify_temperature(log.temperature_celsius, log.method)
@@ -206,6 +211,7 @@ def create_illness_log(child_id):
         return jsonify({"error": "illness_name dan start_date wajib diisi"}), 400
 
     log = IllnessLog(
+        created_by_user_id=get_current_user_id(),
         child_id=child_id,
         illness_name=data["illness_name"],
         start_date=_parse_date(data["start_date"]),
@@ -215,6 +221,7 @@ def create_illness_log(child_id):
     )
     db.session.add(log)
     db.session.commit()
+    notify_other_caregivers(child, get_current_user_id(), f"🤒 {User.query.get(get_current_user_id()).name} mencatat sakit untuk {child.nickname or child.name}.")
     return jsonify(log.to_dict()), 201
 
 
@@ -281,6 +288,7 @@ def create_medication_log(child_id):
             return jsonify({"error": "illness_id tidak valid"}), 400
 
     log = MedicationLog(
+        created_by_user_id=get_current_user_id(),
         child_id=child_id,
         illness_id=illness_id,
         medication_name=data["medication_name"],
@@ -290,6 +298,7 @@ def create_medication_log(child_id):
     )
     db.session.add(log)
     db.session.commit()
+    notify_other_caregivers(child, get_current_user_id(), f"💊 {User.query.get(get_current_user_id()).name} mencatat pemberian obat untuk {child.nickname or child.name}.")
     return jsonify(log.to_dict()), 201
 
 

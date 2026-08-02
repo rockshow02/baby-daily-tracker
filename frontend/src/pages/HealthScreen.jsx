@@ -135,6 +135,9 @@ export default function HealthScreen({ child }) {
                   {v.next_visit_date && (
                     <p className="mt-1 text-xs text-feed">Kontrol berikutnya: {fmtDate(v.next_visit_date)}</p>
                   )}
+                  {v.created_by_name && (
+                    <p className="text-[11px] text-ink-faint mt-1">oleh {v.created_by_name}</p>
+                  )}
                 </div>
               ))}
             </div>
@@ -157,6 +160,9 @@ export default function HealthScreen({ child }) {
                     <p className={`text-xs font-semibold mt-0.5 ${STATUS_COLOR[t.status] || "text-ink"}`}>
                       {t.status}
                     </p>
+                    {t.created_by_name && (
+                      <p className="text-[11px] text-ink-faint mt-0.5">oleh {t.created_by_name}</p>
+                    )}
                   </div>
                   <button
                     onClick={async (e) => {
@@ -203,6 +209,9 @@ export default function HealthScreen({ child }) {
                       {fmtDate(ill.start_date)} {ill.end_date && `— ${fmtDate(ill.end_date)}`}
                     </p>
                     {ill.symptoms && <p className="mt-1 text-xs text-ink-muted">Gejala: {ill.symptoms}</p>}
+                    {ill.created_by_name && (
+                      <p className="text-[11px] text-ink-faint mt-0.5">oleh {ill.created_by_name}</p>
+                    )}
                   </div>
 
                   {ill.medications?.length > 0 && (
@@ -258,6 +267,9 @@ export default function HealthScreen({ child }) {
                     <p className="text-sm text-ink mt-0.5">
                       {m.medication_name} {m.dosage && `· ${m.dosage}`}
                     </p>
+                    {m.created_by_name && (
+                      <p className="text-[11px] text-ink-faint mt-0.5">oleh {m.created_by_name}</p>
+                    )}
                   </div>
                   <button
                     onClick={async (e) => {
@@ -433,7 +445,7 @@ function HealthForm({ tab, illnessId, childId, editingLog, onClose, onSaved }) {
               className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink" required />
             <label className="block mb-1 text-xs text-ink-muted">Nama dokter</label>
             <input type="text" value={doctorName} onChange={(e) => setDoctorName(e.target.value)}
-              placeholder="cth. dr. Sarah, Sp.A"
+              placeholder="cth. dr. Erlin, Sp.A"
               className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink placeholder:text-ink-faint" />
             <label className="block mb-1 text-xs text-ink-muted">Klinik/RS</label>
             <input type="text" value={clinicName} onChange={(e) => setClinicName(e.target.value)}

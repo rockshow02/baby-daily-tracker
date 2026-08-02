@@ -4,7 +4,8 @@ from utils.timezone_utils import now_wib, today_wib, to_wib_naive
 from flask import Blueprint, request, jsonify, session
 
 from extensions import db
-from models import Child, FeedingLog, SleepLog, DiaperLog
+from models import Child, FeedingLog, SleepLog, DiaperLog, User
+from utils.telegram import notify_other_caregivers
 from utils.access import get_accessible_child
 from utils.auth import get_current_user_id
 from utils.summary_engine import build_daily_summary
@@ -57,6 +58,7 @@ def create_feeding_log(child_id):
         return jsonify({"error": "feed_type wajib diisi"}), 400
 
     log = FeedingLog(
+        created_by_user_id=get_current_user_id(),
         child_id=child_id,
         timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
         feed_type=data["feed_type"],
@@ -67,6 +69,7 @@ def create_feeding_log(child_id):
     )
     db.session.add(log)
     db.session.commit()
+    notify_other_caregivers(child, get_current_user_id(), f"🍼 {User.query.get(get_current_user_id()).name} mencatat menyusui untuk {child.nickname or child.name}.")
     return jsonify(log.to_dict()), 201
 
 
@@ -132,6 +135,7 @@ def create_sleep_log(child_id):
         return jsonify({"error": "start_time wajib diisi"}), 400
 
     log = SleepLog(
+        created_by_user_id=get_current_user_id(),
         child_id=child_id,
         start_time=to_wib_naive(data["start_time"]),
         end_time=to_wib_naive(data["end_time"]) if data.get("end_time") else None,
@@ -140,6 +144,7 @@ def create_sleep_log(child_id):
     )
     db.session.add(log)
     db.session.commit()
+    notify_other_caregivers(child, get_current_user_id(), f"😴 {User.query.get(get_current_user_id()).name} mencatat tidur untuk {child.nickname or child.name}.")
     return jsonify(log.to_dict()), 201
 
 
@@ -197,6 +202,7 @@ def create_diaper_log(child_id):
         return jsonify({"error": "diaper_type wajib diisi"}), 400
 
     log = DiaperLog(
+        created_by_user_id=get_current_user_id(),
         child_id=child_id,
         timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
         diaper_type=data["diaper_type"],
@@ -206,6 +212,7 @@ def create_diaper_log(child_id):
     )
     db.session.add(log)
     db.session.commit()
+    notify_other_caregivers(child, get_current_user_id(), f"👶 {User.query.get(get_current_user_id()).name} mencatat ganti popok untuk {child.nickname or child.name}.")
     return jsonify(log.to_dict()), 201
 
 
