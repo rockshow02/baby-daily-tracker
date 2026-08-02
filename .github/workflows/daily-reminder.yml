@@ -1,0 +1,22 @@
+name: Daily Telegram Reminder
+
+# Jadwal harian gratis (GitHub Actions), pengganti PythonAnywhere Scheduled
+# Tasks yang sekarang cuma buat akun berbayar/lama. Ini cuma manggil HTTP
+# endpoint di backend — logic-nya sendiri tetap jalan di server PythonAnywhere
+# (butuh akses ke database), GitHub Actions cuma jadi "pemicu jadwal" doang.
+
+on:
+  schedule:
+    # jam 00:00 UTC = 07:00 WIB. Ganti angka pertama kalau mau jam beda
+    # (format: menit jam * * *, semua dalam UTC)
+    - cron: "0 0 * * *"
+  workflow_dispatch: # biar bisa dipicu manual dari tab Actions kalau perlu test
+
+jobs:
+  trigger-reminder:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Panggil endpoint reminder
+        run: |
+          curl -sf -X POST "${{ secrets.REMINDER_ENDPOINT_URL }}" \
+            -H "X-Reminder-Secret: ${{ secrets.REMINDER_TRIGGER_SECRET }}"

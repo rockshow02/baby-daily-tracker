@@ -179,44 +179,56 @@ def pick_random_tip(child):
 
 # ---------- RUN ----------
 
+def run_reminders():
+    """
+    Logic inti reminder — asumsinya udah jalan di dalam Flask app context
+    (baik dipanggil dari CLI script ini, maupun dari endpoint HTTP yang
+    dipicu GitHub Actions). Return dict ringkasan hasil eksekusi.
+    """
+    children = Child.query.all()
+    sent_count = 0
+    skipped_no_telegram = 0
+
+    for child in children:
+        caregivers = _caregivers_with_telegram(child.id)
+        if not caregivers:
+            skipped_no_telegram += 1
+            continue
+
+        sections = [f"👶 <b>{child.nickname or child.name}</b>"]
+
+        urgent = [msg for check in URGENT_CHECKS if (msg := check(child))]
+        if urgent:
+            sections.append("\n".join(urgent))
+
+        digest = build_digest(child)
+        if digest:
+            sections.append(digest)
+
+        tip = pick_random_tip(child)
+        if tip:
+            sections.append(tip)
+
+        text = "\n\n".join(sections)
+
+        for user in caregivers:
+            if send_telegram_message(user.telegram_chat_id, text):
+                sent_count += 1
+                print(f"  Terkirim ke {user.name} ({user.email}) soal {child.name}")
+            else:
+                print(f"  GAGAL kirim ke {user.name} ({user.email})")
+
+    result = {"sent_count": sent_count, "skipped_no_telegram": skipped_no_telegram}
+    print(f"\nSelesai. Notifikasi terkirim: {sent_count}. "
+          f"Anak tanpa pengasuh ber-Telegram: {skipped_no_telegram}.")
+    return result
+
+
 def run():
+    """Entry point buat CLI (python scripts/send_reminders.py) — bikin app context sendiri."""
     app = create_app()
     with app.app_context():
-        children = Child.query.all()
-        sent_count = 0
-        skipped_no_telegram = 0
-
-        for child in children:
-            caregivers = _caregivers_with_telegram(child.id)
-            if not caregivers:
-                skipped_no_telegram += 1
-                continue
-
-            sections = [f"👶 <b>{child.nickname or child.name}</b>"]
-
-            urgent = [msg for check in URGENT_CHECKS if (msg := check(child))]
-            if urgent:
-                sections.append("\n".join(urgent))
-
-            digest = build_digest(child)
-            if digest:
-                sections.append(digest)
-
-            tip = pick_random_tip(child)
-            if tip:
-                sections.append(tip)
-
-            text = "\n\n".join(sections)
-
-            for user in caregivers:
-                if send_telegram_message(user.telegram_chat_id, text):
-                    sent_count += 1
-                    print(f"  Terkirim ke {user.name} ({user.email}) soal {child.name}")
-                else:
-                    print(f"  GAGAL kirim ke {user.name} ({user.email})")
-
-        print(f"\nSelesai. Notifikasi terkirim: {sent_count}. "
-              f"Anak tanpa pengasuh ber-Telegram: {skipped_no_telegram}.")
+        run_reminders()
 
 
 if __name__ == "__main__":
