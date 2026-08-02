@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback } from "react";
 import { api } from "../api/client";
 import VaccinationScreen from "../components/VaccinationScreen";
+import RelatedArticles from "../components/RelatedArticles";
+import { todayWIB } from "../utils/date";
 
 const SUB_TABS = [
   { key: "doctor", label: "Dokter", icon: "🩺" },
@@ -59,7 +61,7 @@ export default function HealthScreen({ child }) {
   }, [loadAll]);
 
   const markHealed = async (illnessId) => {
-    await api.updateIllness(illnessId, { end_date: new Date().toISOString().split("T")[0] });
+    await api.updateIllness(illnessId, { end_date: todayWIB() });
     await loadAll();
   };
 
@@ -78,9 +80,9 @@ export default function HealthScreen({ child }) {
   };
 
   return (
-    <div className="min-h-screen pb-32 px-6 pt-8">
-      <h1 className="font-display text-3xl text-ink mb-1">Kesehatan</h1>
-      <p className="text-sm text-ink-muted mb-6">Kunjungan dokter, suhu, sakit, dan obat</p>
+    <div className="min-h-screen px-6 pt-8 pb-32">
+      <h1 className="mb-1 text-3xl font-display text-ink">Kesehatan</h1>
+      <p className="mb-6 text-sm text-ink-muted">Kunjungan dokter, suhu, sakit, dan obat</p>
 
       <div className="flex gap-2 mb-5 overflow-x-auto">
         {SUB_TABS.map((t) => (
@@ -100,38 +102,38 @@ export default function HealthScreen({ child }) {
       </div>
 
       {loading ? (
-        <p className="text-ink-faint text-sm text-center py-10">Memuat...</p>
+        <p className="py-10 text-sm text-center text-ink-faint">Memuat...</p>
       ) : (
         <>
           {activeTab === "doctor" && (
             <div className="space-y-2">
-              {visits.length === 0 && <p className="text-ink-faint text-sm">Belum ada catatan kunjungan.</p>}
+              {visits.length === 0 && <p className="text-sm text-ink-faint">Belum ada catatan kunjungan.</p>}
               {visits.map((v) => (
                 <div
                   key={v.id}
                   onClick={() => openEdit(v, "doctor")}
-                  className="bg-void-card border border-void-hairline rounded-xl2 px-4 py-3 cursor-pointer active:bg-void-raised"
+                  className="px-4 py-3 border cursor-pointer bg-void-card border-void-hairline rounded-xl2 active:bg-void-raised"
                 >
                   <div className="flex items-center justify-between">
-                    <p className="text-xs text-ink-faint font-mono">{fmtDate(v.visit_date)}</p>
+                    <p className="font-mono text-xs text-ink-faint">{fmtDate(v.visit_date)}</p>
                     <button
                       onClick={async (e) => {
                         e.stopPropagation();
                         await api.deleteDoctorVisit(v.id);
                         await loadAll();
                       }}
-                      className="text-ink-faint text-xs"
+                      className="text-xs text-ink-faint"
                     >
                       Hapus
                     </button>
                   </div>
-                  <p className="text-sm text-ink mt-1">
+                  <p className="mt-1 text-sm text-ink">
                     {v.doctor_name || "Dokter"} {v.clinic_name && `· ${v.clinic_name}`}
                   </p>
                   {v.reason && <p className="text-xs text-ink-muted mt-0.5">Keluhan: {v.reason}</p>}
                   {v.diagnosis && <p className="text-xs text-ink-muted">Diagnosis: {v.diagnosis}</p>}
                   {v.next_visit_date && (
-                    <p className="text-xs text-feed mt-1">Kontrol berikutnya: {fmtDate(v.next_visit_date)}</p>
+                    <p className="mt-1 text-xs text-feed">Kontrol berikutnya: {fmtDate(v.next_visit_date)}</p>
                   )}
                 </div>
               ))}
@@ -140,15 +142,15 @@ export default function HealthScreen({ child }) {
 
           {activeTab === "temperature" && (
             <div className="space-y-2">
-              {temps.length === 0 && <p className="text-ink-faint text-sm">Belum ada catatan suhu.</p>}
+              {temps.length === 0 && <p className="text-sm text-ink-faint">Belum ada catatan suhu.</p>}
               {temps.map((t) => (
                 <div
                   key={t.id}
                   onClick={() => openEdit(t, "temperature")}
-                  className="flex items-center justify-between bg-void-card border border-void-hairline rounded-xl2 px-4 py-3 cursor-pointer active:bg-void-raised"
+                  className="flex items-center justify-between px-4 py-3 border cursor-pointer bg-void-card border-void-hairline rounded-xl2 active:bg-void-raised"
                 >
                   <div>
-                    <p className="text-xs text-ink-faint font-mono">{fmtDateTime(t.timestamp)}</p>
+                    <p className="font-mono text-xs text-ink-faint">{fmtDateTime(t.timestamp)}</p>
                     <p className="text-sm text-ink mt-0.5">
                       {t.temperature_celsius}°C <span className="text-ink-faint">({t.method})</span>
                     </p>
@@ -162,7 +164,7 @@ export default function HealthScreen({ child }) {
                       await api.deleteTemperature(t.id);
                       await loadAll();
                     }}
-                    className="text-ink-faint text-xs"
+                    className="text-xs text-ink-faint"
                   >
                     Hapus
                   </button>
@@ -173,13 +175,13 @@ export default function HealthScreen({ child }) {
 
           {activeTab === "illness" && (
             <div className="space-y-3">
-              {illnesses.length === 0 && <p className="text-ink-faint text-sm">Belum ada catatan sakit.</p>}
+              {illnesses.length === 0 && <p className="text-sm text-ink-faint">Belum ada catatan sakit.</p>}
               {illnesses.map((ill) => (
-                <div key={ill.id} className="bg-void-card border border-void-hairline rounded-xl2 px-4 py-3">
+                <div key={ill.id} className="px-4 py-3 border bg-void-card border-void-hairline rounded-xl2">
                   <div onClick={() => openEdit(ill, "illness")} className="cursor-pointer active:opacity-70">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
-                        <p className="text-sm text-ink font-medium">{ill.illness_name}</p>
+                        <p className="text-sm font-medium text-ink">{ill.illness_name}</p>
                         {ill.is_ongoing && (
                           <span className="text-[10px] bg-warn/15 text-warn px-2 py-0.5 rounded-full font-medium">
                             Berlangsung
@@ -192,24 +194,24 @@ export default function HealthScreen({ child }) {
                           await api.deleteIllness(ill.id);
                           await loadAll();
                         }}
-                        className="text-ink-faint text-xs"
+                        className="text-xs text-ink-faint"
                       >
                         Hapus
                       </button>
                     </div>
-                    <p className="text-xs text-ink-faint font-mono mt-1">
+                    <p className="mt-1 font-mono text-xs text-ink-faint">
                       {fmtDate(ill.start_date)} {ill.end_date && `— ${fmtDate(ill.end_date)}`}
                     </p>
-                    {ill.symptoms && <p className="text-xs text-ink-muted mt-1">Gejala: {ill.symptoms}</p>}
+                    {ill.symptoms && <p className="mt-1 text-xs text-ink-muted">Gejala: {ill.symptoms}</p>}
                   </div>
 
                   {ill.medications?.length > 0 && (
-                    <div className="mt-2 pl-3 border-l-2 border-void-hairline space-y-1">
+                    <div className="pl-3 mt-2 space-y-1 border-l-2 border-void-hairline">
                       {ill.medications.map((m) => (
                         <p
                           key={m.id}
                           onClick={() => openEdit(m, "medication")}
-                          className="text-xs text-ink-muted cursor-pointer active:text-ink"
+                          className="text-xs cursor-pointer text-ink-muted active:text-ink"
                         >
                           💊 {m.medication_name} {m.dosage && `(${m.dosage})`} · {fmtDateTime(m.timestamp)}
                         </p>
@@ -244,15 +246,15 @@ export default function HealthScreen({ child }) {
 
           {activeTab === "medication" && (
             <div className="space-y-2">
-              {medications.length === 0 && <p className="text-ink-faint text-sm">Belum ada catatan obat.</p>}
+              {medications.length === 0 && <p className="text-sm text-ink-faint">Belum ada catatan obat.</p>}
               {medications.map((m) => (
                 <div
                   key={m.id}
                   onClick={() => openEdit(m, "medication")}
-                  className="flex items-center justify-between bg-void-card border border-void-hairline rounded-xl2 px-4 py-3 cursor-pointer active:bg-void-raised"
+                  className="flex items-center justify-between px-4 py-3 border cursor-pointer bg-void-card border-void-hairline rounded-xl2 active:bg-void-raised"
                 >
                   <div>
-                    <p className="text-xs text-ink-faint font-mono">{fmtDateTime(m.timestamp)}</p>
+                    <p className="font-mono text-xs text-ink-faint">{fmtDateTime(m.timestamp)}</p>
                     <p className="text-sm text-ink mt-0.5">
                       {m.medication_name} {m.dosage && `· ${m.dosage}`}
                     </p>
@@ -263,7 +265,7 @@ export default function HealthScreen({ child }) {
                       await api.deleteMedication(m.id);
                       await loadAll();
                     }}
-                    className="text-ink-faint text-xs"
+                    className="text-xs text-ink-faint"
                   >
                     Hapus
                   </button>
@@ -276,10 +278,15 @@ export default function HealthScreen({ child }) {
         </>
       )}
 
+      <RelatedArticles
+        category={activeTab === "vaccination" ? "vaccination" : "health"}
+        ageMonths={(new Date() - new Date(child.birth_date)) / (1000 * 60 * 60 * 24 * 30.4375)}
+      />
+
       {activeTab !== "vaccination" && (
         <button
           onClick={openAdd}
-          className="fixed bottom-6 right-6 w-14 h-14 rounded-full bg-feed text-white text-2xl shadow-soft flex items-center justify-center"
+          className="fixed flex items-center justify-center text-2xl text-white rounded-full bottom-6 right-6 w-14 h-14 bg-feed shadow-soft"
           aria-label="Tambah catatan"
         >
           +
@@ -325,7 +332,7 @@ function HealthForm({ tab, illnessId, childId, editingLog, onClose, onSaved }) {
   );
 
   // dokter
-  const [visitDate, setVisitDate] = useState(editingLog?.visit_date || new Date().toISOString().split("T")[0]);
+  const [visitDate, setVisitDate] = useState(editingLog?.visit_date || todayWIB());
   const [doctorName, setDoctorName] = useState(editingLog?.doctor_name || "");
   const [clinicName, setClinicName] = useState(editingLog?.clinic_name || "");
   const [reason, setReason] = useState(editingLog?.reason || "");
@@ -338,7 +345,7 @@ function HealthForm({ tab, illnessId, childId, editingLog, onClose, onSaved }) {
 
   // sakit
   const [illnessName, setIllnessName] = useState(editingLog?.illness_name || "");
-  const [startDate, setStartDate] = useState(editingLog?.start_date || new Date().toISOString().split("T")[0]);
+  const [startDate, setStartDate] = useState(editingLog?.start_date || todayWIB());
   const [symptoms, setSymptoms] = useState(editingLog?.symptoms || "");
 
   // obat
@@ -415,32 +422,32 @@ function HealthForm({ tab, illnessId, childId, editingLog, onClose, onSaved }) {
         onSubmit={handleSubmit}
         className="relative w-full sm:max-w-sm bg-void-card border-t sm:border border-void-hairline rounded-t-xl2 sm:rounded-xl2 p-6 pb-8 max-h-[85vh] overflow-y-auto"
       >
-        <div className="w-10 h-1 bg-void-hairline rounded-full mx-auto mb-5 sm:hidden" />
-        <h2 className="font-display text-2xl text-ink mb-5">{titles[tab]}</h2>
+        <div className="w-10 h-1 mx-auto mb-5 rounded-full bg-void-hairline sm:hidden" />
+        <h2 className="mb-5 text-2xl font-display text-ink">{titles[tab]}</h2>
 
         {tab === "doctor" && (
           <div className="space-y-3">
-            <label className="block text-xs text-ink-muted mb-1">Tanggal kunjungan</label>
+            <label className="block mb-1 text-xs text-ink-muted">Tanggal kunjungan</label>
             <input type="date" value={visitDate} onChange={(e) => setVisitDate(e.target.value)}
-              max={new Date().toISOString().split("T")[0]}
+              max={todayWIB()}
               className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink" required />
-            <label className="block text-xs text-ink-muted mb-1">Nama dokter</label>
+            <label className="block mb-1 text-xs text-ink-muted">Nama dokter</label>
             <input type="text" value={doctorName} onChange={(e) => setDoctorName(e.target.value)}
-              placeholder="cth. dr. Erlin, Sp.A"
+              placeholder="cth. dr. Sarah, Sp.A"
               className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink placeholder:text-ink-faint" />
-            <label className="block text-xs text-ink-muted mb-1">Klinik/RS</label>
+            <label className="block mb-1 text-xs text-ink-muted">Klinik/RS</label>
             <input type="text" value={clinicName} onChange={(e) => setClinicName(e.target.value)}
               placeholder="cth. Klinik Sehat Anak"
               className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink placeholder:text-ink-faint" />
-            <label className="block text-xs text-ink-muted mb-1">Keluhan</label>
+            <label className="block mb-1 text-xs text-ink-muted">Keluhan</label>
             <input type="text" value={reason} onChange={(e) => setReason(e.target.value)}
               placeholder="cth. Demam 2 hari"
               className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink placeholder:text-ink-faint" />
-            <label className="block text-xs text-ink-muted mb-1">Diagnosis</label>
+            <label className="block mb-1 text-xs text-ink-muted">Diagnosis</label>
             <input type="text" value={diagnosis} onChange={(e) => setDiagnosis(e.target.value)}
               placeholder="cth. ISPA ringan"
               className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink placeholder:text-ink-faint" />
-            <label className="block text-xs text-ink-muted mb-1">Jadwal kontrol berikutnya (opsional)</label>
+            <label className="block mb-1 text-xs text-ink-muted">Jadwal kontrol berikutnya (opsional)</label>
             <input type="date" value={nextVisitDate} onChange={(e) => setNextVisitDate(e.target.value)}
               className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink" />
           </div>
@@ -448,10 +455,10 @@ function HealthForm({ tab, illnessId, childId, editingLog, onClose, onSaved }) {
 
         {tab === "temperature" && (
           <div className="space-y-3">
-            <label className="block text-xs text-ink-muted mb-1">Suhu (°C)</label>
+            <label className="block mb-1 text-xs text-ink-muted">Suhu (°C)</label>
             <input type="number" step="0.1" value={temperature} onChange={(e) => setTemperature(e.target.value)}
               className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink font-mono" required />
-            <label className="block text-xs text-ink-muted mb-1">Cara ukur</label>
+            <label className="block mb-1 text-xs text-ink-muted">Cara ukur</label>
             <div className="grid grid-cols-3 gap-2">
               {["ketiak", "dahi", "telinga", "mulut", "dubur"].map((m) => (
                 <button type="button" key={m} onClick={() => setMethod(m)}
@@ -467,15 +474,15 @@ function HealthForm({ tab, illnessId, childId, editingLog, onClose, onSaved }) {
 
         {tab === "illness" && (
           <div className="space-y-3">
-            <label className="block text-xs text-ink-muted mb-1">Nama sakit</label>
+            <label className="block mb-1 text-xs text-ink-muted">Nama sakit</label>
             <input type="text" value={illnessName} onChange={(e) => setIllnessName(e.target.value)}
               placeholder="cth. Batuk Pilek" required
               className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink placeholder:text-ink-faint" />
-            <label className="block text-xs text-ink-muted mb-1">Mulai sakit</label>
+            <label className="block mb-1 text-xs text-ink-muted">Mulai sakit</label>
             <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)}
-              max={new Date().toISOString().split("T")[0]}
+              max={todayWIB()}
               className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink" required />
-            <label className="block text-xs text-ink-muted mb-1">Gejala</label>
+            <label className="block mb-1 text-xs text-ink-muted">Gejala</label>
             <input type="text" value={symptoms} onChange={(e) => setSymptoms(e.target.value)}
               placeholder="cth. Hidung tersumbat, batuk ringan"
               className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink placeholder:text-ink-faint" />
@@ -484,11 +491,11 @@ function HealthForm({ tab, illnessId, childId, editingLog, onClose, onSaved }) {
 
         {tab === "medication" && (
           <div className="space-y-3">
-            <label className="block text-xs text-ink-muted mb-1">Nama obat</label>
+            <label className="block mb-1 text-xs text-ink-muted">Nama obat</label>
             <input type="text" value={medicationName} onChange={(e) => setMedicationName(e.target.value)}
               placeholder="cth. Paracetamol drop" required
               className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink placeholder:text-ink-faint" />
-            <label className="block text-xs text-ink-muted mb-1">Dosis</label>
+            <label className="block mb-1 text-xs text-ink-muted">Dosis</label>
             <input type="text" value={dosage} onChange={(e) => setDosage(e.target.value)}
               placeholder="cth. 0.8 ml"
               className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink placeholder:text-ink-faint" />
@@ -505,7 +512,7 @@ function HealthForm({ tab, illnessId, childId, editingLog, onClose, onSaved }) {
               max={toLocalInputValue(new Date())}
               className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink font-mono text-sm mb-2"
             />
-            <div className="flex gap-2 flex-wrap">
+            <div className="flex flex-wrap gap-2">
               {[
                 ["Baru saja", 0],
                 ["-15 mnt", 15],
@@ -530,15 +537,15 @@ function HealthForm({ tab, illnessId, childId, editingLog, onClose, onSaved }) {
           </div>
         )}
 
-        {error && <p className="text-warn text-sm mt-3">{error}</p>}
+        {error && <p className="mt-3 text-sm text-warn">{error}</p>}
 
         <div className="flex gap-3 mt-6">
           <button type="button" onClick={onClose}
-            className="flex-1 py-3 rounded-lg border border-void-hairline text-ink-muted text-sm font-medium">
+            className="flex-1 py-3 text-sm font-medium border rounded-lg border-void-hairline text-ink-muted">
             Batal
           </button>
           <button type="submit" disabled={submitting}
-            className="flex-1 py-3 rounded-lg bg-feed text-white text-sm font-semibold disabled:opacity-50">
+            className="flex-1 py-3 text-sm font-semibold text-white rounded-lg bg-feed disabled:opacity-50">
             {submitting ? "Menyimpan..." : isEdit ? "Simpan Perubahan" : "Simpan"}
           </button>
         </div>
@@ -547,7 +554,7 @@ function HealthForm({ tab, illnessId, childId, editingLog, onClose, onSaved }) {
             type="button"
             onClick={handleDelete}
             disabled={deleting}
-            className="w-full text-center text-xs text-warn mt-3 disabled:opacity-50"
+            className="w-full mt-3 text-xs text-center text-warn disabled:opacity-50"
           >
             {deleting ? "Menghapus..." : "Hapus catatan ini"}
           </button>

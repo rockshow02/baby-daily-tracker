@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { api } from "../api/client";
+import { todayWIB } from "../utils/date";
 
 function fmtDate(iso) {
   return new Date(iso).toLocaleDateString("id-ID", { day: "2-digit", month: "short", year: "numeric" });
@@ -41,7 +42,7 @@ export default function VaccinationScreen({ child }) {
         {
           vaccine_schedule_id: v.vaccine_schedule_id,
           given: true,
-          given_date: new Date().toISOString().split("T")[0],
+          given_date: todayWIB(),
           notes: notes || null,
         },
       ]);
@@ -205,7 +206,7 @@ export default function VaccinationScreen({ child }) {
                     <button
                       onClick={() => {
                         setDateEditId(v.vaccine_schedule_id);
-                        setDateValue(v.given_date || new Date().toISOString().split("T")[0]);
+                        setDateValue(v.given_date || todayWIB());
                         setNotesValue(v.given_notes || "");
                       }}
                       className="text-[11px] text-ink-faint px-2"
@@ -223,14 +224,14 @@ export default function VaccinationScreen({ child }) {
                       type="date"
                       value={dateValue}
                       onChange={(e) => setDateValue(e.target.value)}
-                      max={new Date().toISOString().split("T")[0]}
+                      max={todayWIB()}
                       className="bg-void border border-void-hairline rounded-lg px-2 py-1.5 text-ink text-xs"
                     />
                     <input
                       type="text"
                       value={notesValue}
                       onChange={(e) => setNotesValue(e.target.value)}
-                      placeholder="Catatan (opsional), cth. rekomendasi dr. Erlin"
+                      placeholder="Catatan (opsional), cth. rekomendasi dr. Sarah"
                       className="w-full bg-void border border-void-hairline rounded-lg px-2 py-1.5 text-ink text-xs placeholder:text-ink-faint"
                     />
                     <div className="flex items-center gap-2">
@@ -270,7 +271,7 @@ export default function VaccinationScreen({ child }) {
               type="text"
               value={confirmNotes}
               onChange={(e) => setConfirmNotes(e.target.value)}
-              placeholder="cth. Rekomendasi dr. Erlin, dipercepat karena akan bepergian"
+              placeholder="cth. Rekomendasi dr. Sarah, dipercepat karena akan bepergian"
               className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink placeholder:text-ink-faint text-sm mb-4"
             />
             <div className="flex gap-3">

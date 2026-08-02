@@ -614,3 +614,33 @@ class ChildInvite(db.Model):
             "expires_at": self.expires_at.isoformat() + "Z",
             "used": self.used_by is not None,
         }
+
+
+class Article(db.Model):
+    """Artikel edukasi singkat, ditampilkan kontekstual sesuai fitur yang lagi dibuka."""
+    __tablename__ = "articles"
+
+    id = db.Column(db.Integer, primary_key=True)
+    category = db.Column(db.String(30), nullable=False, index=True)
+    # 'feeding' | 'sleep' | 'diaper' | 'growth' | 'vaccination' | 'health' | 'mood' | 'milestone'
+    title = db.Column(db.String(150), nullable=False)
+    summary = db.Column(db.String(250), nullable=False)
+    body = db.Column(db.Text, nullable=False)
+    min_age_months = db.Column(db.Integer, nullable=True)  # null = berlaku semua usia
+    max_age_months = db.Column(db.Integer, nullable=True)
+    source = db.Column(db.String(100), nullable=True)  # cth. "IDAI", "WHO", "Kemenkes RI"
+    source_url = db.Column(db.String(500), nullable=True)  # kalau diisi, card jadi redirect ke sumber asli
+    order_index = db.Column(db.Integer, default=0)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "category": self.category,
+            "title": self.title,
+            "summary": self.summary,
+            "body": self.body,
+            "min_age_months": self.min_age_months,
+            "max_age_months": self.max_age_months,
+            "source": self.source,
+            "source_url": self.source_url,
+        }

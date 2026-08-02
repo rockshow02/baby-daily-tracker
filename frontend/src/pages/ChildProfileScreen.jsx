@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { api } from "../api/client";
 import CaregiverModal from "../components/CaregiverModal";
+import { todayWIB } from "../utils/date";
 
 function fmtDate(iso) {
   return new Date(iso).toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
@@ -210,7 +211,7 @@ export default function ChildProfileScreen({ child, currentUserId, onUpdated }) 
                 value={birthDate}
                 onChange={(e) => setBirthDate(e.target.value)}
                 min={new Date(new Date().setFullYear(new Date().getFullYear() - 6)).toISOString().split("T")[0]}
-                max={new Date().toISOString().split("T")[0]}
+                max={todayWIB()}
                 className="w-full px-3 py-2 text-sm border rounded-lg bg-void border-void-hairline text-ink"
                 required
               />

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
+import { todayWIB } from "../utils/date";
 
 const STEPS = ["Data Anak", "Berat & Tinggi", "Vaksinasi", "Foto"];
 
@@ -231,7 +232,7 @@ export default function OnboardingWizard({ onComplete }) {
                 value={birthDate}
                 onChange={(e) => setBirthDate(e.target.value)}
                 min={new Date(new Date().setFullYear(new Date().getFullYear() - 6)).toISOString().split("T")[0]}
-                max={new Date().toISOString().split("T")[0]}
+                max={todayWIB()}
                 className="w-full px-4 py-3 border rounded-lg bg-void-card border-void-hairline text-ink"
                 required
               />

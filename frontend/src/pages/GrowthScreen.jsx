@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback } from "react";
 import { api } from "../api/client";
 import GrowthChart from "../components/GrowthChart";
+import RelatedArticles from "../components/RelatedArticles";
+import { todayWIB } from "../utils/date";
 
 const TYPES = [
   { key: "weight", label: "Berat", unit: "kg", field: "weight_kg", icon: "⚖️" },
@@ -34,7 +36,7 @@ export default function GrowthScreen({ child }) {
   const [loading, setLoading] = useState(true);
 
   // form state
-  const [measuredDate, setMeasuredDate] = useState(new Date().toISOString().split("T")[0]);
+  const [measuredDate, setMeasuredDate] = useState(todayWIB());
   const [weight, setWeight] = useState("");
   const [height, setHeight] = useState("");
   const [headCirc, setHeadCirc] = useState("");
@@ -64,7 +66,7 @@ export default function GrowthScreen({ child }) {
 
   const openAddForm = () => {
     setEditingMeasurement(null);
-    setMeasuredDate(new Date().toISOString().split("T")[0]);
+    setMeasuredDate(todayWIB());
     setWeight("");
     setHeight("");
     setHeadCirc("");
@@ -134,9 +136,9 @@ export default function GrowthScreen({ child }) {
   const latestWho = latestForType ? latestForType[`${activeType}_who`] : null;
 
   return (
-    <div className="min-h-screen pb-32 px-6 pt-8">
-      <h1 className="font-display text-3xl text-ink mb-1">Tumbuh Kembang</h1>
-      <p className="text-sm text-ink-muted mb-6">Acuan: WHO Child Growth Standards</p>
+    <div className="min-h-screen px-6 pt-8 pb-32">
+      <h1 className="mb-1 text-3xl font-display text-ink">Tumbuh Kembang</h1>
+      <p className="mb-6 text-sm text-ink-muted">Acuan: WHO Child Growth Standards</p>
 
       {/* tab jenis ukuran */}
       <div className="flex gap-2 mb-5">
@@ -158,13 +160,13 @@ export default function GrowthScreen({ child }) {
 
       {/* status terbaru */}
       {latestWho && (
-        <div className="bg-void-card border border-void-hairline rounded-xl2 p-4 mb-4 shadow-soft">
+        <div className="p-4 mb-4 border bg-void-card border-void-hairline rounded-xl2 shadow-soft">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-xs text-ink-faint mb-1">
+              <p className="mb-1 text-xs text-ink-faint">
                 Terbaru · {formatDate(latestForType.measured_date)}
               </p>
-              <p className="font-display text-2xl text-ink">
+              <p className="text-2xl font-display text-ink">
                 {latestForType[activeTypeInfo.field]} <span className="text-sm text-ink-muted">{activeTypeInfo.unit}</span>
               </p>
             </div>
@@ -180,9 +182,9 @@ export default function GrowthScreen({ child }) {
 
       {/* chart */}
       {loading ? (
-        <p className="text-ink-faint text-sm text-center py-10">Memuat grafik...</p>
+        <p className="py-10 text-sm text-center text-ink-faint">Memuat grafik...</p>
       ) : (
-        <div className="bg-void-card border border-void-hairline rounded-xl2 p-4 mb-6 shadow-soft">
+        <div className="p-4 mb-6 border bg-void-card border-void-hairline rounded-xl2 shadow-soft">
           <GrowthChart measurementType={activeType} referenceCurve={referenceCurve} childPoints={childPoints} />
           <div className="flex justify-center gap-4 mt-2">
             <span className="flex items-center gap-1.5 text-[11px] text-ink-muted">
@@ -198,17 +200,17 @@ export default function GrowthScreen({ child }) {
       {/* riwayat */}
       <h2 className="font-mono text-xs text-ink-faint tracking-[0.2em] uppercase mb-3">Riwayat Pengukuran</h2>
       {measurements.length === 0 ? (
-        <p className="text-ink-faint text-sm">Belum ada pengukuran tercatat.</p>
+        <p className="text-sm text-ink-faint">Belum ada pengukuran tercatat.</p>
       ) : (
         <div className="space-y-2">
           {[...measurements].reverse().map((m) => (
             <div
               key={m.id}
               onClick={() => openEditForm(m)}
-              className="flex items-center justify-between bg-void-card border border-void-hairline rounded-xl2 px-4 py-3 cursor-pointer active:bg-void-raised"
+              className="flex items-center justify-between px-4 py-3 border cursor-pointer bg-void-card border-void-hairline rounded-xl2 active:bg-void-raised"
             >
               <div>
-                <p className="text-xs text-ink-faint font-mono">{formatDate(m.measured_date)}</p>
+                <p className="font-mono text-xs text-ink-faint">{formatDate(m.measured_date)}</p>
                 <p className="text-sm text-ink mt-0.5">
                   {m.weight_kg != null && `${m.weight_kg} kg`}
                   {m.height_cm != null && ` · ${m.height_cm} cm`}
@@ -221,7 +223,7 @@ export default function GrowthScreen({ child }) {
                   e.stopPropagation();
                   handleDelete(m.id);
                 }}
-                className="text-ink-faint text-xs px-2 py-1"
+                className="px-2 py-1 text-xs text-ink-faint"
                 aria-label="Hapus catatan"
               >
                 Hapus
@@ -231,10 +233,15 @@ export default function GrowthScreen({ child }) {
         </div>
       )}
 
+      <RelatedArticles
+        category="growth"
+        ageMonths={(new Date() - new Date(child.birth_date)) / (1000 * 60 * 60 * 24 * 30.4375)}
+      />
+
       {/* tombol tambah */}
       <button
         onClick={openAddForm}
-        className="fixed bottom-6 right-6 w-14 h-14 rounded-full bg-feed text-white text-2xl shadow-soft flex items-center justify-center"
+        className="fixed flex items-center justify-center text-2xl text-white rounded-full bottom-6 right-6 w-14 h-14 bg-feed shadow-soft"
         aria-label="Tambah pengukuran"
       >
         +
@@ -252,10 +259,10 @@ export default function GrowthScreen({ child }) {
           />
           <form
             onSubmit={handleSubmit}
-            className="relative w-full sm:max-w-sm bg-void-card border-t sm:border border-void-hairline rounded-t-xl2 sm:rounded-xl2 p-6 pb-8"
+            className="relative w-full p-6 pb-8 border-t sm:max-w-sm bg-void-card sm:border border-void-hairline rounded-t-xl2 sm:rounded-xl2"
           >
-            <div className="w-10 h-1 bg-void-hairline rounded-full mx-auto mb-5 sm:hidden" />
-            <h2 className="font-display text-2xl text-ink mb-5">
+            <div className="w-10 h-1 mx-auto mb-5 rounded-full bg-void-hairline sm:hidden" />
+            <h2 className="mb-5 text-2xl font-display text-ink">
               {editingMeasurement ? "Edit Pengukuran" : "Catat Pengukuran"}
             </h2>
 
@@ -264,7 +271,7 @@ export default function GrowthScreen({ child }) {
               type="date"
               value={measuredDate}
               onChange={(e) => setMeasuredDate(e.target.value)}
-              max={new Date().toISOString().split("T")[0]}
+              max={todayWIB()}
               className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink mb-3"
               required
             />
@@ -310,7 +317,7 @@ export default function GrowthScreen({ child }) {
               className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink placeholder:text-ink-faint mb-4 text-sm"
             />
 
-            {error && <p className="text-warn text-sm mb-3">{error}</p>}
+            {error && <p className="mb-3 text-sm text-warn">{error}</p>}
 
             <div className="flex gap-3">
               <button
@@ -319,14 +326,14 @@ export default function GrowthScreen({ child }) {
                   setShowForm(false);
                   setEditingMeasurement(null);
                 }}
-                className="flex-1 py-3 rounded-lg border border-void-hairline text-ink-muted text-sm font-medium"
+                className="flex-1 py-3 text-sm font-medium border rounded-lg border-void-hairline text-ink-muted"
               >
                 Batal
               </button>
               <button
                 type="submit"
                 disabled={submitting}
-                className="flex-1 py-3 rounded-lg bg-feed text-white text-sm font-semibold disabled:opacity-50"
+                className="flex-1 py-3 text-sm font-semibold text-white rounded-lg bg-feed disabled:opacity-50"
               >
                 {submitting ? "Menyimpan..." : editingMeasurement ? "Simpan Perubahan" : "Simpan"}
               </button>
@@ -335,7 +342,7 @@ export default function GrowthScreen({ child }) {
               <button
                 type="button"
                 onClick={() => handleDelete(editingMeasurement.id)}
-                className="w-full text-center text-xs text-warn mt-3"
+                className="w-full mt-3 text-xs text-center text-warn"
               >
                 Hapus catatan ini
               </button>

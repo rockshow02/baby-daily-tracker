@@ -238,6 +238,12 @@ export const api = {
       body: JSON.stringify({ code }),
     }),
 
+  // artikel edukasi
+  listArticles: (category, ageMonths) =>
+    request(
+      `/articles?category=${category}${ageMonths != null ? `&age_months=${ageMonths}` : ""}`,
+    ),
+
   // feeding
   listFeeding: (childId, date) =>
     request(`/children/${childId}/feeding-logs?date=${date}`),

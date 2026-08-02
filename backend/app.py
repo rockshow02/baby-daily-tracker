@@ -34,6 +34,7 @@ def create_app():
     from routes.stats_routes import stats_bp
     from routes.report_routes import report_bp
     from routes.backup_routes import backup_bp
+    from routes.article_routes import article_bp
 
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(children_bp, url_prefix="/api")
@@ -45,6 +46,7 @@ def create_app():
     app.register_blueprint(stats_bp, url_prefix="/api")
     app.register_blueprint(report_bp, url_prefix="/api")
     app.register_blueprint(backup_bp, url_prefix="/api")
+    app.register_blueprint(article_bp, url_prefix="/api")
 
     with app.app_context():
         db.create_all()

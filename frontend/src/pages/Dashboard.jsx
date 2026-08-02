@@ -3,10 +3,12 @@ import { api } from "../api/client";
 import DailyRadialClock from "../components/DailyRadialClock";
 import FeedingPredictionCard from "../components/FeedingPredictionCard";
 import NextVaccineCard from "../components/NextVaccineCard";
+import RelatedArticles from "../components/RelatedArticles";
 import StatusPill from "../components/StatusPill";
 import QuickLogSheet from "../components/QuickLogSheet";
+import { todayWIB, toWIBDateStr } from "../utils/date";
 
-const todayStr = () => new Date().toISOString().split("T")[0];
+const todayStr = () => todayWIB();
 
 function formatAge(days) {
   if (days < 60) return `${days} hari`;
@@ -16,6 +18,30 @@ function formatAge(days) {
 
 function timeOf(iso) {
   return new Date(iso).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
+}
+
+/**
+ * Label rentang waktu tidur, dipotong (clip) sesuai tanggal yang lagi dilihat.
+ * Sesi yang mulai kemarin dan lanjut sampai hari ini bakal kelihatan
+ * "00:00 - 05:00 (lanjutan)" pas dilihat di hari ini, dan "20:00 - 24:00
+ * (lanjut besok)" pas dilihat di hari kemarin — bukan nampilin rentang
+ * penuh yang sama persis di kedua hari (membingungkan).
+ */
+function sleepTimeRangeLabel(item, viewedDate) {
+  const startDateStr = toWIBDateStr(new Date(item.start_time));
+  const startsBeforeViewedDay = startDateStr < viewedDate;
+  const startLabel = startsBeforeViewedDay ? "00:00" : timeOf(item.start_time);
+
+  if (!item.end_time) {
+    return `${startLabel} - berlangsung`;
+  }
+
+  const endDateStr = toWIBDateStr(new Date(item.end_time));
+  const endsAfterViewedDay = endDateStr > viewedDate;
+  const endLabel = endsAfterViewedDay ? "24:00" : timeOf(item.end_time);
+
+  const suffix = startsBeforeViewedDay ? " (lanjutan)" : endsAfterViewedDay ? " (lanjut besok)" : "";
+  return `${startLabel} - ${endLabel}${suffix}`;
 }
 
 const FEED_TYPE_LABEL = {
@@ -132,7 +158,7 @@ export default function Dashboard({ child, onOpenProfile }) {
   const shiftDate = (deltaDays) => {
     const d = new Date(date);
     d.setDate(d.getDate() + deltaDays);
-    const next = d.toISOString().split("T")[0];
+    const next = toWIBDateStr(d);
     if (next > todayStr()) return;
     setDate(next);
   };
@@ -244,7 +270,7 @@ export default function Dashboard({ child, onOpenProfile }) {
           </div>
           <div className="flex-shrink-0 w-px h-8 bg-void-hairline" />
           <div className="flex flex-col items-center flex-shrink-0">
-            <span className="text-base">🩲</span>
+            <span className="text-base">💧</span>
             <span className="text-[11px] text-ink font-semibold">{wetCount}x</span>
           </div>
           <div className="flex-shrink-0 w-px h-8 bg-void-hairline" />
@@ -327,7 +353,7 @@ export default function Dashboard({ child, onOpenProfile }) {
             status={summary.sleep.status}
           />
           <StatusPill
-            icon="🩲"
+            icon="💧"
             title="BAK (pipis)"
             actual={summary.wet_diaper.actual}
             unit="x"
@@ -368,9 +394,7 @@ export default function Dashboard({ child, onOpenProfile }) {
                       {item.kind === "vitamin" && (item.medication_name || "Vitamin D")}
                     </p>
                     <p className="font-mono text-xs text-ink-faint">
-                      {item.kind === "sleep"
-                        ? `${timeOf(item.start_time)} - ${item.end_time ? timeOf(item.end_time) : "berlangsung"}`
-                        : timeOf(item.at)}
+                      {item.kind === "sleep" ? sleepTimeRangeLabel(item, date) : timeOf(item.at)}
                       {item.kind === "feeding" && item.duration_minutes && ` · ${item.duration_minutes} mnt`}
                       {item.kind === "feeding" && item.volume_ml && ` · ${item.volume_ml} ml`}
                       {item.kind === "pumping" && ` · ${item.duration_minutes} mnt · ${item.volume_ml} ml`}
@@ -410,6 +434,10 @@ export default function Dashboard({ child, onOpenProfile }) {
         )}
       </div>
 
+      <div className="px-6">
+        <RelatedArticles category="feeding" ageMonths={summary ? summary.age_days / 30.4375 : null} />
+      </div>
+
       {/* quick log bar */}
       <div className="fixed bottom-0 left-0 right-0 px-6 pt-4 pb-6 bg-gradient-to-t from-void via-void to-transparent">
         <div className="max-w-sm mx-auto grid grid-cols-4 gap-2.5">
@@ -431,7 +459,7 @@ export default function Dashboard({ child, onOpenProfile }) {
             onClick={() => { setEditingItem(null); setSheetType("diaper"); }}
             className="flex flex-col items-center gap-1.5 bg-diaper text-white rounded-xl2 py-3.5 font-medium text-xs"
           >
-            <span className="text-xl">🩲</span>
+            <span className="text-xl">💧</span>
             Popok
           </button>
           <button

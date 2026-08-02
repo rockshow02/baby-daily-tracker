@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from sqlalchemy import or_
 from utils.timezone_utils import now_wib, today_wib, to_wib_naive
 from flask import Blueprint, request, jsonify, session
 
@@ -100,10 +101,19 @@ def list_sleep_logs(child_id):
         return jsonify({"error": "Anak tidak ditemukan"}), 404
 
     target_date = _parse_date_param()
+    day_start = datetime.combine(target_date, datetime.min.time())
+    day_end = day_start + timedelta(days=1)
+
+    # Sesi tidur yang lintas tengah malam (mis. mulai jam 20:00 kemarin,
+    # baru selesai jam 05:00 hari ini) harus muncul di KEDUA hari yang
+    # terkait, bukan cuma di hari mulainya doang — makanya query di sini
+    # nyari sesi yang OVERLAP sama rentang hari ini, bukan cuma yang
+    # start_time-nya persis di hari ini.
     logs = (
         SleepLog.query.filter(
             SleepLog.child_id == child_id,
-            db.func.date(SleepLog.start_time) == target_date,
+            SleepLog.start_time < day_end,
+            or_(SleepLog.end_time.is_(None), SleepLog.end_time > day_start),
         )
         .order_by(SleepLog.start_time.desc())
         .all()
@@ -241,11 +251,24 @@ def daily_summary(child_id):
         db.func.date(FeedingLog.timestamp) == target_date,
     ).count()
 
+    day_start = datetime.combine(target_date, datetime.min.time())
+    day_end = day_start + timedelta(days=1)
+
     sleep_logs = SleepLog.query.filter(
         SleepLog.child_id == child_id,
-        db.func.date(SleepLog.start_time) == target_date,
+        SleepLog.start_time < day_end,
+        or_(SleepLog.end_time.is_(None), SleepLog.end_time > day_start),
     ).all()
-    sleep_minutes = sum(log.duration_minutes or 0 for log in sleep_logs)
+
+    # tiap sesi dipotong (clip) ke rentang hari ini doang, biar sesi yang
+    # lintas tengah malam nggak dihitung dobel di 2 hari atau malah hilang
+    # sama sekali dari salah satu harinya
+    sleep_minutes = 0
+    for log in sleep_logs:
+        seg_start = max(log.start_time, day_start)
+        seg_end = min(log.end_time, day_end) if log.end_time else min(now_wib(), day_end)
+        if seg_end > seg_start:
+            sleep_minutes += (seg_end - seg_start).total_seconds() / 60
     sleep_hours = round(sleep_minutes / 60, 1)
 
     wet_diaper_count = DiaperLog.query.filter(

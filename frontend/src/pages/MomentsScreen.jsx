@@ -1,5 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { api } from "../api/client";
+import RelatedArticles from "../components/RelatedArticles";
+import { todayWIB } from "../utils/date";
 
 const MOODS = [
   { key: "ceria", label: "Ceria", icon: "😄" },
@@ -70,9 +72,9 @@ export default function MomentsScreen({ child }) {
   };
 
   return (
-    <div className="min-h-screen pb-32 px-6 pt-8">
-      <h1 className="font-display text-3xl text-ink mb-1">Momen</h1>
-      <p className="text-sm text-ink-muted mb-6">Suasana hati dan pencapaian penting</p>
+    <div className="min-h-screen px-6 pt-8 pb-32">
+      <h1 className="mb-1 text-3xl font-display text-ink">Momen</h1>
+      <p className="mb-6 text-sm text-ink-muted">Suasana hati dan pencapaian penting</p>
 
       <div className="flex gap-2 mb-5">
         <button
@@ -94,7 +96,7 @@ export default function MomentsScreen({ child }) {
       </div>
 
       {loading ? (
-        <p className="text-ink-faint text-sm text-center py-10">Memuat...</p>
+        <p className="py-10 text-sm text-center text-ink-faint">Memuat...</p>
       ) : activeTab === "mood" ? (
         <>
           {/* quick add mood buttons */}
@@ -113,7 +115,7 @@ export default function MomentsScreen({ child }) {
 
           <h2 className="font-mono text-xs text-ink-faint tracking-[0.2em] uppercase mb-3">Riwayat</h2>
           {moods.length === 0 ? (
-            <p className="text-ink-faint text-sm">Belum ada catatan mood.</p>
+            <p className="text-sm text-ink-faint">Belum ada catatan mood.</p>
           ) : (
             <div className="space-y-2">
               {moods.map((m) => {
@@ -122,13 +124,13 @@ export default function MomentsScreen({ child }) {
                   <div
                     key={m.id}
                     onClick={() => setEditingMood(m)}
-                    className="flex items-center justify-between bg-void-card border border-void-hairline rounded-xl2 px-4 py-3 cursor-pointer active:bg-void-raised"
+                    className="flex items-center justify-between px-4 py-3 border cursor-pointer bg-void-card border-void-hairline rounded-xl2 active:bg-void-raised"
                   >
                     <div className="flex items-center gap-3">
                       <span className="text-xl">{info?.icon}</span>
                       <div>
                         <p className="text-sm text-ink">{info?.label}</p>
-                        <p className="text-xs text-ink-faint font-mono">{fmtDateTime(m.timestamp)}</p>
+                        <p className="font-mono text-xs text-ink-faint">{fmtDateTime(m.timestamp)}</p>
                       </div>
                     </div>
                     <button
@@ -137,7 +139,7 @@ export default function MomentsScreen({ child }) {
                         await api.deleteMood(m.id);
                         await loadAll();
                       }}
-                      className="text-ink-faint text-xs"
+                      className="text-xs text-ink-faint"
                     >
                       Hapus
                     </button>
@@ -150,20 +152,20 @@ export default function MomentsScreen({ child }) {
       ) : (
         <>
           {milestones.length === 0 ? (
-            <p className="text-ink-faint text-sm">Belum ada momen penting tercatat.</p>
+            <p className="text-sm text-ink-faint">Belum ada momen penting tercatat.</p>
           ) : (
             <div className="space-y-2">
               {milestones.map((ms) => {
                 const info = MILESTONE_TYPES.find((x) => x.key === ms.milestone_type);
                 return (
-                  <div key={ms.id} className="bg-void-card border border-void-hairline rounded-xl2 px-4 py-3">
+                  <div key={ms.id} className="px-4 py-3 border bg-void-card border-void-hairline rounded-xl2">
                     <div
                       onClick={() => openEditMilestone(ms)}
                       className="flex items-center justify-between cursor-pointer active:opacity-70"
                     >
                       <div className="flex items-center gap-2">
                         <span className="text-lg">{info?.icon}</span>
-                        <p className="text-sm text-ink font-medium">
+                        <p className="text-sm font-medium text-ink">
                           {ms.milestone_type === "custom" ? ms.custom_label : info?.label}
                         </p>
                       </div>
@@ -173,12 +175,12 @@ export default function MomentsScreen({ child }) {
                           await api.deleteMilestone(ms.id);
                           await loadAll();
                         }}
-                        className="text-ink-faint text-xs"
+                        className="text-xs text-ink-faint"
                       >
                         Hapus
                       </button>
                     </div>
-                    <p className="text-xs text-ink-faint font-mono mt-1">
+                    <p className="mt-1 font-mono text-xs text-ink-faint">
                       {fmtDate(ms.achieved_date)} · usia {ms.age_months} bulan
                     </p>
                     {ms.evaluation && (
@@ -186,7 +188,7 @@ export default function MomentsScreen({ child }) {
                         {ms.evaluation.status} <span className="text-ink-faint">(umumnya {ms.evaluation.typical_range})</span>
                       </p>
                     )}
-                    {ms.notes && <p className="text-xs text-ink-muted mt-1">{ms.notes}</p>}
+                    {ms.notes && <p className="mt-1 text-xs text-ink-muted">{ms.notes}</p>}
                   </div>
                 );
               })}
@@ -195,10 +197,15 @@ export default function MomentsScreen({ child }) {
         </>
       )}
 
+      <RelatedArticles
+        category={activeTab === "milestone" ? "milestone" : "mood"}
+        ageMonths={(new Date() - new Date(child.birth_date)) / (1000 * 60 * 60 * 24 * 30.4375)}
+      />
+
       {activeTab === "milestone" && (
         <button
           onClick={openAddMilestone}
-          className="fixed bottom-6 right-6 w-14 h-14 rounded-full bg-feed text-white text-2xl shadow-soft flex items-center justify-center"
+          className="fixed flex items-center justify-center text-2xl text-white rounded-full bottom-6 right-6 w-14 h-14 bg-feed shadow-soft"
           aria-label="Tambah momen penting"
         >
           +
@@ -257,9 +264,9 @@ function MoodEditSheet({ mood, onClose, onSaved }) {
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center sm:justify-center">
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="relative w-full sm:max-w-sm bg-void-card border-t sm:border border-void-hairline rounded-t-xl2 sm:rounded-xl2 p-6 pb-8">
-        <div className="w-10 h-1 bg-void-hairline rounded-full mx-auto mb-5 sm:hidden" />
-        <h2 className="font-display text-2xl text-ink mb-5">Ubah Mood</h2>
+      <div className="relative w-full p-6 pb-8 border-t sm:max-w-sm bg-void-card sm:border border-void-hairline rounded-t-xl2 sm:rounded-xl2">
+        <div className="w-10 h-1 mx-auto mb-5 rounded-full bg-void-hairline sm:hidden" />
+        <h2 className="mb-5 text-2xl font-display text-ink">Ubah Mood</h2>
         <div className="grid grid-cols-4 gap-2 mb-4">
           {MOODS.map((m) => (
             <button
@@ -277,14 +284,14 @@ function MoodEditSheet({ mood, onClose, onSaved }) {
         </div>
         <button
           onClick={onClose}
-          className="w-full py-3 rounded-lg border border-void-hairline text-ink-muted text-sm font-medium mb-3"
+          className="w-full py-3 mb-3 text-sm font-medium border rounded-lg border-void-hairline text-ink-muted"
         >
           Batal
         </button>
         <button
           onClick={handleDelete}
           disabled={deleting}
-          className="w-full text-center text-xs text-warn disabled:opacity-50"
+          className="w-full text-xs text-center text-warn disabled:opacity-50"
         >
           {deleting ? "Menghapus..." : "Hapus catatan ini"}
         </button>
@@ -297,7 +304,7 @@ function MilestoneForm({ childId, editingLog, onClose, onSaved }) {
   const isEdit = !!editingLog;
   const [milestoneType, setMilestoneType] = useState(editingLog?.milestone_type || "bisa_duduk");
   const [customLabel, setCustomLabel] = useState(editingLog?.custom_label || "");
-  const [achievedDate, setAchievedDate] = useState(editingLog?.achieved_date || new Date().toISOString().split("T")[0]);
+  const [achievedDate, setAchievedDate] = useState(editingLog?.achieved_date || todayWIB());
   const [notes, setNotes] = useState(editingLog?.notes || "");
   const [submitting, setSubmitting] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -344,10 +351,10 @@ function MilestoneForm({ childId, editingLog, onClose, onSaved }) {
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
       <form
         onSubmit={handleSubmit}
-        className="relative w-full sm:max-w-sm bg-void-card border-t sm:border border-void-hairline rounded-t-xl2 sm:rounded-xl2 p-6 pb-8"
+        className="relative w-full p-6 pb-8 border-t sm:max-w-sm bg-void-card sm:border border-void-hairline rounded-t-xl2 sm:rounded-xl2"
       >
-        <div className="w-10 h-1 bg-void-hairline rounded-full mx-auto mb-5 sm:hidden" />
-        <h2 className="font-display text-2xl text-ink mb-5">{isEdit ? "Edit Momen Penting" : "Catat Momen Penting"}</h2>
+        <div className="w-10 h-1 mx-auto mb-5 rounded-full bg-void-hairline sm:hidden" />
+        <h2 className="mb-5 text-2xl font-display text-ink">{isEdit ? "Edit Momen Penting" : "Catat Momen Penting"}</h2>
 
         <div className="grid grid-cols-3 gap-2 mb-3">
           {MILESTONE_TYPES.map((t) => (
@@ -384,7 +391,7 @@ function MilestoneForm({ childId, editingLog, onClose, onSaved }) {
           type="date"
           value={achievedDate}
           onChange={(e) => setAchievedDate(e.target.value)}
-          max={new Date().toISOString().split("T")[0]}
+          max={todayWIB()}
           className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink mb-3"
           required
         />
@@ -399,20 +406,20 @@ function MilestoneForm({ childId, editingLog, onClose, onSaved }) {
           className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink placeholder:text-ink-faint mb-4 text-sm"
         />
 
-        {error && <p className="text-warn text-sm mb-3">{error}</p>}
+        {error && <p className="mb-3 text-sm text-warn">{error}</p>}
 
         <div className="flex gap-3">
           <button
             type="button"
             onClick={onClose}
-            className="flex-1 py-3 rounded-lg border border-void-hairline text-ink-muted text-sm font-medium"
+            className="flex-1 py-3 text-sm font-medium border rounded-lg border-void-hairline text-ink-muted"
           >
             Batal
           </button>
           <button
             type="submit"
             disabled={submitting}
-            className="flex-1 py-3 rounded-lg bg-feed text-white text-sm font-semibold disabled:opacity-50"
+            className="flex-1 py-3 text-sm font-semibold text-white rounded-lg bg-feed disabled:opacity-50"
           >
             {submitting ? "Menyimpan..." : isEdit ? "Simpan Perubahan" : "Simpan"}
           </button>
@@ -422,7 +429,7 @@ function MilestoneForm({ childId, editingLog, onClose, onSaved }) {
             type="button"
             onClick={handleDelete}
             disabled={deleting}
-            className="w-full text-center text-xs text-warn mt-3 disabled:opacity-50"
+            className="w-full mt-3 text-xs text-center text-warn disabled:opacity-50"
           >
             {deleting ? "Menghapus..." : "Hapus catatan ini"}
           </button>
