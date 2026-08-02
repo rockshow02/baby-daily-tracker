@@ -29,6 +29,7 @@ from extensions import db
 COLUMNS_TO_ENSURE = [
     ("users", "telegram_chat_id", "VARCHAR(50)"),
     ("children", "nickname", "VARCHAR(30)"),
+    ("articles", "last_tip_shown_at", "DATETIME"),
 ]
 
 
