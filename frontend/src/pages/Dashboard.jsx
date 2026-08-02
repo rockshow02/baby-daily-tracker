@@ -184,9 +184,15 @@ export default function Dashboard({ child, onOpenProfile }) {
   const bottleLogs = feedingLogs.filter((l) => l.feed_type === "asi_perah" || l.feed_type === "sufor");
   const bottleCount = bottleLogs.length;
   const bottleMl = bottleLogs.reduce((sum, l) => sum + (l.volume_ml || 0), 0);
-  const sleepTotalMinutes = sleepLogs.reduce((sum, l) => sum + (l.duration_minutes || 0), 0);
-  const sleepH = Math.floor(sleepTotalMinutes / 60);
-  const sleepM = sleepTotalMinutes % 60;
+  // pakai angka dari summary.sleep.actual_hours (backend), BUKAN jumlah
+  // mentah duration_minutes dari sleepLogs — soalnya sleepLogs sekarang
+  // termasuk sesi yang lintas tengah malam (overlap sama hari ini), dan
+  // duration_minutes-nya itu durasi PENUH sesi itu, belum dipotong sesuai
+  // porsi hari yang lagi dilihat. summary.sleep.actual_hours udah bener
+  // dipotong per hari (fix yang sama kayak Bug #2 sebelumnya).
+  const sleepActualHours = summary ? summary.sleep.actual_hours : 0;
+  const sleepH = Math.floor(sleepActualHours);
+  const sleepM = Math.round((sleepActualHours % 1) * 60);
   const wetCount = diaperLogs.filter((l) => l.diaper_type === "pipis" || l.diaper_type === "keduanya").length;
   const dirtyCount = diaperLogs.filter((l) => l.diaper_type === "pup" || l.diaper_type === "keduanya").length;
 
@@ -270,7 +276,7 @@ export default function Dashboard({ child, onOpenProfile }) {
           </div>
           <div className="flex-shrink-0 w-px h-8 bg-void-hairline" />
           <div className="flex flex-col items-center flex-shrink-0">
-            <span className="text-base">🩲</span>
+            <span className="text-base">💧</span>
             <span className="text-[11px] text-ink font-semibold">{wetCount}x</span>
           </div>
           <div className="flex-shrink-0 w-px h-8 bg-void-hairline" />
@@ -353,7 +359,7 @@ export default function Dashboard({ child, onOpenProfile }) {
             status={summary.sleep.status}
           />
           <StatusPill
-            icon="🩲"
+            icon="💧"
             title="BAK (pipis)"
             actual={summary.wet_diaper.actual}
             unit="x"
@@ -462,7 +468,7 @@ export default function Dashboard({ child, onOpenProfile }) {
             onClick={() => { setEditingItem(null); setSheetType("diaper"); }}
             className="flex flex-col items-center gap-1.5 bg-diaper text-white rounded-xl2 py-3.5 font-medium text-xs"
           >
-            <span className="text-xl">🩲</span>
+            <span className="text-xl">💧</span>
             Popok
           </button>
           <button
