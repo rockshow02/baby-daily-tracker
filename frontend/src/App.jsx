@@ -11,6 +11,7 @@ import StatsScreen from "./pages/StatsScreen";
 import ChildProfileScreen from "./pages/ChildProfileScreen";
 import UserProfileScreen from "./pages/UserProfileScreen";
 import CaregiverModal from "./components/CaregiverModal";
+import OfflineStatusBanner from "./components/OfflineStatusBanner";
 
 function AppContent() {
   const { user, loading, logout, setUser } = useAuth();
@@ -50,8 +51,8 @@ function AppContent() {
 
   if (loading || loadingChildren) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <p className="font-mono text-sm text-ink-faint">Memuat...</p>
+      <div className="min-h-screen flex items-center justify-center">
+        <p className="text-ink-faint font-mono text-sm">Memuat...</p>
       </div>
     );
   }
@@ -78,7 +79,8 @@ function AppContent() {
 
   return (
     <div>
-      <div className="flex items-center justify-between gap-2 px-6 pt-4">
+      <OfflineStatusBanner />
+      <div className="px-6 pt-4 flex items-center justify-between gap-2">
         {children.length > 1 ? (
           <div className="flex gap-2 overflow-x-auto">
             {children.map((c) => (
@@ -96,7 +98,7 @@ function AppContent() {
             ))}
           </div>
         ) : (
-          <p className="text-sm font-medium truncate text-ink">{activeChild.nickname || activeChild.name}</p>
+          <p className="text-sm text-ink font-medium truncate">{activeChild.nickname || activeChild.name}</p>
         )}
 
         <button
@@ -104,7 +106,7 @@ function AppContent() {
           className="flex items-center gap-1.5 bg-void-card border border-void-hairline rounded-full pl-3 pr-2 py-1.5 flex-shrink-0"
         >
           <span className="text-xs text-ink-muted whitespace-nowrap">{activeLabel}</span>
-          <span className="text-sm text-ink-muted">☰</span>
+          <span className="text-ink-muted text-sm">☰</span>
         </button>
       </div>
 
@@ -123,11 +125,11 @@ function AppContent() {
       {showMenu && (
         <div className="fixed inset-0 z-50 flex items-start justify-end sm:items-center sm:justify-center">
           <div className="absolute inset-0 bg-black/50" onClick={() => setShowMenu(false)} />
-          <div className="relative w-full p-4 pb-6 border-b sm:max-w-xs bg-void-card sm:border border-void-hairline rounded-b-xl2 sm:rounded-xl2">
+          <div className="relative w-full sm:max-w-xs bg-void-card border-b sm:border border-void-hairline rounded-b-xl2 sm:rounded-xl2 p-4 pb-6">
             <p className="text-[11px] text-ink-faint uppercase tracking-wider font-mono px-2 pt-1 pb-2">
               Menu
             </p>
-            <div className="mb-3 space-y-1">
+            <div className="space-y-1 mb-3">
               {NAV_ITEMS.map((item) => (
                 <button
                   key={item.key}
@@ -144,7 +146,7 @@ function AppContent() {
                 </button>
               ))}
             </div>
-            <div className="pt-3 space-y-1 border-t border-void-hairline">
+            <div className="border-t border-void-hairline pt-3 space-y-1">
               <button
                 onClick={() => {
                   setActiveView("childProfile");
