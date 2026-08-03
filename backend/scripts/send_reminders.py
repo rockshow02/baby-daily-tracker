@@ -94,14 +94,18 @@ def _status_emoji(status):
 
 
 def build_digest(child):
-    target_date = today_wib()
+    # pakai KEMARIN (h-1), bukan hari ini — soalnya reminder ini kekirim
+    # pagi hari (sekitar jam 07:00-08:00 WIB), jadi kalau pakai "hari ini"
+    # datanya baru beberapa jam doang, nggak representatif buat "ringkasan
+    # sehari". Kemarin udah pasti data lengkap 24 jam.
+    target_date = today_wib() - timedelta(days=1)
 
     feeding_count = FeedingLog.query.filter(
         FeedingLog.child_id == child.id,
         db.func.date(FeedingLog.timestamp) == target_date,
     ).count()
 
-    day_start = now_wib().replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start = now_wib().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
     day_end = day_start + timedelta(days=1)
     sleep_logs = SleepLog.query.filter(
         SleepLog.child_id == child.id,
@@ -136,7 +140,8 @@ def build_digest(child):
     if "feeding" not in summary:
         return None  # anak di luar rentang 0-2 tahun, nggak ada acuan buat dibandingin
 
-    lines = ["📋 <b>Ringkasan Hari Ini</b>"]
+    tanggal_label = target_date.strftime("%d %b")
+    lines = [f"📋 <b>Ringkasan Kemarin ({tanggal_label})</b>"]
     f = summary["feeding"]
     lines.append(f"🍼 Menyusui: {f['actual']}x {_status_emoji(f['status'])}")
     s = summary["sleep"]
