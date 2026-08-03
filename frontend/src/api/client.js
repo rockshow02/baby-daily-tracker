@@ -14,16 +14,70 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
 }
 
+// endpoint "quick log" yang boleh diantrikan offline — sengaja dibatasi
+// ke aksi yang paling sering dicatat real-time (bukan semua endpoint),
+// biar nggak ribet nanganin kasus edge yang lebih kompleks (edit, hapus,
+// dll) buat versi pertama fitur ini
+const OFFLINE_QUEUEABLE_PATHS = [
+  /\/children\/\d+\/feeding-logs$/,
+  /\/children\/\d+\/sleep-logs$/,
+  /\/children\/\d+\/diaper-logs$/,
+  /\/children\/\d+\/pumping-logs$/,
+  /\/children\/\d+\/activity-logs$/,
+  /\/children\/\d+\/medication-logs$/,
+];
+
+function isOfflineQueueable(path, method) {
+  return (
+    method === "POST" && OFFLINE_QUEUEABLE_PATHS.some((re) => re.test(path))
+  );
+}
+
+async function queueOfflineRequest(path, method, body, headers) {
+  const { enqueueRequest } = await import("../utils/offlineQueue");
+  const queueId = await enqueueRequest({
+    method,
+    url: path,
+    body: body || null,
+    headers: { Authorization: headers["Authorization"] || null },
+  });
+
+  let optimisticData = {};
+  try {
+    optimisticData = body ? JSON.parse(body) : {};
+  } catch (_) {
+    // body bukan JSON valid, biarin optimisticData kosong
+  }
+
+  // response "optimistic" — biar UI langsung kelihatan kesimpen, dengan
+  // id lokal (bukan id asli dari server, soalnya belum beneran nyampe
+  // ke server) dan flag _offlineQueued biar UI bisa nampilin indikator
+  return { ...optimisticData, id: `local-${queueId}`, _offlineQueued: true };
+}
+
 async function request(path, options = {}) {
   const token = getToken();
   const headers = { "Content-Type": "application/json", ...options.headers };
   if (token) headers["Authorization"] = `Bearer ${token}`;
+  const method = options.method || "GET";
 
-  const res = await fetch(`${BASE_URL}${path}`, {
-    credentials: "include",
-    headers,
-    ...options,
-  });
+  let res;
+  try {
+    res = await fetch(`${BASE_URL}${path}`, {
+      credentials: "include",
+      headers,
+      ...options,
+    });
+  } catch (networkError) {
+    // fetch cuma throw kalau BENERAN nggak nyambung ke server sama
+    // sekali (offline, DNS gagal, dll) — beda dari server yang sempat
+    // merespons dengan status error (itu diurus di bagian !res.ok bawah,
+    // nggak masuk sini)
+    if (isOfflineQueueable(path, method)) {
+      return await queueOfflineRequest(path, method, options.body, headers);
+    }
+    throw new Error("Nggak ada koneksi internet. Coba lagi nanti.");
+  }
 
   let data = null;
   try {

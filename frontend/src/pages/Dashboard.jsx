@@ -411,6 +411,9 @@ export default function Dashboard({ child, onOpenProfile }) {
                         ` · ${item.duration_minutes} mnt`}
                       {(item.kind === "stroll" || item.kind === "bathing") && item.notes && ` · ${item.notes}`}
                     </p>
+                    {item._offlineQueued && (
+                      <p className="text-[11px] text-warn mt-0.5">⏳ nunggu sinkron</p>
+                    )}
                     {item.created_by_name && (
                       <p className="text-[11px] text-ink-faint mt-0.5">oleh {item.created_by_name}</p>
                     )}
