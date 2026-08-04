@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import SteppedDateTimeInput from "./SteppedDateTimeInput";
 
 const toLocalInputValue = (date) => {
@@ -8,14 +8,64 @@ const toLocalInputValue = (date) => {
   )}:${pad(date.getMinutes())}`;
 };
 
-export default function QuickLogSheet({ type, onClose, onSubmit, onDelete, editingLog }) {
+export default function QuickLogSheet({ type, onClose, onSubmit, onDelete, editingLog, lastFeedingLog }) {
   const now = new Date();
   const isEdit = !!editingLog;
 
+  // sisi payudara: kalau baru (bukan edit) dan ada riwayat asi_langsung
+  // terakhir, saranin sisi SEBALIKNYA (banyak orang tua gantian sisi tiap sesi)
+  const suggestedBreastSide =
+    !isEdit && lastFeedingLog?.feed_type === "asi_langsung" && lastFeedingLog?.breast_side
+      ? lastFeedingLog.breast_side === "kiri"
+        ? "kanan"
+        : lastFeedingLog.breast_side === "kanan"
+        ? "kiri"
+        : "kiri"
+      : "kiri";
+
   const [feedType, setFeedType] = useState(editingLog?.feed_type || "asi_langsung");
-  const [breastSide, setBreastSide] = useState(editingLog?.breast_side || "kiri");
-  const [durationMinutes, setDurationMinutes] = useState(editingLog?.duration_minutes ?? 15);
-  const [volumeMl, setVolumeMl] = useState(editingLog?.volume_ml ?? 60);
+  const [breastSide, setBreastSide] = useState(editingLog?.breast_side || suggestedBreastSide);
+  const [breastSideAutoSuggested] = useState(
+    !isEdit && lastFeedingLog?.feed_type === "asi_langsung" && !!lastFeedingLog?.breast_side
+  );
+  const [durationMinutes, setDurationMinutes] = useState(
+    editingLog?.duration_minutes ??
+      (!isEdit && lastFeedingLog?.feed_type === "asi_langsung" && lastFeedingLog?.duration_minutes
+        ? lastFeedingLog.duration_minutes
+        : 15)
+  );
+  const [volumeMl, setVolumeMl] = useState(
+    editingLog?.volume_ml ??
+      (!isEdit && lastFeedingLog && lastFeedingLog.feed_type !== "asi_langsung" && lastFeedingLog?.volume_ml
+        ? lastFeedingLog.volume_ml
+        : 60)
+  );
+
+  // timer buat catat durasi menyusui langsung, biar nggak perlu itung manual
+  const [timerRunning, setTimerRunning] = useState(false);
+  const [timerStartedAt, setTimerStartedAt] = useState(null);
+  const [timerElapsedSec, setTimerElapsedSec] = useState(0);
+
+  useEffect(() => {
+    if (!timerRunning) return;
+    const interval = setInterval(() => {
+      setTimerElapsedSec(Math.floor((Date.now() - timerStartedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [timerRunning, timerStartedAt]);
+
+  const startTimer = () => {
+    setTimerStartedAt(Date.now());
+    setTimerElapsedSec(0);
+    setTimerRunning(true);
+    setEventTime(toLocalInputValue(new Date())); // waktu kejadian = pas mulai nyusuin, bukan pas selesai
+  };
+
+  const stopTimer = () => {
+    setTimerRunning(false);
+    const minutes = Math.max(1, Math.round(timerElapsedSec / 60));
+    setDurationMinutes(minutes);
+  };
 
   const [startTime, setStartTime] = useState(
     editingLog?.start_time ? toLocalInputValue(new Date(editingLog.start_time)) : toLocalInputValue(now)
@@ -198,7 +248,12 @@ export default function QuickLogSheet({ type, onClose, onSubmit, onDelete, editi
 
             {feedType === "asi_langsung" ? (
               <>
-                <label className="block text-xs text-ink-muted mb-1.5">Sisi payudara</label>
+                <label className="block text-xs text-ink-muted mb-1.5">
+                  Sisi payudara
+                  {breastSideAutoSuggested && (
+                    <span className="text-feed font-normal"> · saran gantian dari terakhir</span>
+                  )}
+                </label>
                 <div className="grid grid-cols-3 gap-2 mb-4">
                   {["kiri", "kanan", "kedua"].map((s) => (
                     <button
@@ -213,18 +268,55 @@ export default function QuickLogSheet({ type, onClose, onSubmit, onDelete, editi
                     </button>
                   ))}
                 </div>
+
                 <label className="block text-xs text-ink-muted mb-1.5">Durasi (menit)</label>
+                {!isEdit && (
+                  <div className="flex items-center gap-3 mb-2">
+                    <button
+                      type="button"
+                      onClick={timerRunning ? stopTimer : startTimer}
+                      className={`px-4 py-2 rounded-lg text-sm font-semibold ${
+                        timerRunning ? "bg-warn text-white" : "bg-feed text-white"
+                      }`}
+                    >
+                      {timerRunning ? "⏸ Stop Timer" : "▶ Mulai Timer"}
+                    </button>
+                    {timerRunning && (
+                      <span className="font-mono text-lg text-feed tabular-nums">
+                        {String(Math.floor(timerElapsedSec / 60)).padStart(2, "0")}:
+                        {String(timerElapsedSec % 60).padStart(2, "0")}
+                      </span>
+                    )}
+                  </div>
+                )}
                 <input
                   type="number"
                   value={durationMinutes}
                   onChange={(e) => setDurationMinutes(e.target.value)}
-                  className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink font-mono"
+                  disabled={timerRunning}
+                  className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink font-mono disabled:opacity-50"
                   min="1"
                 />
               </>
             ) : (
               <>
                 <label className="block text-xs text-ink-muted mb-1.5">Volume (ml)</label>
+                <div className="flex gap-2 mb-2 flex-wrap">
+                  {[60, 90, 120, 150].map((v) => (
+                    <button
+                      type="button"
+                      key={v}
+                      onClick={() => setVolumeMl(v)}
+                      className={`px-3 py-1.5 rounded-full border text-xs font-medium ${
+                        Number(volumeMl) === v
+                          ? "bg-feed/20 border-feed text-feed"
+                          : "border-void-hairline text-ink-muted"
+                      }`}
+                    >
+                      {v} ml
+                    </button>
+                  ))}
+                </div>
                 <input
                   type="number"
                   value={volumeMl}

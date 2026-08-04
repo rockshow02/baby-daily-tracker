@@ -7,7 +7,11 @@ import NextVaccineCard from "../components/NextVaccineCard";
 import RelatedArticles from "../components/RelatedArticles";
 import StatusPill from "../components/StatusPill";
 import QuickLogSheet from "../components/QuickLogSheet";
-import { todayWIB, toWIBDateStr } from "../utils/date";
+import SwipeableHistoryItem from "../components/SwipeableHistoryItem";
+import SmartInsights from "../components/SmartInsights";
+import MotorActivityCard from "../components/MotorActivityCard";
+import { weeklyAverageExcludingToday } from "../utils/insights";
+import { todayWIB, toWIBDateStr, timePeriodLabel } from "../utils/date";
 
 const todayStr = () => todayWIB();
 
@@ -72,8 +76,28 @@ export default function Dashboard({ child, onOpenProfile }) {
   const [editingItem, setEditingItem] = useState(null); // item riwayat yang lagi diedit, atau null buat catat baru
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [weeklyStats, setWeeklyStats] = useState(null);
 
   const isToday = date === todayStr();
+
+  // insight cuma masuk akal buat "hari ini" (bandingin ke tren beberapa
+  // hari terakhir) — pas lihat riwayat tanggal lama, nggak perlu fetch ini
+  useEffect(() => {
+    if (!isToday) {
+      setWeeklyStats(null);
+      return;
+    }
+    api.getStats(child.id, 7).then((res) => setWeeklyStats(res.days || []));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [child.id, isToday, feedingLogs.length, sleepLogs.length, diaperLogs.length]);
+
+  const weeklyAverages = weeklyStats
+    ? {
+        feeding: weeklyAverageExcludingToday(weeklyStats, "feeding_count", date),
+        sleep: weeklyAverageExcludingToday(weeklyStats, "sleep_hours", date),
+        wetDiaper: weeklyAverageExcludingToday(weeklyStats, "wet_diaper_count", date),
+      }
+    : null;
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -151,6 +175,89 @@ export default function Dashboard({ child, onOpenProfile }) {
     await loadAll();
   };
 
+  // duplikasi 1 entri jadi entri baru dengan waktu SEKARANG, data lainnya
+  // sama persis — biar nggak perlu ngisi ulang form dari nol
+  const handleDuplicate = async (item) => {
+    const nowIso = new Date().toISOString();
+    let type = item.kind;
+    let payload = {};
+
+    if (item.kind === "feeding") {
+      payload = {
+        timestamp: nowIso,
+        feed_type: item.feed_type,
+        duration_minutes: item.duration_minutes,
+        volume_ml: item.volume_ml,
+        breast_side: item.breast_side,
+      };
+    } else if (item.kind === "sleep") {
+      payload = { start_time: nowIso, end_time: null, sleep_type: item.sleep_type };
+    } else if (item.kind === "diaper") {
+      payload = { timestamp: nowIso, diaper_type: item.diaper_type, consistency: item.consistency };
+    } else if (item.kind === "pumping") {
+      payload = {
+        timestamp: nowIso,
+        duration_minutes: item.duration_minutes,
+        volume_ml: item.volume_ml,
+        breast_side: item.breast_side,
+      };
+    } else if (item.kind === "stroll" || item.kind === "bathing") {
+      payload = {
+        timestamp: nowIso,
+        activity_type: item.kind,
+        duration_minutes: item.duration_minutes,
+        notes: item.notes,
+      };
+    } else if (item.kind === "vitamin") {
+      payload = { timestamp: nowIso, medication_name: item.medication_name };
+    }
+
+    await handleCreate(type, payload);
+  };
+
+  // hapus dengan jeda "Batalkan" — item langsung disembunyikan dari
+  // tampilan (optimistic), tapi baru BENERAN dihapus dari server setelah
+  // beberapa detik kalau nggak dibatalkan. Biar nggak was-was kepencet
+  // nggak sengaja pas lagi buru-buru.
+  const [hiddenKeys, setHiddenKeys] = useState(new Set());
+  const [pendingDelete, setPendingDelete] = useState(null); // {key, kind, id, timeoutId}
+  const UNDO_DELAY_MS = 5000;
+
+  const handleSoftDelete = (item) => {
+    const key = `${item.kind}-${item.id}`;
+
+    // kalau ada penghapusan lain yang masih nunggu, langsung eksekusi
+    // dulu (jangan numpuk beberapa "pending" bersamaan, bikin bingung)
+    if (pendingDelete) {
+      clearTimeout(pendingDelete.timeoutId);
+      handleDelete(pendingDelete.kind, pendingDelete.id);
+    }
+
+    setHiddenKeys((prev) => new Set(prev).add(key));
+    const timeoutId = setTimeout(async () => {
+      await handleDelete(item.kind, item.id);
+      setPendingDelete(null);
+      setHiddenKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }, UNDO_DELAY_MS);
+
+    setPendingDelete({ key, kind: item.kind, id: item.id, label: item.kind, timeoutId });
+  };
+
+  const handleUndoDelete = () => {
+    if (!pendingDelete) return;
+    clearTimeout(pendingDelete.timeoutId);
+    setHiddenKeys((prev) => {
+      const next = new Set(prev);
+      next.delete(pendingDelete.key);
+      return next;
+    });
+    setPendingDelete(null);
+  };
+
   const handleWakeUp = async (sleepLogId) => {
     await api.updateSleep(sleepLogId, { end_time: new Date().toISOString() });
     await loadAll();
@@ -172,7 +279,22 @@ export default function Dashboard({ child, onOpenProfile }) {
     ...pumpingLogs.map((l) => ({ ...l, kind: "pumping", at: l.timestamp })),
     ...activityLogs.map((l) => ({ ...l, kind: l.activity_type, at: l.timestamp })),
     ...medicationLogs.map((l) => ({ ...l, kind: "vitamin", at: l.timestamp })),
-  ].sort((a, b) => new Date(b.at) - new Date(a.at));
+  ].sort((a, b) => new Date(b.at) - new Date(a.at))
+    .filter((item) => !hiddenKeys.has(`${item.kind}-${item.id}`));
+
+  // kelompokin riwayat per periode waktu (Pagi/Siang/Sore/Malam) — dibikin
+  // dari list yang UDAH keurut (terbaru dulu), jadi grup baru dibuat tiap
+  // periode-nya beda dari item sebelumnya, biar urutannya tetap natural
+  const groupedHistory = historyItems.reduce((groups, item) => {
+    const period = timePeriodLabel(item.at);
+    const lastGroup = groups[groups.length - 1];
+    if (lastGroup && lastGroup.period === period) {
+      lastGroup.items.push(item);
+    } else {
+      groups.push({ period, items: [item] });
+    }
+    return groups;
+  }, []);
 
   const dotColor = (kind) => {
     if (kind === "feeding" || kind === "pumping" || kind === "vitamin") return "bg-feed";
@@ -234,23 +356,30 @@ export default function Dashboard({ child, onOpenProfile }) {
           </div>
         </div>
         <div className="flex items-center gap-4 mt-3">
-          <a
-            href={api.exportPdfUrl(child.id)}
-            target="_blank"
-            rel="noreferrer"
+          <button
+            type="button"
+            onClick={() =>
+              api.downloadAuthenticated(
+                api.exportPdfUrl(child.id),
+                `laporan-${child.name.toLowerCase()}.pdf`
+              )
+            }
             className="inline-flex items-center gap-1.5 text-xs text-ink-muted"
           >
             📄 Export laporan PDF
-          </a>
-          <a
-            href={api.exportJsonUrl(child.id)}
-            target="_blank"
-            rel="noreferrer"
-            download={`backup-${child.name.toLowerCase()}.json`}
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              api.downloadAuthenticated(
+                api.exportJsonUrl(child.id),
+                `backup-${child.name.toLowerCase()}.json`
+              )
+            }
             className="inline-flex items-center gap-1.5 text-xs text-ink-muted"
           >
             💾 Backup data (JSON)
-          </a>
+          </button>
         </div>
       </header>
 
@@ -321,6 +450,13 @@ export default function Dashboard({ child, onOpenProfile }) {
         </div>
       </div>
 
+      {isToday && (
+        <div className="px-6">
+          <SmartInsights summary={summary} weeklyAverages={weeklyAverages} />
+          <MotorActivityCard ageMonths={summary ? summary.age_days / 30.4375 : null} />
+        </div>
+      )}
+
       {/* radial clock */}
       <div className="px-6 py-4 flex justify-center">
         <DailyRadialClock feedingLogs={feedingLogs} sleepLogs={sleepLogs} diaperLogs={diaperLogs} />
@@ -381,10 +517,18 @@ export default function Dashboard({ child, onOpenProfile }) {
         ) : historyItems.length === 0 ? (
           <p className="text-ink-faint text-sm">Belum ada catatan {isToday ? "hari ini" : "di tanggal ini"}.</p>
         ) : (
-          <div className="space-y-2">
-            {historyItems.map((item) => (
-              <div
+          <div className="space-y-4">
+            {groupedHistory.map((group, groupIdx) => (
+              <div key={groupIdx}>
+                <p className="text-[11px] text-ink-faint font-medium mb-2 pl-1">{group.period}</p>
+                <div className="space-y-2">
+                  {group.items.map((item) => (
+              <SwipeableHistoryItem
                 key={`${item.kind}-${item.id}`}
+                onDuplicate={() => handleDuplicate(item)}
+                onDelete={() => handleSoftDelete(item)}
+              >
+              <div
                 onClick={() => openEdit(item)}
                 className="flex items-center justify-between bg-void-card border border-void-hairline rounded-xl2 px-4 py-3 cursor-pointer active:bg-void-raised"
               >
@@ -434,7 +578,7 @@ export default function Dashboard({ child, onOpenProfile }) {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      handleDelete(item.kind, item.id);
+                      handleSoftDelete(item);
                     }}
                     className="text-ink-faint text-xs px-2 py-1"
                     aria-label="Hapus catatan"
@@ -443,10 +587,23 @@ export default function Dashboard({ child, onOpenProfile }) {
                   </button>
                 </div>
               </div>
+              </SwipeableHistoryItem>
+                  ))}
+                </div>
+              </div>
             ))}
           </div>
         )}
       </div>
+
+      {pendingDelete && (
+        <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-40 bg-ink text-void px-4 py-2.5 rounded-full shadow-soft flex items-center gap-3 text-sm">
+          <span>Catatan dihapus</span>
+          <button onClick={handleUndoDelete} className="font-semibold text-feed">
+            Batalkan
+          </button>
+        </div>
+      )}
 
       <div className="px-6">
         <RelatedArticles category="feeding" ageMonths={summary ? summary.age_days / 30.4375 : null} />
@@ -523,6 +680,11 @@ export default function Dashboard({ child, onOpenProfile }) {
         <QuickLogSheet
           type={sheetType}
           editingLog={editingItem}
+          lastFeedingLog={
+            feedingLogs.length > 0
+              ? [...feedingLogs].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0]
+              : null
+          }
           onClose={closeSheet}
           onSubmit={handleSheetSubmit}
           onDelete={editingItem ? () => handleDelete(editingItem.kind, editingItem.id) : undefined}
