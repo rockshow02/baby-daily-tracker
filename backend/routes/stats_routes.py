@@ -2,13 +2,14 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 
 from flask import Blueprint, request, jsonify, session
+from sqlalchemy import or_
 
 from models import (
     Child, FeedingLog, SleepLog, DiaperLog, PumpingLog, ActivityLog, MoodLog,
 )
 from utils.access import get_accessible_child
 from utils.auth import get_current_user_id
-from utils.timezone_utils import today_wib
+from utils.timezone_utils import today_wib, now_wib
 
 stats_bp = Blueprint("stats", __name__)
 
@@ -70,16 +71,25 @@ def get_stats(child_id):
         if key in buckets:
             buckets[key]["feeding_count"] += 1
 
-    # sleep (durasi dihitung di Python karena end_time bisa null / properti)
+    # sleep — query yang OVERLAP sama rentang [start_dt, end_dt], BUKAN
+    # cuma yang start_time-nya jatuh di rentang itu — biar sesi yang
+    # lintas tengah malam ikut kehitung penuh (konsisten sama fix yang
+    # sama di daily_log_routes.py buat endpoint daily-summary)
     sleep_logs = SleepLog.query.filter(
         SleepLog.child_id == child_id,
-        SleepLog.start_time >= start_dt,
         SleepLog.start_time <= end_dt,
+        or_(SleepLog.end_time.is_(None), SleepLog.end_time >= start_dt),
     ).all()
     for log in sleep_logs:
-        key = log.start_time.date().isoformat()
-        if key in buckets and log.duration_minutes:
-            buckets[key]["sleep_hours"] += log.duration_minutes / 60
+        session_end = min(log.end_time or now_wib(), end_dt)
+        cursor = max(log.start_time, start_dt)
+        while cursor < session_end:
+            day_key = cursor.date().isoformat()
+            day_boundary_end = datetime.combine(cursor.date(), datetime.min.time()) + timedelta(days=1)
+            segment_end = min(session_end, day_boundary_end)
+            if day_key in buckets and segment_end > cursor:
+                buckets[day_key]["sleep_hours"] += (segment_end - cursor).total_seconds() / 3600
+            cursor = segment_end
 
     # diaper
     diaper_logs = DiaperLog.query.filter(

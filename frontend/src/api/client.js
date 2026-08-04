@@ -145,6 +145,40 @@ export const api = {
   photoUrl: (filename) => `${BASE_URL}/uploads/${filename}`,
   exportPdfUrl: (childId) => `${BASE_URL}/children/${childId}/export-pdf`,
   exportJsonUrl: (childId) => `${BASE_URL}/children/${childId}/export-json`,
+
+  /**
+   * Download file yang butuh autentikasi (export PDF/JSON) — TIDAK bisa
+   * pakai <a href> biasa, soalnya navigasi link biasa nggak nyertain
+   * header Authorization (token auth kita bukan cookie session), bikin
+   * request-nya keanggep belum login dan gagal "anak tidak ditemukan".
+   * Fetch manual dengan token, ambil sebagai Blob, baru trigger download.
+   */
+  downloadAuthenticated: async (url, filename) => {
+    const token = getToken();
+    const res = await fetch(url, {
+      credentials: "include",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) {
+      let message = `Gagal download (${res.status})`;
+      try {
+        const data = await res.json();
+        if (data?.error) message = data.error;
+      } catch (_) {
+        // body bukan JSON, biarin pesan default
+      }
+      throw new Error(message);
+    }
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objectUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(objectUrl);
+  },
   importJson: (data) =>
     request("/children/import-json", {
       method: "POST",

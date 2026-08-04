@@ -30,3 +30,22 @@ export function toWIBDateStr(date) {
   parts.forEach((p) => (map[p.type] = p.value));
   return `${map.year}-${map.month}-${map.day}`;
 }
+
+/** Ambil jam (0-23) dalam WIB dari sebuah timestamp, TIDAK bergantung timezone device. */
+export function getWIBHour(dateStr) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Jakarta",
+    hour: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date(dateStr));
+  return Number(parts.find((p) => p.type === "hour").value);
+}
+
+/** Label periode waktu (Pagi/Siang/Sore/Malam) buat pengelompokan riwayat. */
+export function timePeriodLabel(dateStr) {
+  const h = getWIBHour(dateStr);
+  if (h >= 4 && h < 11) return "🌅 Pagi";
+  if (h >= 11 && h < 15) return "☀️ Siang";
+  if (h >= 15 && h < 18) return "🌇 Sore";
+  return "🌙 Malam";
+}

@@ -110,17 +110,17 @@ export default function ChildProfileScreen({ child, currentUserId, onUpdated }) 
   const tambahanGiven = tambahan.filter((v) => v.given).length;
 
   return (
-    <div className="min-h-screen px-6 pt-8 pb-16">
-      <h1 className="mb-6 text-3xl font-display text-ink">Profil Anak</h1>
+    <div className="min-h-screen pb-16 px-6 pt-8">
+      <h1 className="font-display text-3xl text-ink mb-6">Profil Anak</h1>
 
       <div className="flex flex-col items-center mb-6">
         <label className="cursor-pointer">
-          <div className="flex items-center justify-center overflow-hidden border-2 border-dashed rounded-full w-28 h-28 border-void-hairline bg-void-card">
+          <div className="w-28 h-28 rounded-full border-2 border-dashed border-void-hairline overflow-hidden bg-void-card flex items-center justify-center">
             {photoPreview || child.photo_filename ? (
               <img
                 src={photoPreview || api.photoUrl(child.photo_filename)}
                 alt={child.name}
-                className="object-cover w-full h-full"
+                className="w-full h-full object-cover"
               />
             ) : (
               <span className="text-3xl">📷</span>
@@ -132,22 +132,22 @@ export default function ChildProfileScreen({ child, currentUserId, onUpdated }) 
           <button
             onClick={handlePhotoUpload}
             disabled={uploadingPhoto}
-            className="mt-2 text-xs font-medium text-feed disabled:opacity-50"
+            className="text-xs text-feed font-medium mt-2 disabled:opacity-50"
           >
             {uploadingPhoto ? "Mengunggah..." : "Simpan foto baru"}
           </button>
         )}
-        <p className="mt-3 text-2xl font-display text-ink">{child.nickname || child.name}</p>
+        <p className="font-display text-2xl text-ink mt-3">{child.nickname || child.name}</p>
         {child.nickname && <p className="text-xs text-ink-faint">{child.name}</p>}
         <p className="text-sm text-ink-muted">{ageString(child.birth_date)}</p>
       </div>
 
-      {error && <p className="mb-4 text-sm text-center text-warn">{error}</p>}
+      {error && <p className="text-warn text-sm text-center mb-4">{error}</p>}
 
-      <div className="p-4 mb-4 border bg-void-card border-void-hairline rounded-xl2 shadow-soft">
+      <div className="bg-void-card border border-void-hairline rounded-xl2 p-4 mb-4 shadow-soft">
         <div className="flex items-center justify-between mb-3">
-          <p className="font-mono text-xs tracking-wider uppercase text-ink-faint">Data Anak</p>
-          <button onClick={() => setEditing(!editing)} className="text-xs font-medium text-feed">
+          <p className="text-xs text-ink-faint font-mono uppercase tracking-wider">Data Anak</p>
+          <button onClick={() => setEditing(!editing)} className="text-xs text-feed font-medium">
             {editing ? "Batal" : "Edit"}
           </button>
         </div>
@@ -182,17 +182,17 @@ export default function ChildProfileScreen({ child, currentUserId, onUpdated }) 
         ) : (
           <form onSubmit={handleSaveInfo} className="space-y-3">
             <div>
-              <label className="block mb-1 text-xs text-ink-muted">Nama lengkap</label>
+              <label className="block text-xs text-ink-muted mb-1">Nama lengkap</label>
               <input
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                className="w-full px-3 py-2 text-sm border rounded-lg bg-void border-void-hairline text-ink"
+                className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2 text-ink text-sm"
                 required
               />
             </div>
             <div>
-              <label className="block mb-1 text-xs text-ink-muted">
+              <label className="block text-xs text-ink-muted mb-1">
                 Nama panggilan <span className="text-ink-faint">(ditampilkan di Dashboard)</span>
               </label>
               <input
@@ -201,18 +201,18 @@ export default function ChildProfileScreen({ child, currentUserId, onUpdated }) 
                 onChange={(e) => setNickname(e.target.value)}
                 maxLength={30}
                 placeholder="cth. Lenya"
-                className="w-full px-3 py-2 text-sm border rounded-lg bg-void border-void-hairline text-ink placeholder:text-ink-faint"
+                className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2 text-ink text-sm placeholder:text-ink-faint"
               />
             </div>
             <div>
-              <label className="block mb-1 text-xs text-ink-muted">Tanggal lahir</label>
+              <label className="block text-xs text-ink-muted mb-1">Tanggal lahir</label>
               <input
                 type="date"
                 value={birthDate}
                 onChange={(e) => setBirthDate(e.target.value)}
                 min={new Date(new Date().setFullYear(new Date().getFullYear() - 6)).toISOString().split("T")[0]}
                 max={todayWIB()}
-                className="w-full px-3 py-2 text-sm border rounded-lg bg-void border-void-hairline text-ink"
+                className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2 text-ink text-sm"
                 required
               />
             </div>
@@ -232,23 +232,23 @@ export default function ChildProfileScreen({ child, currentUserId, onUpdated }) 
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="block mb-1 text-xs text-ink-muted">Berat lahir (kg)</label>
+                <label className="block text-xs text-ink-muted mb-1">Berat lahir (kg)</label>
                 <input
                   type="number"
                   step="0.1"
                   value={weight}
                   onChange={(e) => setWeight(e.target.value)}
-                  className="w-full px-3 py-2 text-sm border rounded-lg bg-void border-void-hairline text-ink"
+                  className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2 text-ink text-sm"
                 />
               </div>
               <div>
-                <label className="block mb-1 text-xs text-ink-muted">Tinggi lahir (cm)</label>
+                <label className="block text-xs text-ink-muted mb-1">Tinggi lahir (cm)</label>
                 <input
                   type="number"
                   step="0.1"
                   value={height}
                   onChange={(e) => setHeight(e.target.value)}
-                  className="w-full px-3 py-2 text-sm border rounded-lg bg-void border-void-hairline text-ink"
+                  className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2 text-ink text-sm"
                 />
               </div>
             </div>
@@ -264,14 +264,14 @@ export default function ChildProfileScreen({ child, currentUserId, onUpdated }) 
       </div>
 
       {loading ? (
-        <p className="py-6 text-sm text-center text-ink-faint">Memuat...</p>
+        <p className="text-ink-faint text-sm text-center py-6">Memuat...</p>
       ) : (
         <div className="grid grid-cols-2 gap-3 mb-4">
-          <div className="p-4 border bg-void-card border-void-hairline rounded-xl2">
-            <p className="mb-1 text-xs text-ink-faint">Pertumbuhan Terbaru</p>
+          <div className="bg-void-card border border-void-hairline rounded-xl2 p-4">
+            <p className="text-xs text-ink-faint mb-1">Pertumbuhan Terbaru</p>
             {growthLatest?.latest ? (
               <>
-                <p className="text-sm font-medium text-ink">
+                <p className="text-sm text-ink font-medium">
                   {growthLatest.latest.weight_kg && `${growthLatest.latest.weight_kg} kg`}
                   {growthLatest.latest.height_cm && ` / ${growthLatest.latest.height_cm} cm`}
                 </p>
@@ -284,40 +284,52 @@ export default function ChildProfileScreen({ child, currentUserId, onUpdated }) 
             )}
           </div>
 
-          <div className="p-4 border bg-void-card border-void-hairline rounded-xl2">
-            <p className="mb-1 text-xs text-ink-faint">Vaksinasi Wajib</p>
-            <p className="text-sm font-medium text-ink">{wajibGiven} / {wajib.length}</p>
+          <div className="bg-void-card border border-void-hairline rounded-xl2 p-4">
+            <p className="text-xs text-ink-faint mb-1">Vaksinasi Wajib</p>
+            <p className="text-sm text-ink font-medium">{wajibGiven} / {wajib.length}</p>
             <p className="text-[11px] text-ink-faint mt-0.5">Tambahan: {tambahanGiven} / {tambahan.length}</p>
           </div>
 
-          <div className="p-4 border bg-void-card border-void-hairline rounded-xl2">
-            <p className="mb-1 text-xs text-ink-faint">Momen Penting</p>
-            <p className="text-sm font-medium text-ink">{milestoneCount} tercatat</p>
+          <div className="bg-void-card border border-void-hairline rounded-xl2 p-4">
+            <p className="text-xs text-ink-faint mb-1">Momen Penting</p>
+            <p className="text-sm text-ink font-medium">{milestoneCount} tercatat</p>
           </div>
 
           <button
             onClick={() => setShowCaregivers(true)}
-            className="p-4 text-left border bg-void-card border-void-hairline rounded-xl2"
+            className="bg-void-card border border-void-hairline rounded-xl2 p-4 text-left"
           >
-            <p className="mb-1 text-xs text-ink-faint">Pengasuh</p>
-            <p className="text-sm font-medium text-feed">{caregiverCount} orang →</p>
+            <p className="text-xs text-ink-faint mb-1">Pengasuh</p>
+            <p className="text-sm text-feed font-medium">{caregiverCount} orang →</p>
           </button>
         </div>
       )}
 
-      <div className="flex items-center justify-center gap-4">
-        <a href={api.exportPdfUrl(child.id)} target="_blank" rel="noreferrer" className="text-xs text-ink-muted">
+      <div className="flex items-center gap-4 justify-center">
+        <button
+          type="button"
+          onClick={() =>
+            api.downloadAuthenticated(
+              api.exportPdfUrl(child.id),
+              `laporan-${child.name.toLowerCase()}.pdf`
+            )
+          }
+          className="text-xs text-ink-muted"
+        >
           📄 Export PDF
-        </a>
-        <a
-          href={api.exportJsonUrl(child.id)}
-          target="_blank"
-          rel="noreferrer"
-          download={`backup-${child.name.toLowerCase()}.json`}
+        </button>
+        <button
+          type="button"
+          onClick={() =>
+            api.downloadAuthenticated(
+              api.exportJsonUrl(child.id),
+              `backup-${child.name.toLowerCase()}.json`
+            )
+          }
           className="text-xs text-ink-muted"
         >
           💾 Backup JSON
-        </a>
+        </button>
       </div>
 
       {showCaregivers && (
