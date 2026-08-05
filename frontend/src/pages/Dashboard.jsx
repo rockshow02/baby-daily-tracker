@@ -8,7 +8,7 @@ import RelatedArticles from "../components/RelatedArticles";
 import StatusPill from "../components/StatusPill";
 import QuickLogSheet from "../components/QuickLogSheet";
 import SwipeableHistoryItem from "../components/SwipeableHistoryItem";
-import SmartInsights from "../components/SmartInsights";
+import SmartInsightsBell from "../components/SmartInsightsBell";
 import MotorActivityCard from "../components/MotorActivityCard";
 import { weeklyAverageExcludingToday } from "../utils/insights";
 import { todayWIB, toWIBDateStr, timePeriodLabel } from "../utils/date";
@@ -339,10 +339,12 @@ export default function Dashboard({ child, onOpenProfile }) {
               <h1 className="font-display text-3xl text-ink">{child.nickname || child.name}</h1>
             </div>
           </div>
-          <div className="flex items-center gap-2 bg-void-card border border-void-hairline rounded-full px-1 py-1">
-            <button onClick={() => shiftDate(-1)} className="w-8 h-8 flex items-center justify-center text-ink-muted">
-              ‹
-            </button>
+          <div className="flex items-center gap-2">
+            {isToday && <SmartInsightsBell summary={summary} weeklyAverages={weeklyAverages} />}
+            <div className="flex items-center gap-2 bg-void-card border border-void-hairline rounded-full px-1 py-1">
+              <button onClick={() => shiftDate(-1)} className="w-8 h-8 flex items-center justify-center text-ink-muted">
+                ‹
+              </button>
             <span className="font-mono text-xs text-ink-muted min-w-[64px] text-center">
               {isToday ? "Hari ini" : new Date(date).toLocaleDateString("id-ID", { day: "2-digit", month: "short" })}
             </span>
@@ -353,6 +355,7 @@ export default function Dashboard({ child, onOpenProfile }) {
             >
               ›
             </button>
+            </div>
           </div>
         </div>
         <div className="flex items-center gap-4 mt-3">
@@ -452,7 +455,6 @@ export default function Dashboard({ child, onOpenProfile }) {
 
       {isToday && (
         <div className="px-6">
-          <SmartInsights summary={summary} weeklyAverages={weeklyAverages} />
           <MotorActivityCard ageMonths={summary ? summary.age_days / 30.4375 : null} />
         </div>
       )}
