@@ -7,23 +7,59 @@ const TONE_STYLE = {
   good: "bg-feed/10 border-feed/30 text-feed",
 };
 
+const PANEL_WIDTH = 288; // px, harus sama kayak yang dipakai di style width panel
+const VIEWPORT_MARGIN = 16; // px, jarak aman minimal dari tepi layar
+
 export default function SmartInsightsBell({ summary, weeklyAverages }) {
   const [open, setOpen] = useState(false);
-  const panelRef = useRef(null);
+  const [panelStyle, setPanelStyle] = useState({});
+  const wrapperRef = useRef(null);
+  const buttonRef = useRef(null);
 
-  // tutup panel kalau tap di luar area-nya
+  // hitung posisi panel manual (bukan cuma andelin CSS "right-0") — biar
+  // TETAP nggak keluar tepi kiri layar walau tombol bell-nya nggak persis
+  // di ujung kanan (kasus di HP: bell + date-nav berdampingan, bell nggak
+  // selalu di ujung banget)
+  const computePosition = () => {
+    if (!buttonRef.current) return;
+    const rect = buttonRef.current.getBoundingClientRect();
+    const width = Math.min(PANEL_WIDTH, window.innerWidth - VIEWPORT_MARGIN * 2);
+    let left = rect.right - width; // default: rata kanan sama tombol bell
+    left = Math.max(VIEWPORT_MARGIN, left); // jangan sampai kurang dari margin aman kiri
+    left = Math.min(left, window.innerWidth - width - VIEWPORT_MARGIN); // jangan lewat kanan juga
+    setPanelStyle({
+      position: "fixed",
+      top: rect.bottom + 6,
+      left,
+      width,
+    });
+  };
+
+  const toggleOpen = () => {
+    if (!open) computePosition();
+    setOpen(!open);
+  };
+
   useEffect(() => {
     if (!open) return;
     const handleClickOutside = (e) => {
-      if (panelRef.current && !panelRef.current.contains(e.target)) {
+      if (
+        wrapperRef.current && !wrapperRef.current.contains(e.target) &&
+        !document.getElementById("smart-insights-panel")?.contains(e.target)
+      ) {
         setOpen(false);
       }
     };
+    const handleResize = () => computePosition();
     document.addEventListener("mousedown", handleClickOutside);
     document.addEventListener("touchstart", handleClickOutside);
+    window.addEventListener("resize", handleResize);
+    window.addEventListener("scroll", handleResize, true);
     return () => {
       document.removeEventListener("mousedown", handleClickOutside);
       document.removeEventListener("touchstart", handleClickOutside);
+      window.removeEventListener("resize", handleResize);
+      window.removeEventListener("scroll", handleResize, true);
     };
   }, [open]);
 
@@ -55,10 +91,11 @@ export default function SmartInsightsBell({ summary, weeklyAverages }) {
   const attentionCount = insights.filter((i) => i.tone !== "good").length;
 
   return (
-    <div className="relative" ref={panelRef}>
+    <div className="relative" ref={wrapperRef}>
       <button
+        ref={buttonRef}
         type="button"
-        onClick={() => setOpen(!open)}
+        onClick={toggleOpen}
         className="relative w-9 h-9 flex items-center justify-center bg-void-card border border-void-hairline rounded-full"
         aria-label="Insight hari ini"
       >
@@ -71,7 +108,11 @@ export default function SmartInsightsBell({ summary, weeklyAverages }) {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-11 z-30 w-72 bg-void-card border border-void-hairline rounded-xl2 shadow-soft p-3 space-y-2">
+        <div
+          id="smart-insights-panel"
+          style={panelStyle}
+          className="z-30 bg-void-card border border-void-hairline rounded-xl2 shadow-soft p-3 space-y-2"
+        >
           <p className="text-[11px] text-ink-faint uppercase tracking-wider font-mono px-1 mb-1">
             Insight Hari Ini
           </p>
