@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { api } from "../api/client";
 import DailyRadialClock from "../components/DailyRadialClock";
 import FeedingPredictionCard from "../components/FeedingPredictionCard";
@@ -127,14 +127,74 @@ export default function Dashboard({ child, onOpenProfile }) {
     loadAll();
   }, [loadAll]);
 
+  // pill notifikasi "tersimpan offline" — SENGAJA dibikin mirip pola
+  // pendingDelete di bawah (bar mengambang, ilang sendiri), bukan sistem
+  // toast baru, biar konsisten sama UI yang udah ada
+  const [offlineSavedNotice, setOfflineSavedNotice] = useState(false);
+  const offlineNoticeTimeoutRef = useRef(null);
+  const OFFLINE_NOTICE_DURATION_MS = 4000;
+
+  useEffect(() => {
+    return () => clearTimeout(offlineNoticeTimeoutRef.current);
+  }, []);
+
+  const showOfflineSavedNotice = () => {
+    setOfflineSavedNotice(true);
+    clearTimeout(offlineNoticeTimeoutRef.current);
+    offlineNoticeTimeoutRef.current = setTimeout(() => setOfflineSavedNotice(false), OFFLINE_NOTICE_DURATION_MS);
+  };
+
+  // nambahin record baru (asli dari server ATAU optimistic dari antrian
+  // offline) ke state lokal yang sesuai jenisnya, biar langsung kelihatan
+  // di riwayat tanpa perlu loadAll() dulu
+  const addOptimisticLog = (type, record) => {
+    if (type === "feeding") setFeedingLogs((prev) => [record, ...prev]);
+    else if (type === "sleep") setSleepLogs((prev) => [record, ...prev]);
+    else if (type === "diaper") setDiaperLogs((prev) => [record, ...prev]);
+    else if (type === "pumping") setPumpingLogs((prev) => [record, ...prev]);
+    else if (type === "stroll" || type === "bathing") setActivityLogs((prev) => [record, ...prev]);
+    else if (type === "vitamin") setMedicationLogs((prev) => [record, ...prev]);
+  };
+
+  const createByType = async (type, payload) => {
+    if (type === "feeding") return await api.createFeeding(child.id, payload);
+    if (type === "sleep") return await api.createSleep(child.id, payload);
+    if (type === "diaper") return await api.createDiaper(child.id, payload);
+    if (type === "pumping") return await api.createPumping(child.id, payload);
+    if (type === "stroll" || type === "bathing") return await api.createActivity(child.id, payload);
+    if (type === "vitamin") return await api.createMedication(child.id, payload);
+    return undefined;
+  };
+
   const handleCreate = async (type, payload) => {
-    if (type === "feeding") await api.createFeeding(child.id, payload);
-    if (type === "sleep") await api.createSleep(child.id, payload);
-    if (type === "diaper") await api.createDiaper(child.id, payload);
-    if (type === "pumping") await api.createPumping(child.id, payload);
-    if (type === "stroll" || type === "bathing") await api.createActivity(child.id, payload);
-    if (type === "vitamin") await api.createMedication(child.id, payload);
-    await loadAll();
+    // kalau createByType() sendiri gagal (request-nya beneran ditolak,
+    // ATAU IndexedDB gagal dipakai buat antri pas offline), exception-nya
+    // BIARIN nembus ke atas apa adanya — itu yang bikin QuickLogSheet tau
+    // penyimpanannya beneran gagal (modal tetap kebuka, pesan error muncul)
+    const result = await createByType(type, payload);
+
+    if (result?._offlineQueued) {
+      // offline: request-nya UDAH SUKSES diantrikan (bukan gagal!) — JANGAN
+      // panggil loadAll(), soalnya GET bakal gagal offline dan bikin
+      // penyimpanan yang sebenarnya sukses ini keanggep gagal. Cukup
+      // tambahin optimistic record ke state lokal.
+      addOptimisticLog(type, result);
+      showOfflineSavedNotice();
+      return result;
+    }
+
+    // online, beneran kesimpen di server — refresh biar dapet data lengkap
+    // (id asli, created_by_name, dll). Kalau refresh-nya sendiri yang gagal
+    // (mis. koneksi putus PAS SETELAH create sukses), itu kegagalan REFRESH,
+    // BUKAN kegagalan SIMPAN — jangan sampai bikin QuickLogSheet ngelaporin
+    // "gagal disimpan" padahal datanya udah aman di server.
+    try {
+      await loadAll();
+    } catch (_) {
+      // data lokal mungkin agak basi sampai refresh berikutnya berhasil,
+      // tapi record-nya sendiri udah tersimpan — bukan kegagalan buat user
+    }
+    return result;
   };
 
   const handleUpdate = async (kind, id, payload) => {
@@ -604,6 +664,12 @@ export default function Dashboard({ child, onOpenProfile }) {
           <button onClick={handleUndoDelete} className="font-semibold text-feed">
             Batalkan
           </button>
+        </div>
+      )}
+
+      {offlineSavedNotice && (
+        <div className="fixed bottom-36 left-1/2 -translate-x-1/2 z-40 bg-ink text-void px-4 py-2.5 rounded-full shadow-soft text-sm text-center max-w-[90vw]">
+          Catatan disimpan di perangkat dan akan disinkronkan saat online.
         </div>
       )}
 
