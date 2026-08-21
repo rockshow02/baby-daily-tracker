@@ -8,6 +8,7 @@ from models import Child, FeedingLog, SleepLog, DiaperLog, User, WakeWindowGuide
 from utils.telegram import notify_other_caregivers
 from utils.access import get_accessible_child
 from utils.auth import get_current_user_id
+from utils.idempotency import idempotent_create, compute_fingerprint
 from utils.summary_engine import build_daily_summary, get_age_in_days
 
 daily_log_bp = Blueprint("daily_log", __name__)
@@ -57,20 +58,32 @@ def create_feeding_log(child_id):
     if not data.get("feed_type"):
         return jsonify({"error": "feed_type wajib diisi"}), 400
 
-    log = FeedingLog(
-        created_by_user_id=get_current_user_id(),
-        child_id=child_id,
-        timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
-        feed_type=data["feed_type"],
-        duration_minutes=data.get("duration_minutes"),
-        volume_ml=data.get("volume_ml"),
-        breast_side=data.get("breast_side"),
-        notes=data.get("notes"),
+    user_id = get_current_user_id()
+    client_request_id = request.headers.get("X-Idempotency-Key")
+    fingerprint = compute_fingerprint(data)
+
+    def build():
+        log = FeedingLog(
+            created_by_user_id=user_id,
+            child_id=child_id,
+            timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
+            feed_type=data["feed_type"],
+            duration_minutes=data.get("duration_minutes"),
+            volume_ml=data.get("volume_ml"),
+            breast_side=data.get("breast_side"),
+            notes=data.get("notes"),
+        )
+        db.session.add(log)
+        db.session.flush()
+        return log.to_dict()
+
+    def send_notification():
+        notify_other_caregivers(child, user_id, f"🍼 {User.query.get(user_id).name} mencatat menyusui untuk {child.nickname or child.name}.")
+
+    body, status, _ = idempotent_create(
+        user_id, child_id, "feeding-logs", client_request_id, fingerprint, build, after_commit=send_notification
     )
-    db.session.add(log)
-    db.session.commit()
-    notify_other_caregivers(child, get_current_user_id(), f"🍼 {User.query.get(get_current_user_id()).name} mencatat menyusui untuk {child.nickname or child.name}.")
-    return jsonify(log.to_dict()), 201
+    return jsonify(body), status
 
 
 @daily_log_bp.route("/feeding-logs/<int:log_id>", methods=["PUT", "DELETE"])
@@ -134,18 +147,30 @@ def create_sleep_log(child_id):
     if not data.get("start_time"):
         return jsonify({"error": "start_time wajib diisi"}), 400
 
-    log = SleepLog(
-        created_by_user_id=get_current_user_id(),
-        child_id=child_id,
-        start_time=to_wib_naive(data["start_time"]),
-        end_time=to_wib_naive(data["end_time"]) if data.get("end_time") else None,
-        sleep_type=data.get("sleep_type", "siang"),
-        notes=data.get("notes"),
+    user_id = get_current_user_id()
+    client_request_id = request.headers.get("X-Idempotency-Key")
+    fingerprint = compute_fingerprint(data)
+
+    def build():
+        log = SleepLog(
+            created_by_user_id=user_id,
+            child_id=child_id,
+            start_time=to_wib_naive(data["start_time"]),
+            end_time=to_wib_naive(data["end_time"]) if data.get("end_time") else None,
+            sleep_type=data.get("sleep_type", "siang"),
+            notes=data.get("notes"),
+        )
+        db.session.add(log)
+        db.session.flush()
+        return log.to_dict()
+
+    def send_notification():
+        notify_other_caregivers(child, user_id, f"😴 {User.query.get(user_id).name} mencatat tidur untuk {child.nickname or child.name}.")
+
+    body, status, _ = idempotent_create(
+        user_id, child_id, "sleep-logs", client_request_id, fingerprint, build, after_commit=send_notification
     )
-    db.session.add(log)
-    db.session.commit()
-    notify_other_caregivers(child, get_current_user_id(), f"😴 {User.query.get(get_current_user_id()).name} mencatat tidur untuk {child.nickname or child.name}.")
-    return jsonify(log.to_dict()), 201
+    return jsonify(body), status
 
 
 @daily_log_bp.route("/sleep-logs/<int:log_id>", methods=["PUT", "DELETE"])
@@ -201,19 +226,31 @@ def create_diaper_log(child_id):
     if not data.get("diaper_type"):
         return jsonify({"error": "diaper_type wajib diisi"}), 400
 
-    log = DiaperLog(
-        created_by_user_id=get_current_user_id(),
-        child_id=child_id,
-        timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
-        diaper_type=data["diaper_type"],
-        consistency=data.get("consistency"),
-        color=data.get("color"),
-        notes=data.get("notes"),
+    user_id = get_current_user_id()
+    client_request_id = request.headers.get("X-Idempotency-Key")
+    fingerprint = compute_fingerprint(data)
+
+    def build():
+        log = DiaperLog(
+            created_by_user_id=user_id,
+            child_id=child_id,
+            timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
+            diaper_type=data["diaper_type"],
+            consistency=data.get("consistency"),
+            color=data.get("color"),
+            notes=data.get("notes"),
+        )
+        db.session.add(log)
+        db.session.flush()
+        return log.to_dict()
+
+    def send_notification():
+        notify_other_caregivers(child, user_id, f"👶 {User.query.get(user_id).name} mencatat ganti popok untuk {child.nickname or child.name}.")
+
+    body, status, _ = idempotent_create(
+        user_id, child_id, "diaper-logs", client_request_id, fingerprint, build, after_commit=send_notification
     )
-    db.session.add(log)
-    db.session.commit()
-    notify_other_caregivers(child, get_current_user_id(), f"👶 {User.query.get(get_current_user_id()).name} mencatat ganti popok untuk {child.nickname or child.name}.")
-    return jsonify(log.to_dict()), 201
+    return jsonify(body), status
 
 
 @daily_log_bp.route("/diaper-logs/<int:log_id>", methods=["PUT", "DELETE"])

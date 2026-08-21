@@ -2,17 +2,32 @@ import os
 from flask import Flask
 from dotenv import load_dotenv
 
-from config import Config, DevConfig
+from config import Config, DevConfig, TestConfig
 from extensions import db, cors
 
 load_dotenv()
 
 
-def create_app():
+def create_app(config_overrides=None):
+    """
+    config_overrides: dict opsional, di-apply SETELAH config class biasa
+    tapi SEBELUM db.init_app()/create_all() jalan — dipakai buat test yang
+    butuh konfigurasi DB beda dari TestConfig biasa (mis. SQLite file
+    sementara buat test konkurensi, lihat tests/test_concurrency.py).
+    Nggak dipakai di jalur produksi/dev normal.
+    """
     app = Flask(__name__)
 
     env = os.environ.get("FLASK_ENV", "development")
-    app.config.from_object(DevConfig if env == "development" else Config)
+    if env == "testing":
+        app.config.from_object(TestConfig)
+    elif env == "development":
+        app.config.from_object(DevConfig)
+    else:
+        app.config.from_object(Config)
+
+    if config_overrides:
+        app.config.update(config_overrides)
 
     # pastikan folder instance ada (buat SQLite)
     os.makedirs(os.path.join(app.root_path, "instance"), exist_ok=True)
@@ -22,6 +37,7 @@ def create_app():
         app,
         supports_credentials=True,
         origins=os.environ.get("FRONTEND_ORIGIN", "http://localhost:5173").split(","),
+        allow_headers=["Content-Type", "Authorization", "X-Idempotency-Key"],
     )
 
     from routes.auth_routes import auth_bp

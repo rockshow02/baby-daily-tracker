@@ -7,6 +7,7 @@ from models import Child, DoctorVisitLog, TemperatureLog, IllnessLog, Medication
 from utils.telegram import notify_other_caregivers
 from utils.access import get_accessible_child
 from utils.auth import get_current_user_id
+from utils.idempotency import idempotent_create, compute_fingerprint
 from utils.timezone_utils import now_wib, today_wib, to_wib_naive
 from utils.temperature_calc import classify_temperature
 
@@ -287,19 +288,31 @@ def create_medication_log(child_id):
         if not illness:
             return jsonify({"error": "illness_id tidak valid"}), 400
 
-    log = MedicationLog(
-        created_by_user_id=get_current_user_id(),
-        child_id=child_id,
-        illness_id=illness_id,
-        medication_name=data["medication_name"],
-        dosage=data.get("dosage"),
-        timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
-        notes=data.get("notes"),
+    user_id = get_current_user_id()
+    client_request_id = request.headers.get("X-Idempotency-Key")
+    fingerprint = compute_fingerprint(data)
+
+    def build():
+        log = MedicationLog(
+            created_by_user_id=user_id,
+            child_id=child_id,
+            illness_id=illness_id,
+            medication_name=data["medication_name"],
+            dosage=data.get("dosage"),
+            timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
+            notes=data.get("notes"),
+        )
+        db.session.add(log)
+        db.session.flush()
+        return log.to_dict()
+
+    def send_notification():
+        notify_other_caregivers(child, user_id, f"💊 {User.query.get(user_id).name} mencatat pemberian obat untuk {child.nickname or child.name}.")
+
+    body, status, _ = idempotent_create(
+        user_id, child_id, "medication-logs", client_request_id, fingerprint, build, after_commit=send_notification
     )
-    db.session.add(log)
-    db.session.commit()
-    notify_other_caregivers(child, get_current_user_id(), f"💊 {User.query.get(get_current_user_id()).name} mencatat pemberian obat untuk {child.nickname or child.name}.")
-    return jsonify(log.to_dict()), 201
+    return jsonify(body), status
 
 
 @health_bp.route("/medication-logs/<int:log_id>", methods=["PUT", "DELETE"])

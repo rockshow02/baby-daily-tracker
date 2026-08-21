@@ -1,6 +1,7 @@
 const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
 const TOKEN_KEY = "babytracker_token";
+const USER_ID_KEY = "babytracker_user_id";
 
 export function getToken() {
   return localStorage.getItem(TOKEN_KEY);
@@ -12,6 +13,36 @@ export function setToken(token) {
 
 export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
+}
+
+// Dipakai buat nge-tag tiap item antrian offline sama pemiliknya, TANPA
+// nyimpen token di item itu sendiri (lihat queueOfflineRequest di bawah).
+// syncQueue di useOfflineSync bandingin ini sama userId tersimpan pas
+// nyoba sinkron, biar antrian akun lain (atau akun yang udah logout)
+// nggak pernah ke-sync pakai token akun yang lagi aktif sekarang.
+export function getCurrentUserId() {
+  const raw = localStorage.getItem(USER_ID_KEY);
+  return raw ? Number(raw) : null;
+}
+
+export function setCurrentUser(userId) {
+  if (userId != null) localStorage.setItem(USER_ID_KEY, String(userId));
+}
+
+export function clearCurrentUser() {
+  localStorage.removeItem(USER_ID_KEY);
+}
+
+// Diekspor (bukan cuma dipakai internal) — dipakai juga buat ngasih
+// idempotency key baru ke item antrian legacy yang belum punya satu
+// (lihat claimLegacyItem di hooks/useOfflineSync.js).
+export function generateRequestId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  // fallback buat runtime tanpa crypto.randomUUID (browser lama, atau
+  // lingkungan test) — nggak perlu kriptografis, cuma perlu unik per klien
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 // endpoint "quick log" yang boleh diantrikan offline — sengaja dibatasi
@@ -33,13 +64,18 @@ function isOfflineQueueable(path, method) {
   );
 }
 
-async function queueOfflineRequest(path, method, body, headers) {
+async function queueOfflineRequest(path, method, body, clientRequestId) {
   const { enqueueRequest } = await import("../utils/offlineQueue");
+  // SENGAJA nggak nyimpen header Authorization di sini — item antrian
+  // cuma nyimpen userId pemiliknya, token diambil FRESH dari localStorage
+  // pas beneran mau di-sync (lihat useOfflineSync), biar nggak ada token
+  // yang nongkrong di IndexedDB.
   const queueId = await enqueueRequest({
     method,
     url: path,
     body: body || null,
-    headers: { Authorization: headers["Authorization"] || null },
+    userId: getCurrentUserId(),
+    clientRequestId,
   });
 
   let optimisticData = {};
@@ -61,6 +97,18 @@ async function request(path, options = {}) {
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const method = options.method || "GET";
 
+  // Idempotency key: dibuat SEKALI di sini, sebelum fetch pertama kali
+  // dicoba, buat request yang bisa diantrikan offline. Kalau request ini
+  // sukses sampai server tapi responsnya ilang di tengah jalan (koneksi
+  // putus), retry berikutnya (baik langsung atau lewat antrian offline)
+  // ngirim ulang key yang SAMA — backend bakal balikin hasil yang lama,
+  // bukan bikin record dobel.
+  let idempotencyKey = null;
+  if (isOfflineQueueable(path, method)) {
+    idempotencyKey = generateRequestId();
+    headers["X-Idempotency-Key"] = idempotencyKey;
+  }
+
   let res;
   try {
     res = await fetch(`${BASE_URL}${path}`, {
@@ -74,7 +122,7 @@ async function request(path, options = {}) {
     // merespons dengan status error (itu diurus di bagian !res.ok bawah,
     // nggak masuk sini)
     if (isOfflineQueueable(path, method)) {
-      return await queueOfflineRequest(path, method, options.body, headers);
+      return await queueOfflineRequest(path, method, options.body, idempotencyKey);
     }
     throw new Error("Nggak ada koneksi internet. Coba lagi nanti.");
   }

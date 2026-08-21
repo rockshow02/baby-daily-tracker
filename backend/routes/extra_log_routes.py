@@ -5,6 +5,7 @@ from models import Child, PumpingLog, ActivityLog, User
 from utils.telegram import notify_other_caregivers
 from utils.access import get_accessible_child
 from utils.auth import get_current_user_id
+from utils.idempotency import idempotent_create, compute_fingerprint
 from utils.timezone_utils import now_wib, today_wib, to_wib_naive
 
 extra_log_bp = Blueprint("extra_log", __name__)
@@ -54,19 +55,31 @@ def create_pumping_log(child_id):
         return jsonify({"error": "Anak tidak ditemukan"}), 404
 
     data = request.get_json() or {}
-    log = PumpingLog(
-        created_by_user_id=get_current_user_id(),
-        child_id=child_id,
-        timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
-        duration_minutes=data.get("duration_minutes"),
-        volume_ml=data.get("volume_ml"),
-        breast_side=data.get("breast_side"),
-        notes=data.get("notes"),
+    user_id = get_current_user_id()
+    client_request_id = request.headers.get("X-Idempotency-Key")
+    fingerprint = compute_fingerprint(data)
+
+    def build():
+        log = PumpingLog(
+            created_by_user_id=user_id,
+            child_id=child_id,
+            timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
+            duration_minutes=data.get("duration_minutes"),
+            volume_ml=data.get("volume_ml"),
+            breast_side=data.get("breast_side"),
+            notes=data.get("notes"),
+        )
+        db.session.add(log)
+        db.session.flush()
+        return log.to_dict()
+
+    def send_notification():
+        notify_other_caregivers(child, user_id, f"🍼 {User.query.get(user_id).name} mencatat perah ASI untuk {child.nickname or child.name}.")
+
+    body, status, _ = idempotent_create(
+        user_id, child_id, "pumping-logs", client_request_id, fingerprint, build, after_commit=send_notification
     )
-    db.session.add(log)
-    db.session.commit()
-    notify_other_caregivers(child, get_current_user_id(), f"🍼 {User.query.get(get_current_user_id()).name} mencatat perah ASI untuk {child.nickname or child.name}.")
-    return jsonify(log.to_dict()), 201
+    return jsonify(body), status
 
 
 @extra_log_bp.route("/pumping-logs/<int:log_id>", methods=["PUT", "DELETE"])
@@ -128,18 +141,30 @@ def create_activity_log(child_id):
     if activity_type not in ACTIVITY_TYPES:
         return jsonify({"error": f"activity_type harus salah satu dari: {', '.join(ACTIVITY_TYPES)}"}), 400
 
-    log = ActivityLog(
-        created_by_user_id=get_current_user_id(),
-        child_id=child_id,
-        activity_type=activity_type,
-        timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
-        duration_minutes=data.get("duration_minutes"),
-        notes=data.get("notes"),
+    user_id = get_current_user_id()
+    client_request_id = request.headers.get("X-Idempotency-Key")
+    fingerprint = compute_fingerprint(data)
+
+    def build():
+        log = ActivityLog(
+            created_by_user_id=user_id,
+            child_id=child_id,
+            activity_type=activity_type,
+            timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
+            duration_minutes=data.get("duration_minutes"),
+            notes=data.get("notes"),
+        )
+        db.session.add(log)
+        db.session.flush()
+        return log.to_dict()
+
+    def send_notification():
+        notify_other_caregivers(child, user_id, f"🚶 {User.query.get(user_id).name} mencatat aktivitas untuk {child.nickname or child.name}.")
+
+    body, status, _ = idempotent_create(
+        user_id, child_id, "activity-logs", client_request_id, fingerprint, build, after_commit=send_notification
     )
-    db.session.add(log)
-    db.session.commit()
-    notify_other_caregivers(child, get_current_user_id(), f"🚶 {User.query.get(get_current_user_id()).name} mencatat aktivitas untuk {child.nickname or child.name}.")
-    return jsonify(log.to_dict()), 201
+    return jsonify(body), status
 
 
 @extra_log_bp.route("/activity-logs/<int:log_id>", methods=["PUT", "DELETE"])

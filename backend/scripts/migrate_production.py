@@ -43,6 +43,12 @@ COLUMNS_TO_ENSURE = [
     ("medication_logs", "created_by_user_id", "INTEGER"),
     ("mood_logs", "created_by_user_id", "INTEGER"),
     ("milestone_logs", "created_by_user_id", "INTEGER"),
+    # fingerprint request buat validasi idempotency key (lihat utils/idempotency.py) —
+    # tabel idempotency_keys sendiri baru (dibikin otomatis lewat db.create_all() di
+    # bawah kalau belum ada), tapi kalau tabelnya SUDAH ada dari deploy branch
+    # sebelumnya (mis. udah sempat dicoba di staging) sebelum kolom ini ditambahkan,
+    # baris ini yang nambahin kolomnya tanpa nyentuh baris yang udah ada.
+    ("idempotency_keys", "fingerprint", "VARCHAR(64)"),
 ]
 
 

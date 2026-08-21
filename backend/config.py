@@ -30,3 +30,12 @@ class DevConfig(Config):
     DEBUG = True
     SESSION_COOKIE_SAMESITE = "Lax"
     SESSION_COOKIE_SECURE = False
+
+
+class TestConfig(Config):
+    """Dipakai pytest — SQLite in-memory, jangan pernah nyentuh instance/tracker.db."""
+    TESTING = True
+    DEBUG = True
+    SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
+    SESSION_COOKIE_SAMESITE = "Lax"
+    SESSION_COOKIE_SECURE = False

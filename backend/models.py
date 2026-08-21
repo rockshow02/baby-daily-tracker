@@ -708,3 +708,39 @@ class WakeWindowGuideline(db.Model):
             "min_wake_minutes": self.min_wake_minutes,
             "max_wake_minutes": self.max_wake_minutes,
         }
+
+
+class IdempotencyKey(db.Model):
+    """
+    Rekaman request offline-queue yang sudah pernah diproses, dikunci per
+    (user, anak, endpoint, client_request_id). Dipakai buat nolak nyipta
+    record dobel kalau klien retry request yang sebenernya udah sukses
+    diproses server tapi responsnya nggak sempat nyampe balik ke klien
+    (koneksi putus pas offline-sync).
+    """
+    __tablename__ = "idempotency_keys"
+    __table_args__ = (
+        db.UniqueConstraint(
+            "user_id", "child_id", "endpoint", "client_request_id", name="uq_idempotency_key"
+        ),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
+    endpoint = db.Column(db.String(50), nullable=False)
+    client_request_id = db.Column(db.String(100), nullable=False)
+
+    # sha256 hex dari payload request yang dinormalisasi — BUKAN payload
+    # mentahnya (biar nggak nyimpen data kesehatan bayi dobel di tabel ini).
+    # Dipakai buat mastiin key yang sama dipakai ulang utk request yang
+    # ISINYA SAMA — kalau isinya beda, itu tandanya bug klien atau reuse
+    # key yang nggak sengaja, jadi ditolak (409) bukan diam-diam dianggap
+    # sama. Nullable buat kompatibilitas mundur ke baris lama sebelum kolom
+    # ini ada (lihat scripts/migrate_production.py).
+    fingerprint = db.Column(db.String(64), nullable=True)
+
+    response_status = db.Column(db.Integer, nullable=False)
+    response_body = db.Column(db.JSON, nullable=False)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)

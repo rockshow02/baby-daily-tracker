@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { AuthProvider, useAuth } from "./context/AuthContext";
-import { api } from "./api/client";
+import { api, getCurrentUserId } from "./api/client";
+import { getQueueForUser, QUEUE_STATUS } from "./utils/offlineQueue";
 import AuthScreen from "./pages/AuthScreen";
 import OnboardingWizard from "./pages/OnboardingWizard";
 import Dashboard from "./pages/Dashboard";
@@ -75,6 +76,23 @@ function AppContent() {
   const handleChildUpdated = (updatedChild) => {
     setActiveChild(updatedChild);
     setChildren((prev) => prev.map((c) => (c.id === updatedChild.id ? updatedChild : c)));
+  };
+
+  const handleLogout = async () => {
+    try {
+      const userId = getCurrentUserId();
+      const pending = userId != null ? await getQueueForUser(userId) : [];
+      const stillWaiting = pending.filter((i) => i.status !== QUEUE_STATUS.NEEDS_REVIEW).length;
+      if (stillWaiting > 0) {
+        const ok = window.confirm(
+          `Masih ada ${stillWaiting} catatan yang belum tersinkron ke server. Catatan itu tetap tersimpan di HP ini dan akan otomatis disinkron kalau kamu login lagi sebagai akun ini. Tetap keluar?`,
+        );
+        if (!ok) return;
+      }
+    } catch (_) {
+      // IndexedDB nggak kebuka — lanjut logout seperti biasa
+    }
+    logout();
   };
 
   return (
@@ -182,7 +200,7 @@ function AppContent() {
                 Pengasuh
               </button>
               <button
-                onClick={logout}
+                onClick={handleLogout}
                 className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl2 text-sm text-warn text-left"
               >
                 <span className="text-base">🚪</span>
