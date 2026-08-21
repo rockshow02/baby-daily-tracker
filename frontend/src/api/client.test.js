@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { api, setToken, setCurrentUser, clearToken, clearCurrentUser } from "./client";
+import { api, ApiError, setToken, setCurrentUser, clearToken, clearCurrentUser } from "./client";
 import { getQueue, removeFromQueue } from "../utils/offlineQueue";
 
 async function drainQueue() {
@@ -78,5 +78,99 @@ describe("api client — immediate online path", () => {
     expect(secondAttemptKey).toBe(firstAttemptKey); // key SAMA di kedua percobaan
     // => backend (diuji di backend/tests/test_idempotency.py) balikin hasil
     // yang sama utk key yang sama, jadi cuma 1 record yang beneran kesimpen
+  });
+});
+
+describe("api client — structured error classification (ApiError)", () => {
+  // /auth/me (GET) dipakai sebagai endpoint contoh — BUKAN offline-
+  // queueable, jadi kegagalan jaringan di sini beneran nge-throw
+  // (bukan diam-diam masuk antrian kayak createFeeding).
+
+  it("a genuine network failure throws an ApiError with kind 'network' (never treated as a rejected session)", async () => {
+    global.fetch.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    await expect(api.me()).rejects.toMatchObject({
+      kind: "network",
+      status: null,
+      message: "Nggak ada koneksi internet. Coba lagi nanti.",
+    });
+    await expect(api.me()).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("a 401 response throws an ApiError with kind 'unauthorized', preserving the server's message", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: "Sesi tidak valid" }),
+    });
+
+    await expect(api.me()).rejects.toMatchObject({
+      kind: "unauthorized",
+      status: 401,
+      message: "Sesi tidak valid",
+    });
+  });
+
+  it("a 403 response throws an ApiError with kind 'forbidden'", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      json: async () => ({ error: "Tidak punya akses" }),
+    });
+
+    await expect(api.listChildren()).rejects.toMatchObject({ kind: "forbidden", status: 403 });
+  });
+
+  it("a 422 response throws an ApiError with kind 'validation'", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 422,
+      json: async () => ({ error: "Data tidak valid" }),
+    });
+
+    await expect(api.listChildren()).rejects.toMatchObject({ kind: "validation", status: 422 });
+  });
+
+  it("a 500 response throws an ApiError with kind 'server_error'", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: async () => ({}),
+    });
+
+    await expect(api.listChildren()).rejects.toMatchObject({ kind: "server_error", status: 500 });
+  });
+
+  it("an unrecognized error status still falls back to a readable message ('http_error')", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      json: async () => ({}),
+    });
+
+    await expect(api.listChildren()).rejects.toMatchObject({
+      kind: "http_error",
+      status: 404,
+      message: "Request gagal (404)",
+    });
+  });
+
+  it("ApiError never carries the raw response body — only status/kind/message", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: "Sesi tidak valid", stack_trace: "sensitive internals", token: "should-not-leak" }),
+    });
+
+    try {
+      await api.me();
+      expect.unreachable();
+    } catch (err) {
+      expect(err.message).toBe("Sesi tidak valid");
+      expect(err.kind).toBe("unauthorized");
+      expect(err.status).toBe(401);
+      expect(err.stack_trace).toBeUndefined();
+      expect(err.token).toBeUndefined();
+    }
   });
 });

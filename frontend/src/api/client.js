@@ -3,6 +3,35 @@ const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 const TOKEN_KEY = "babytracker_token";
 const USER_ID_KEY = "babytracker_user_id";
 
+/**
+ * Error terstruktur buat semua kegagalan request lewat request() di bawah
+ * — biar caller (AuthContext, App.jsx, dst) bisa bedain SECARA ANDAL antara
+ * gagal jaringan (server nggak kesentuh sama sekali) vs. server BENERAN
+ * merespons dengan status error, dan status berapa persisnya. `.message`
+ * tetap dipertahankan sama persis kayak sebelumnya (termasuk semua pesan
+ * bahasa Indonesia yang dilempar berdasarkan data.error dari server) —
+ * ApiError extends Error, jadi kode lama yang cuma baca err.message tetap
+ * jalan tanpa perubahan. Cuma nyimpen status + kind + message manusiawi;
+ * TIDAK PERNAH nyimpen body respons mentah, stack trace server, cookie,
+ * atau token.
+ */
+export class ApiError extends Error {
+  constructor({ kind, status = null, message }) {
+    super(message);
+    this.name = "ApiError";
+    this.kind = kind; // "network" | "unauthorized" | "forbidden" | "validation" | "server_error" | "http_error"
+    this.status = status;
+  }
+}
+
+function classifyHttpError(status) {
+  if (status === 401) return "unauthorized";
+  if (status === 403) return "forbidden";
+  if (status === 400 || status === 422) return "validation";
+  if (status >= 500) return "server_error";
+  return "http_error";
+}
+
 export function getToken() {
   return localStorage.getItem(TOKEN_KEY);
 }
@@ -124,7 +153,11 @@ async function request(path, options = {}) {
     if (isOfflineQueueable(path, method)) {
       return await queueOfflineRequest(path, method, options.body, idempotencyKey);
     }
-    throw new Error("Nggak ada koneksi internet. Coba lagi nanti.");
+    throw new ApiError({
+      kind: "network",
+      status: null,
+      message: "Nggak ada koneksi internet. Coba lagi nanti.",
+    });
   }
 
   let data = null;
@@ -136,7 +169,7 @@ async function request(path, options = {}) {
 
   if (!res.ok) {
     const message = data?.error || `Request gagal (${res.status})`;
-    throw new Error(message);
+    throw new ApiError({ kind: classifyHttpError(res.status), status: res.status, message });
   }
   return data;
 }

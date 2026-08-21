@@ -1,7 +1,13 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AuthProvider, useAuth } from "./context/AuthContext";
-import { api, getCurrentUserId } from "./api/client";
+import { api, ApiError, getCurrentUserId } from "./api/client";
 import { getQueueForUser, QUEUE_STATUS } from "./utils/offlineQueue";
+import {
+  cacheChildren,
+  getCachedChildren,
+  getCachedActiveChildId,
+  setCachedActiveChildId,
+} from "./utils/sessionCache";
 import AuthScreen from "./pages/AuthScreen";
 import OnboardingWizard from "./pages/OnboardingWizard";
 import Dashboard from "./pages/Dashboard";
@@ -19,6 +25,10 @@ function AppContent() {
   const [children, setChildren] = useState([]);
   const [activeChild, setActiveChild] = useState(null);
   const [loadingChildren, setLoadingChildren] = useState(true);
+  // null (berhasil dimuat online, termasuk kalau beneran kosong) |
+  // "offline_cached" (gagal muat, tapi ada cache offline yang dipakai) |
+  // "offline_no_cache" (gagal muat, DAN nggak ada cache sama sekali)
+  const [childLoadError, setChildLoadError] = useState(null);
   const [activeView, setActiveView] = useState("daily");
   const [showCaregivers, setShowCaregivers] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
@@ -36,19 +46,77 @@ function AppContent() {
     userProfile: "Profil Saya",
   };
 
-  useEffect(() => {
+  /**
+   * Muat daftar anak. Bedain 4 kemungkinan hasil secara eksplisit:
+   * - sukses, ada isinya -> normal
+   * - sukses, beneran kosong -> onboarding (ini SATU-SATUNYA jalur yang
+   *   boleh nampilin OnboardingWizard, lihat requirement #4/#5)
+   * - gagal karena 401 kekonfirmasi -> lewat alur logout() yang udah ada
+   *   (bukan nebak-nebak nutup sesi manual di sini)
+   * - gagal karena jaringan/error server lain (BUKAN 401) -> ini masalah
+   *   MEMUAT data, bukan sesi invalid; jangan pernah nge-treat kayak 401
+   *   (requirement #13) — coba restorasi dari cache offline user ini
+   */
+  const loadChildren = useCallback(async () => {
     if (!user) {
+      setChildren([]);
+      setActiveChild(null);
+      setChildLoadError(null);
       setLoadingChildren(false);
       return;
     }
-    api
-      .listChildren()
-      .then((list) => {
-        setChildren(list);
-        setActiveChild(list[0] || null);
-      })
-      .finally(() => setLoadingChildren(false));
-  }, [user]);
+    setLoadingChildren(true);
+    try {
+      const list = await api.listChildren();
+      setChildren(list);
+      cacheChildren(user.id, list);
+      const cachedActiveId = getCachedActiveChildId(user.id);
+      const next = list.find((c) => c.id === cachedActiveId) || list[0] || null;
+      setActiveChild(next);
+      if (next) setCachedActiveChildId(user.id, next.id);
+      setChildLoadError(null);
+    } catch (err) {
+      if (err instanceof ApiError && err.kind === "unauthorized") {
+        await logout();
+        return;
+      }
+      const cached = getCachedChildren(user.id);
+      if (cached.length > 0) {
+        setChildren(cached);
+        const cachedActiveId = getCachedActiveChildId(user.id);
+        setActiveChild(cached.find((c) => c.id === cachedActiveId) || cached[0]);
+        setChildLoadError("offline_cached");
+      } else {
+        setChildren([]);
+        setActiveChild(null);
+        setChildLoadError("offline_no_cache");
+      }
+    } finally {
+      setLoadingChildren(false);
+    }
+  }, [user, logout]);
+
+  useEffect(() => {
+    // tunggu AuthContext beres mutusin siapa user-nya duluan (baik itu
+    // sukses/gagal/direstorasi dari cache) SEBELUM mulai muat daftar anak.
+    // Tanpa guard ini, ada jendela render sesaat di mana `loading` (Auth)
+    // masih true tapi effect ini SUDAH sempat jalan sekali dengan user
+    // masih null (nge-set loadingChildren=false SEBELUM user yang
+    // sebenarnya kesimpen) — begitu user beneran ke-set, ada 1 render
+    // transisi dengan loading=false, loadingChildren=false (stale), TAPI
+    // activeChild masih null (efek loadChildren belum sempat jalan ULANG),
+    // yang keliru nampilin OnboardingWizard sekilas.
+    if (loading) return;
+    loadChildren();
+  }, [loading, loadChildren]);
+
+  // begitu koneksi balik, otomatis coba muat ulang daftar anak dari server
+  // — jalur retry buat kasus "sempat gagal loadChildren() pas offline"
+  useEffect(() => {
+    const handleOnline = () => loadChildren();
+    window.addEventListener("online", handleOnline);
+    return () => window.removeEventListener("online", handleOnline);
+  }, [loadChildren]);
 
   if (loading || loadingChildren) {
     return (
@@ -61,11 +129,44 @@ function AppContent() {
   if (!user) return <AuthScreen />;
 
   if (!activeChild) {
+    if (childLoadError === "offline_no_cache") {
+      // gagal muat (offline/error server), DAN nggak ada cache anak sama
+      // sekali buat direstorasi — belum pernah berhasil online sebelumnya
+      // di perangkat ini. JANGAN nampilin OnboardingWizard (itu bakal
+      // ngebiarin user "bikin anak baru" padahal mungkin udah punya di
+      // server) — kasih fallback offline yang jelas + jalur retry.
+      return (
+        <div className="min-h-screen flex items-center justify-center px-6">
+          <div className="text-center max-w-xs">
+            <p className="text-3xl mb-3">📡</p>
+            <p className="text-ink text-sm font-medium mb-1">Belum bisa dibuka offline</p>
+            <p className="text-ink-faint text-xs mb-4">
+              Perangkat ini belum pernah tersambung online buat memuat data anak. Sambungkan ke internet minimal
+              sekali dulu supaya bisa dipakai offline setelahnya.
+            </p>
+            <button
+              type="button"
+              onClick={() => loadChildren()}
+              className="text-xs font-semibold text-feed underline underline-offset-2"
+            >
+              Coba lagi
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // sampai sini, activeChild null cuma mungkin kalau server BENERAN
+    // ngonfirmasi daftar anaknya kosong (childLoadError === null) — bukan
+    // gara-gara request gagal (requirement #4: jangan nampilin onboarding
+    // cuma gara-gara request anak gagal)
     return (
       <OnboardingWizard
         onComplete={(child) => {
           setChildren([child]);
           setActiveChild(child);
+          cacheChildren(user.id, [child]);
+          setCachedActiveChildId(user.id, child.id);
         }}
       />
     );
@@ -75,7 +176,11 @@ function AppContent() {
 
   const handleChildUpdated = (updatedChild) => {
     setActiveChild(updatedChild);
-    setChildren((prev) => prev.map((c) => (c.id === updatedChild.id ? updatedChild : c)));
+    setChildren((prev) => {
+      const next = prev.map((c) => (c.id === updatedChild.id ? updatedChild : c));
+      cacheChildren(user.id, next);
+      return next;
+    });
   };
 
   const handleLogout = async () => {
@@ -104,7 +209,10 @@ function AppContent() {
             {children.map((c) => (
               <button
                 key={c.id}
-                onClick={() => setActiveChild(c)}
+                onClick={() => {
+                  setActiveChild(c);
+                  setCachedActiveChildId(user.id, c.id);
+                }}
                 className={`px-3 py-1.5 rounded-full text-xs font-medium border whitespace-nowrap flex-shrink-0 ${
                   c.id === activeChild.id
                     ? "bg-feed/20 border-feed text-feed"
