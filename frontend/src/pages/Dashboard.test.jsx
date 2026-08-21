@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
-import Dashboard from "./Dashboard";
+import Dashboard, { isPendingOfflineItem, isLocalOnlyId } from "./Dashboard";
 
 // Mock semua child component yang manggil api sendiri (atau nggak relevan
 // buat logic handleCreate yang lagi dites), biar test ini fokus ke
@@ -82,6 +82,18 @@ const { apiMock } = vi.hoisted(() => ({
     createPumping: vi.fn(),
     createActivity: vi.fn(),
     createMedication: vi.fn(),
+    updateFeeding: vi.fn(),
+    updateSleep: vi.fn(),
+    updateDiaper: vi.fn(),
+    updatePumping: vi.fn(),
+    updateActivity: vi.fn(),
+    updateMedication: vi.fn(),
+    deleteFeeding: vi.fn(),
+    deleteSleep: vi.fn(),
+    deleteDiaper: vi.fn(),
+    deletePumping: vi.fn(),
+    deleteActivity: vi.fn(),
+    deleteMedication: vi.fn(),
     photoUrl: (f) => f,
     exportPdfUrl: () => "",
     exportJsonUrl: () => "",
@@ -278,5 +290,155 @@ describe("Dashboard offline-create behavior", () => {
 
       unmount();
     }
+  });
+});
+
+describe("isPendingOfflineItem / isLocalOnlyId (direct unit coverage of the guard logic)", () => {
+  it("treats _offlineQueued: true as pending regardless of id shape", () => {
+    expect(isPendingOfflineItem({ id: 99, _offlineQueued: true })).toBe(true);
+    expect(isPendingOfflineItem({ id: "local-3", _offlineQueued: true })).toBe(true);
+  });
+
+  it("falls back to the local- id prefix as a defensive second signal", () => {
+    expect(isPendingOfflineItem({ id: "local-7" })).toBe(true); // _offlineQueued absent entirely
+    expect(isPendingOfflineItem({ id: "local-7", _offlineQueued: false })).toBe(true);
+  });
+
+  it("returns false for a normal synced record", () => {
+    expect(isPendingOfflineItem({ id: 42, _offlineQueued: false })).toBe(false);
+    expect(isPendingOfflineItem({ id: 42 })).toBe(false);
+    expect(isPendingOfflineItem(null)).toBe(false);
+  });
+
+  it("isLocalOnlyId only matches string ids with the local- prefix", () => {
+    expect(isLocalOnlyId("local-1")).toBe(true);
+    expect(isLocalOnlyId(42)).toBe(false);
+    expect(isLocalOnlyId("42")).toBe(false);
+    expect(isLocalOnlyId(undefined)).toBe(false);
+  });
+});
+
+describe("pending offline history items are protected from mutating actions", () => {
+  async function renderWithPendingFeedingItem() {
+    apiMock.createFeeding.mockResolvedValue({ id: "local-1", _offlineQueued: true, ...payloadFor("feeding") });
+    await renderDashboardReady();
+    await openFeedingSheet();
+    await submitSheet();
+    await screen.findByText("Sufor"); // pending item beneran ke-render
+  }
+
+  async function renderWithPendingUnfinishedSleepItem() {
+    apiMock.createSleep.mockResolvedValue({
+      id: "local-2",
+      _offlineQueued: true,
+      start_time: new Date().toISOString(),
+      end_time: null,
+      sleep_type: "siang",
+    });
+    await renderDashboardReady();
+    const sleepBtn = await screen.findByRole("button", { name: /Tidur/ });
+    await act(async () => sleepBtn.click());
+    await screen.findByTestId("quick-log-sheet");
+    await submitSheet();
+    await screen.findByText(/Tidur siang/);
+  }
+
+  it("1. clicking a pending offline history record does not open the edit sheet", async () => {
+    await renderWithPendingFeedingItem();
+
+    const card = screen.getByText("Sufor").closest("div[aria-disabled]");
+    await act(async () => card.click());
+
+    expect(screen.queryByTestId("quick-log-sheet")).not.toBeInTheDocument();
+  });
+
+  it("2. a pending offline record cannot call the update API (no edit action is reachable)", async () => {
+    await renderWithPendingFeedingItem();
+
+    const card = screen.getByText("Sufor").closest("div[aria-disabled]");
+    await act(async () => card.click());
+
+    expect(apiMock.updateFeeding).not.toHaveBeenCalled();
+  });
+
+  it("3. a pending offline record cannot call the delete API — the Hapus action is not even rendered", async () => {
+    await renderWithPendingFeedingItem();
+
+    expect(screen.queryByLabelText("Hapus catatan")).not.toBeInTheDocument();
+    expect(apiMock.deleteFeeding).not.toHaveBeenCalled();
+  });
+
+  it("4. a pending unfinished sleep record cannot call the wake-up/update API — Bangun is not rendered", async () => {
+    await renderWithPendingUnfinishedSleepItem();
+
+    expect(screen.queryByText("🌤️ Bangun")).not.toBeInTheDocument();
+    expect(apiMock.updateSleep).not.toHaveBeenCalled();
+  });
+
+  it("5. duplicate is disabled for a pending record — no swipe-to-duplicate surface exists", async () => {
+    await renderWithPendingFeedingItem();
+
+    // item pending TIDAK dibungkus SwipeableHistoryItem sama sekali, jadi
+    // nggak ada tombol "Duplikat" (reveal swipe) buat item ini di DOM
+    expect(screen.queryByText("Duplikat")).not.toBeInTheDocument();
+  });
+
+  it("6. a normal synchronized record can still be edited", async () => {
+    apiMock.listFeeding.mockResolvedValue([
+      { id: 42, feed_type: "sufor", volume_ml: 60, duration_minutes: null, breast_side: null, timestamp: new Date().toISOString() },
+    ]);
+    await renderDashboardReady();
+    await screen.findByText("Sufor");
+
+    const card = screen.getByText("Sufor").closest("div");
+    await act(async () => card.click());
+
+    expect(await screen.findByTestId("quick-log-sheet")).toBeInTheDocument();
+  });
+
+  it("7. a normal synchronized record can still be deleted", async () => {
+    apiMock.listFeeding.mockResolvedValue([
+      { id: 42, feed_type: "sufor", volume_ml: 60, duration_minutes: null, breast_side: null, timestamp: new Date().toISOString() },
+    ]);
+    apiMock.deleteFeeding.mockResolvedValue({ success: true });
+    await renderDashboardReady();
+    await screen.findByText("Sufor");
+
+    const deleteBtn = screen.getByLabelText("Hapus catatan");
+    await act(async () => deleteBtn.click());
+
+    await waitFor(() => expect(apiMock.deleteFeeding).toHaveBeenCalledWith(42), { timeout: 6000 });
+  }, 10000);
+
+  it("8. no update/delete API is ever called with an id beginning with 'local-'", async () => {
+    await renderWithPendingFeedingItem();
+
+    // coba semua interaksi yang MASIH bisa dilakukan user (klik kartu —
+    // aksi lain kayak Hapus/Bangun/Duplikat udah nggak ada tombolnya sama
+    // sekali buat item pending, jadi nggak ada cara lain buat nyobain)
+    const card = screen.getByText("Sufor").closest("div[aria-disabled]");
+    await act(async () => card.click());
+
+    const mutatingFns = [
+      apiMock.updateFeeding,
+      apiMock.updateSleep,
+      apiMock.updateDiaper,
+      apiMock.updatePumping,
+      apiMock.updateActivity,
+      apiMock.updateMedication,
+      apiMock.deleteFeeding,
+      apiMock.deleteSleep,
+      apiMock.deleteDiaper,
+      apiMock.deletePumping,
+      apiMock.deleteActivity,
+      apiMock.deleteMedication,
+    ];
+    for (const fn of mutatingFns) {
+      for (const call of fn.mock.calls) {
+        expect(String(call[0])).not.toMatch(/^local-/);
+      }
+    }
+    // jaring pengaman paling gampang: nggak ada satupun yang kepanggil sama sekali
+    expect(mutatingFns.every((fn) => fn.mock.calls.length === 0)).toBe(true);
   });
 });

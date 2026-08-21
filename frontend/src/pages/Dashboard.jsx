@@ -63,6 +63,26 @@ const OTHER_ACTIVITIES = [
   { type: "vitamin", icon: "💊", label: "Vitamin D" },
 ];
 
+/**
+ * True kalau item ini masih optimistic/antrian offline (belum beneran
+ * kesimpen di server) — sinyal UTAMA-nya `_offlineQueued`. Cek awalan id
+ * "local-" cuma jaring pengaman KEDUA (defensive), buat jaga-jaga kalau
+ * suatu saat `_offlineQueued` somehow ilang dari record; JANGAN dijadiin
+ * sinyal utama soalnya format id "local-*" itu detail implementasi.
+ */
+// Diekspor (bukan cuma internal) biar bisa dites langsung sebagai lapis
+// proteksi independen dari wiring UI-nya — lihat Dashboard.test.jsx.
+export function isPendingOfflineItem(item) {
+  if (!item) return false;
+  if (item._offlineQueued === true) return true;
+  return isLocalOnlyId(item.id);
+}
+
+/** Proteksi lapis kedua langsung di titik panggil API — id kayak gini nggak ada di server, jangan pernah dikirim ke endpoint update/delete. */
+export function isLocalOnlyId(id) {
+  return typeof id === "string" && id.startsWith("local-");
+}
+
 export default function Dashboard({ child, onOpenProfile }) {
   const [date, setDate] = useState(todayStr());
   const [summary, setSummary] = useState(null);
@@ -198,6 +218,7 @@ export default function Dashboard({ child, onOpenProfile }) {
   };
 
   const handleUpdate = async (kind, id, payload) => {
+    if (isLocalOnlyId(id)) return; // defensif — record ini belum ada di server, jangan pernah dikirim ke endpoint update
     if (kind === "feeding") await api.updateFeeding(id, payload);
     if (kind === "sleep") await api.updateSleep(id, payload);
     if (kind === "diaper") await api.updateDiaper(id, payload);
@@ -216,6 +237,9 @@ export default function Dashboard({ child, onOpenProfile }) {
   };
 
   const openEdit = (item) => {
+    // catatan yang masih nunggu sinkron belum punya id asli di server —
+    // belum bisa diedit sampai selesai disinkronkan
+    if (isPendingOfflineItem(item)) return;
     setSheetType(item.kind);
     setEditingItem(item);
   };
@@ -226,6 +250,7 @@ export default function Dashboard({ child, onOpenProfile }) {
   };
 
   const handleDelete = async (kind, id) => {
+    if (isLocalOnlyId(id)) return; // defensif — record ini belum ada di server, jangan pernah dikirim ke endpoint delete
     if (kind === "feeding") await api.deleteFeeding(id);
     if (kind === "sleep") await api.deleteSleep(id);
     if (kind === "diaper") await api.deleteDiaper(id);
@@ -238,6 +263,9 @@ export default function Dashboard({ child, onOpenProfile }) {
   // duplikasi 1 entri jadi entri baru dengan waktu SEKARANG, data lainnya
   // sama persis — biar nggak perlu ngisi ulang form dari nol
   const handleDuplicate = async (item) => {
+    // belum sinkron -> jangan bikin antrian POST baru lagi buat duplikatnya
+    // (UI udah nyembunyiin aksi ini buat item pending, ini jaring pengaman kedua)
+    if (isPendingOfflineItem(item)) return;
     const nowIso = new Date().toISOString();
     let type = item.kind;
     let payload = {};
@@ -284,6 +312,10 @@ export default function Dashboard({ child, onOpenProfile }) {
   const UNDO_DELAY_MS = 5000;
 
   const handleSoftDelete = (item) => {
+    // belum sinkron -> nggak ada apa-apa di server buat dihapus, dan
+    // nyembunyiin item ini secara optimistic bisa bikin dia "ilang" terus
+    // (id lokalnya nggak akan pernah match record asli abis kesync)
+    if (isPendingOfflineItem(item)) return;
     const key = `${item.kind}-${item.id}`;
 
     // kalau ada penghapusan lain yang masih nunggu, langsung eksekusi
@@ -318,8 +350,10 @@ export default function Dashboard({ child, onOpenProfile }) {
     setPendingDelete(null);
   };
 
-  const handleWakeUp = async (sleepLogId) => {
-    await api.updateSleep(sleepLogId, { end_time: new Date().toISOString() });
+  const handleWakeUp = async (item) => {
+    // belum sinkron -> belum ada sleep log asli di server buat di-update
+    if (isPendingOfflineItem(item)) return;
+    await api.updateSleep(item.id, { end_time: new Date().toISOString() });
     await loadAll();
   };
 
@@ -584,73 +618,97 @@ export default function Dashboard({ child, onOpenProfile }) {
               <div key={groupIdx}>
                 <p className="text-[11px] text-ink-faint font-medium mb-2 pl-1">{group.period}</p>
                 <div className="space-y-2">
-                  {group.items.map((item) => (
-              <SwipeableHistoryItem
-                key={`${item.kind}-${item.id}`}
-                onDuplicate={() => handleDuplicate(item)}
-                onDelete={() => handleSoftDelete(item)}
-              >
-              <div
-                onClick={() => openEdit(item)}
-                className="flex items-center justify-between bg-void-card border border-void-hairline rounded-xl2 px-4 py-3 cursor-pointer active:bg-void-raised"
-              >
-                <div className="flex items-center gap-3">
-                  <span className={`w-2 h-2 rounded-full ${dotColor(item.kind)}`} />
-                  <div>
-                    <p className="text-sm text-ink">
-                      {item.kind === "feeding" && FEED_TYPE_LABEL[item.feed_type]}
-                      {item.kind === "sleep" && `Tidur ${item.sleep_type}`}
-                      {item.kind === "diaper" &&
-                        (item.diaper_type === "pipis" ? "Pipis" : item.diaper_type === "pup" ? "Pup" : "Pipis + Pup")}
-                      {item.kind === "pumping" && "Perah ASI"}
-                      {item.kind === "stroll" && "Jalan-jalan"}
-                      {item.kind === "bathing" && "Mandi"}
-                      {item.kind === "vitamin" && (item.medication_name || "Vitamin D")}
-                    </p>
-                    <p className="text-xs text-ink-faint font-mono">
-                      {item.kind === "sleep" ? sleepTimeRangeLabel(item, date) : timeOf(item.at)}
-                      {item.kind === "feeding" && item.duration_minutes && ` · ${item.duration_minutes} mnt`}
-                      {item.kind === "feeding" && item.volume_ml && ` · ${item.volume_ml} ml`}
-                      {item.kind === "pumping" && ` · ${item.duration_minutes} mnt · ${item.volume_ml} ml`}
-                      {(item.kind === "stroll" || item.kind === "bathing") &&
-                        item.duration_minutes &&
-                        ` · ${item.duration_minutes} mnt`}
-                      {(item.kind === "stroll" || item.kind === "bathing") && item.notes && ` · ${item.notes}`}
-                    </p>
-                    {item._offlineQueued && (
-                      <p className="text-[11px] text-warn mt-0.5">⏳ nunggu sinkron</p>
-                    )}
-                    {item.created_by_name && (
-                      <p className="text-[11px] text-ink-faint mt-0.5">oleh {item.created_by_name}</p>
-                    )}
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  {item.kind === "sleep" && !item.end_time && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleWakeUp(item.id);
-                      }}
-                      className="text-xs px-3 py-1.5 rounded-full bg-sleep text-white font-medium"
-                    >
-                      🌤️ Bangun
-                    </button>
-                  )}
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleSoftDelete(item);
-                    }}
-                    className="text-ink-faint text-xs px-2 py-1"
-                    aria-label="Hapus catatan"
-                  >
-                    Hapus
-                  </button>
-                </div>
-              </div>
-              </SwipeableHistoryItem>
-                  ))}
+                  {group.items.map((item) => {
+                    const pending = isPendingOfflineItem(item);
+                    const card = (
+                      <div
+                        onClick={pending ? undefined : () => openEdit(item)}
+                        aria-disabled={pending || undefined}
+                        className={`flex items-center justify-between bg-void-card border border-void-hairline rounded-xl2 px-4 py-3 ${
+                          pending ? "" : "cursor-pointer active:bg-void-raised"
+                        }`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <span className={`w-2 h-2 rounded-full ${dotColor(item.kind)}`} />
+                          <div>
+                            <p className="text-sm text-ink">
+                              {item.kind === "feeding" && FEED_TYPE_LABEL[item.feed_type]}
+                              {item.kind === "sleep" && `Tidur ${item.sleep_type}`}
+                              {item.kind === "diaper" &&
+                                (item.diaper_type === "pipis" ? "Pipis" : item.diaper_type === "pup" ? "Pup" : "Pipis + Pup")}
+                              {item.kind === "pumping" && "Perah ASI"}
+                              {item.kind === "stroll" && "Jalan-jalan"}
+                              {item.kind === "bathing" && "Mandi"}
+                              {item.kind === "vitamin" && (item.medication_name || "Vitamin D")}
+                            </p>
+                            <p className="text-xs text-ink-faint font-mono">
+                              {item.kind === "sleep" ? sleepTimeRangeLabel(item, date) : timeOf(item.at)}
+                              {item.kind === "feeding" && item.duration_minutes && ` · ${item.duration_minutes} mnt`}
+                              {item.kind === "feeding" && item.volume_ml && ` · ${item.volume_ml} ml`}
+                              {item.kind === "pumping" && ` · ${item.duration_minutes} mnt · ${item.volume_ml} ml`}
+                              {(item.kind === "stroll" || item.kind === "bathing") &&
+                                item.duration_minutes &&
+                                ` · ${item.duration_minutes} mnt`}
+                              {(item.kind === "stroll" || item.kind === "bathing") && item.notes && ` · ${item.notes}`}
+                            </p>
+                            {item._offlineQueued && (
+                              <>
+                                <p className="text-[11px] text-warn mt-0.5">⏳ nunggu sinkron</p>
+                                <p className="text-[11px] text-ink-faint mt-0.5">
+                                  Catatan ini dapat diubah setelah selesai disinkronkan.
+                                </p>
+                              </>
+                            )}
+                            {item.created_by_name && (
+                              <p className="text-[11px] text-ink-faint mt-0.5">oleh {item.created_by_name}</p>
+                            )}
+                          </div>
+                        </div>
+                        {!pending && (
+                          <div className="flex items-center gap-2">
+                            {item.kind === "sleep" && !item.end_time && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleWakeUp(item);
+                                }}
+                                className="text-xs px-3 py-1.5 rounded-full bg-sleep text-white font-medium"
+                              >
+                                🌤️ Bangun
+                              </button>
+                            )}
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleSoftDelete(item);
+                              }}
+                              className="text-ink-faint text-xs px-2 py-1"
+                              aria-label="Hapus catatan"
+                            >
+                              Hapus
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+
+                    // catatan yang masih nunggu sinkron TIDAK dibungkus
+                    // SwipeableHistoryItem — nggak ada aksi swipe (duplikat/
+                    // hapus) yang valid buat ditawarin sebelum record-nya
+                    // beneran ada di server
+                    if (pending) {
+                      return <div key={`${item.kind}-${item.id}`}>{card}</div>;
+                    }
+                    return (
+                      <SwipeableHistoryItem
+                        key={`${item.kind}-${item.id}`}
+                        onDuplicate={() => handleDuplicate(item)}
+                        onDelete={() => handleSoftDelete(item)}
+                      >
+                        {card}
+                      </SwipeableHistoryItem>
+                    );
+                  })}
                 </div>
               </div>
             ))}
