@@ -15,6 +15,24 @@ const DB_NAME = "babytracker_offline";
 const DB_VERSION = 1;
 const STORE_NAME = "pending_requests";
 
+/**
+ * Nama event window yang di-dispatch SETIAP KALI antrian IndexedDB
+ * berhasil berubah (item ditambah/dihapus/diupdate) — SATU nama konstan,
+ * dipakai bareng oleh useOfflineSync dan Dashboard biar keduanya bisa
+ * bereaksi tanpa perlu polling atau state global baru. Event ini SENGAJA
+ * nggak bawa detail/payload — listener yang mau tau perubahannya, baca
+ * ulang dari IndexedDB sendiri (satu-satunya sumber kebenaran), bukan
+ * percaya isi event-nya. Aman di-dispatch berkali-kali beruntun; listener
+ * (mis. reconciliation di Dashboard) idempotent terhadap itu.
+ */
+export const QUEUE_CHANGE_EVENT = "babytracker:offline-queue-changed";
+
+function dispatchQueueChangeEvent() {
+  if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+    window.dispatchEvent(new CustomEvent(QUEUE_CHANGE_EVENT));
+  }
+}
+
 export const QUEUE_STATUS = {
   PENDING: "pending",
   NEEDS_REVIEW: "needs_review",
@@ -57,7 +75,9 @@ function describeType(url) {
   return found ? found.label : "Catatan";
 }
 
-function extractChildId(url) {
+// Diekspor — dipakai ulang di utils/offlineHistoryMapping.js biar pola
+// ekstraksi child id dari URL antrian nggak duplikat di dua tempat.
+export function extractChildId(url) {
   const m = (url || "").match(/\/children\/(\d+)\//);
   return m ? Number(m[1]) : null;
 }
@@ -125,7 +145,10 @@ export async function enqueueRequest(entry) {
       lastError: null,
       queuedAt: new Date().toISOString(),
     });
-    req.onsuccess = () => resolve(req.result); // return id antrian
+    req.onsuccess = () => {
+      dispatchQueueChangeEvent(); // SETELAH commit — bukan sebelum, biar listener yang baca ulang selalu liat data terbaru
+      resolve(req.result); // return id antrian
+    };
     req.onerror = () => reject(req.error);
   });
 }
@@ -165,7 +188,10 @@ export async function removeFromQueue(id) {
     const tx = db.transaction(STORE_NAME, "readwrite");
     const store = tx.objectStore(STORE_NAME);
     const req = store.delete(id);
-    req.onsuccess = () => resolve();
+    req.onsuccess = () => {
+      dispatchQueueChangeEvent();
+      resolve();
+    };
     req.onerror = () => reject(req.error);
   });
 }
@@ -185,7 +211,10 @@ export async function updateQueueItem(id, patch) {
       }
       const updated = { ...existing, ...patch };
       const putReq = store.put(updated);
-      putReq.onsuccess = () => resolve(updated);
+      putReq.onsuccess = () => {
+        dispatchQueueChangeEvent();
+        resolve(updated);
+      };
       putReq.onerror = () => reject(putReq.error);
     };
     getReq.onerror = () => reject(getReq.error);

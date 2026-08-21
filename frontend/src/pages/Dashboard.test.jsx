@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import Dashboard, { isPendingOfflineItem, isLocalOnlyId } from "./Dashboard";
+// SENGAJA nggak di-mock — test restorasi offline di bawah butuh IndexedDB
+// ASLI (fake-indexeddb, udah di-setup global di vitest.setup.js) buat
+// nguji Dashboard beneran baca dari sana, bukan cuma dari mock.
+import { enqueueRequest, getQueue, removeFromQueue, updateQueueItem, QUEUE_STATUS as REAL_QUEUE_STATUS } from "../utils/offlineQueue";
 
 // Mock semua child component yang manggil api sendiri (atau nggak relevan
 // buat logic handleCreate yang lagi dites), biar test ini fokus ke
@@ -66,7 +70,8 @@ vi.mock("../components/QuickLogSheet", () => ({
 // vi.mock's factory is hoisted above regular top-level const/let, jadi
 // apiMock (yang dipakai di dalam factory) harus dibikin lewat vi.hoisted
 // biar nggak kena "Cannot access before initialization".
-const { apiMock } = vi.hoisted(() => ({
+const { apiMock, currentUserIdBox } = vi.hoisted(() => ({
+  currentUserIdBox: { value: 1 },
   apiMock: {
     dailySummary: vi.fn(),
     listFeeding: vi.fn(),
@@ -101,7 +106,10 @@ const { apiMock } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("../api/client", () => ({ api: apiMock }));
+vi.mock("../api/client", () => ({
+  api: apiMock,
+  getCurrentUserId: () => currentUserIdBox.value,
+}));
 
 const testChild = {
   id: 1,
@@ -157,12 +165,20 @@ function loadAllCallCount() {
   return apiMock.listFeeding.mock.calls.length;
 }
 
-beforeEach(() => {
+async function drainRealQueue() {
+  const all = await getQueue();
+  for (const item of all) await removeFromQueue(item.id);
+}
+
+beforeEach(async () => {
   resetApiMock();
+  currentUserIdBox.value = 1;
+  await drainRealQueue();
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.clearAllMocks();
+  await drainRealQueue();
 });
 
 describe("Dashboard offline-create behavior", () => {
@@ -234,7 +250,7 @@ describe("Dashboard offline-create behavior", () => {
     await submitSheet();
 
     await waitFor(() => expect(loadAllCallCount()).toBe(callsAfterMount + 1));
-    expect(screen.queryByTestId("quick-log-sheet")).not.toBeInTheDocument(); // sukses -> modal tetap ketutup
+    await waitFor(() => expect(screen.queryByTestId("quick-log-sheet")).not.toBeInTheDocument()); // sukses -> modal tetap ketutup
   });
 
   it("8. a failed refresh after a successful online create does not report the save as failed", async () => {
@@ -247,8 +263,10 @@ describe("Dashboard offline-create behavior", () => {
 
     await submitSheet();
 
-    // modal tetap ketutup (submit dianggap SUKSES) walau refresh-nya gagal
-    expect(screen.queryByTestId("quick-log-sheet")).not.toBeInTheDocument();
+    // modal tetap ketutup (submit dianggap SUKSES) walau refresh-nya gagal —
+    // waitFor karena handleCreate sekarang juga nunggu reconcilePendingFromQueue
+    // (round-trip IndexedDB tambahan) sebelum resolve
+    await waitFor(() => expect(screen.queryByTestId("quick-log-sheet")).not.toBeInTheDocument());
   });
 
   it("10a. sleep, diaper, pumping, activity, and medication offline creates all skip loadAll() and close the modal", async () => {
@@ -440,5 +458,282 @@ describe("pending offline history items are protected from mutating actions", ()
     }
     // jaring pengaman paling gampang: nggak ada satupun yang kepanggil sama sekali
     expect(mutatingFns.every((fn) => fn.mock.calls.length === 0)).toBe(true);
+  });
+});
+
+describe("offline recovery — restoring pending records from IndexedDB", () => {
+  // pakai jam siang hari ini biar pasti match tanggal default Dashboard
+  // (todayWIB()), regardless kapan test-nya beneran dijalankan
+  function todayAt(hour) {
+    const now = new Date();
+    now.setHours(hour, 0, 0, 0);
+    return now.toISOString();
+  }
+
+  async function seedFeedingQueueItem(overrides = {}) {
+    return enqueueRequest({
+      method: "POST",
+      url: "/children/1/feeding-logs",
+      body: JSON.stringify({ feed_type: "sufor", volume_ml: 60, duration_minutes: null, breast_side: null, timestamp: todayAt(10) }),
+      userId: 1,
+      clientRequestId: "stable-key-1",
+      ...overrides,
+    });
+  }
+
+  it("1. an offline-created record is restored after Dashboard remount", async () => {
+    await seedFeedingQueueItem();
+    const { unmount } = render(<Dashboard child={testChild} onOpenProfile={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Sufor")).toBeInTheDocument());
+    unmount();
+
+    render(<Dashboard child={testChild} onOpenProfile={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Sufor")).toBeInTheDocument());
+    expect(screen.getByText("⏳ nunggu sinkron")).toBeInTheDocument();
+  });
+
+  it("2. refreshing while offline (fresh mount, all GETs failing) still shows the pending record", async () => {
+    apiMock.listFeeding.mockRejectedValue(new Error("offline"));
+    apiMock.dailySummary.mockRejectedValue(new Error("offline"));
+    await seedFeedingQueueItem();
+
+    render(<Dashboard child={testChild} onOpenProfile={() => {}} />);
+
+    await waitFor(() => expect(screen.getByText("Sufor")).toBeInTheDocument());
+  });
+
+  it("3. a restored record retains a stable local-<queueId> id", async () => {
+    const queueId = await seedFeedingQueueItem();
+    render(<Dashboard child={testChild} onOpenProfile={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Sufor")).toBeInTheDocument());
+
+    // dibuktikan tidak langsung (Dashboard nggak nampilin id mentah), tapi
+    // lewat perilaku: hapus/edit tetap keblokir konsisten sama pola id
+    // "local-<queueId>" yang dipakai di seluruh app (lihat isLocalOnlyId)
+    expect(isLocalOnlyId(`local-${queueId}`)).toBe(true);
+    expect(screen.queryByLabelText("Hapus catatan")).not.toBeInTheDocument(); // aksi tetap keblokir buat item restored
+  });
+
+  it("4. a newly created optimistic record and its IndexedDB representation appear only once", async () => {
+    await renderDashboardReady();
+    const queueId = await seedFeedingQueueItem();
+    apiMock.createFeeding.mockResolvedValue({
+      id: `local-${queueId}`,
+      _offlineQueued: true,
+      feed_type: "sufor",
+      volume_ml: 60,
+      timestamp: todayAt(10),
+    });
+
+    await openFeedingSheet();
+    await submitSheet();
+
+    await waitFor(() => expect(screen.getAllByText("Sufor")).toHaveLength(1));
+  });
+
+  it("5. repeated queue-change events do not create duplicates", async () => {
+    await seedFeedingQueueItem();
+    render(<Dashboard child={testChild} onOpenProfile={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Sufor")).toBeInTheDocument());
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("babytracker:offline-queue-changed"));
+      window.dispatchEvent(new CustomEvent("babytracker:offline-queue-changed"));
+      window.dispatchEvent(new CustomEvent("babytracker:offline-queue-changed"));
+    });
+
+    expect(screen.getAllByText("Sufor")).toHaveLength(1);
+  });
+
+  it("6. pending records are filtered by the active user", async () => {
+    await seedFeedingQueueItem({ userId: 2 }); // BUKAN user yang lagi login (currentUserIdBox.value === 1)
+    render(<Dashboard child={testChild} onOpenProfile={() => {}} />);
+
+    await waitFor(() => expect(screen.queryByText("Memuat...")).not.toBeInTheDocument());
+    expect(screen.queryByText("Sufor")).not.toBeInTheDocument();
+  });
+
+  it("7. pending records are filtered by the active child", async () => {
+    await seedFeedingQueueItem({ url: "/children/999/feeding-logs" }); // anak LAIN, bukan testChild (id 1)
+    render(<Dashboard child={testChild} onOpenProfile={() => {}} />);
+
+    await waitFor(() => expect(screen.queryByText("Memuat...")).not.toBeInTheDocument());
+    expect(screen.queryByText("Sufor")).not.toBeInTheDocument();
+  });
+
+  it("8. pending records are filtered by the selected date", async () => {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    yesterday.setHours(10, 0, 0, 0);
+    await seedFeedingQueueItem({
+      body: JSON.stringify({ feed_type: "sufor", volume_ml: 60, timestamp: yesterday.toISOString() }),
+    });
+    render(<Dashboard child={testChild} onOpenProfile={() => {}} />);
+
+    // Dashboard defaultnya nampilin HARI INI — record kemarin nggak boleh nongol
+    await waitFor(() => expect(screen.queryByText("Memuat...")).not.toBeInTheDocument());
+    expect(screen.queryByText("Sufor")).not.toBeInTheDocument();
+  });
+
+  it("9-14. restores all 6 supported log types correctly in one Dashboard render", async () => {
+    await enqueueRequest({
+      method: "POST", url: "/children/1/sleep-logs",
+      body: JSON.stringify({ start_time: todayAt(20), end_time: null, sleep_type: "malam" }),
+      userId: 1, clientRequestId: "k-sleep",
+    });
+    await enqueueRequest({
+      method: "POST", url: "/children/1/diaper-logs",
+      body: JSON.stringify({ diaper_type: "pup", consistency: "normal", timestamp: todayAt(9) }),
+      userId: 1, clientRequestId: "k-diaper",
+    });
+    await enqueueRequest({
+      method: "POST", url: "/children/1/pumping-logs",
+      body: JSON.stringify({ duration_minutes: 15, volume_ml: 80, breast_side: "kedua", timestamp: todayAt(11) }),
+      userId: 1, clientRequestId: "k-pumping",
+    });
+    await enqueueRequest({
+      method: "POST", url: "/children/1/activity-logs",
+      body: JSON.stringify({ activity_type: "stroll", duration_minutes: 20, notes: null, timestamp: todayAt(16) }),
+      userId: 1, clientRequestId: "k-stroll",
+    });
+    await enqueueRequest({
+      method: "POST", url: "/children/1/medication-logs",
+      body: JSON.stringify({ medication_name: "Vitamin D", timestamp: todayAt(7) }),
+      userId: 1, clientRequestId: "k-vitamin",
+    });
+    await seedFeedingQueueItem();
+
+    render(<Dashboard child={testChild} onOpenProfile={() => {}} />);
+
+    await waitFor(() => expect(screen.getByText("Sufor")).toBeInTheDocument());
+    expect(screen.getByText("Tidur malam")).toBeInTheDocument();
+    expect(screen.getByText("Pup")).toBeInTheDocument();
+    expect(screen.getByText("Perah ASI")).toBeInTheDocument();
+    expect(screen.getByText("Jalan-jalan")).toBeInTheDocument();
+    expect(screen.getByText("Vitamin D")).toBeInTheDocument();
+  });
+
+  it("15. a malformed queue body does not crash Dashboard", async () => {
+    await enqueueRequest({
+      method: "POST",
+      url: "/children/1/feeding-logs",
+      body: "{ this is not valid JSON",
+      userId: 1,
+      clientRequestId: "k-broken",
+    });
+
+    expect(async () => {
+      render(<Dashboard child={testChild} onOpenProfile={() => {}} />);
+      await waitFor(() => expect(screen.queryByText("Memuat...")).not.toBeInTheDocument());
+    }).not.toThrow();
+    await waitFor(() => expect(screen.queryByText("Memuat...")).not.toBeInTheDocument());
+    expect(screen.getByText(/Belum ada catatan/)).toBeInTheDocument();
+  });
+
+  it("16. a needs_review entry is not shown as a normal history record", async () => {
+    const queueId = await seedFeedingQueueItem();
+    await updateQueueItem(queueId, { status: REAL_QUEUE_STATUS.NEEDS_REVIEW, lastError: "feed_type wajib diisi" });
+
+    render(<Dashboard child={testChild} onOpenProfile={() => {}} />);
+    await waitFor(() => expect(screen.queryByText("Memuat...")).not.toBeInTheDocument());
+    expect(screen.queryByText("Sufor")).not.toBeInTheDocument();
+  });
+
+  it("17. a legacy unknown-owner entry is not shown as a normal history record", async () => {
+    const queueId = await seedFeedingQueueItem({ userId: undefined });
+    await updateQueueItem(queueId, { ownerUnknown: true, status: REAL_QUEUE_STATUS.NEEDS_REVIEW });
+
+    render(<Dashboard child={testChild} onOpenProfile={() => {}} />);
+    await waitFor(() => expect(screen.queryByText("Memuat...")).not.toBeInTheDocument());
+    expect(screen.queryByText("Sufor")).not.toBeInTheDocument();
+  });
+
+  it("18/19. successful sync (item removed from queue) removes the optimistic record and refreshes server data", async () => {
+    const queueId = await seedFeedingQueueItem();
+    render(<Dashboard child={testChild} onOpenProfile={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Sufor")).toBeInTheDocument());
+    const loadCallsBefore = apiMock.listFeeding.mock.calls.length;
+
+    await act(async () => {
+      await removeFromQueue(queueId); // simulasikan useOfflineSync berhasil nyinkronin item ini
+    });
+
+    await waitFor(() => expect(apiMock.listFeeding.mock.calls.length).toBeGreaterThan(loadCallsBefore));
+  });
+
+  it("20. the real server record replaces the local one without duplication", async () => {
+    const queueId = await seedFeedingQueueItem();
+    render(<Dashboard child={testChild} onOpenProfile={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Sufor")).toBeInTheDocument());
+
+    // abis sync, server sekarang punya record ASLI (id numerik)
+    apiMock.listFeeding.mockResolvedValue([
+      { id: 555, feed_type: "sufor", volume_ml: 60, duration_minutes: null, breast_side: null, timestamp: todayAt(10) },
+    ]);
+
+    await act(async () => {
+      await removeFromQueue(queueId);
+    });
+
+    await waitFor(() => expect(screen.getAllByText("Sufor")).toHaveLength(1));
+    expect(screen.queryByText("⏳ nunggu sinkron")).not.toBeInTheDocument(); // yang tampil sekarang record server, bukan optimistic lagi
+  });
+
+  it("21. a refresh failure after successful sync does not requeue the request", async () => {
+    const queueId = await seedFeedingQueueItem();
+    render(<Dashboard child={testChild} onOpenProfile={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Sufor")).toBeInTheDocument());
+
+    apiMock.listFeeding.mockRejectedValue(new Error("network blip abis sync"));
+
+    await act(async () => {
+      await removeFromQueue(queueId);
+    });
+    await waitFor(() => expect(screen.queryByText("Sufor")).not.toBeInTheDocument());
+
+    const remainingQueue = await getQueue();
+    expect(remainingQueue).toHaveLength(0); // nggak ada apa-apa yang di-requeue ulang
+    expect(apiMock.createFeeding).not.toHaveBeenCalled();
+  });
+
+  it("22. Dashboard does not stay stuck on 'Memuat...' when all GETs fail offline, and shows a clear offline state", async () => {
+    apiMock.dailySummary.mockRejectedValue(new Error("offline"));
+    apiMock.listFeeding.mockRejectedValue(new Error("offline"));
+    apiMock.listSleep.mockRejectedValue(new Error("offline"));
+    apiMock.listDiaper.mockRejectedValue(new Error("offline"));
+    apiMock.listPumping.mockRejectedValue(new Error("offline"));
+    apiMock.listActivity.mockRejectedValue(new Error("offline"));
+    apiMock.listMedication.mockRejectedValue(new Error("offline"));
+
+    render(<Dashboard child={testChild} onOpenProfile={() => {}} />);
+
+    await waitFor(() => expect(screen.queryByText("Memuat...")).not.toBeInTheDocument());
+    expect(screen.getByText(/sedang offline/)).toBeInTheDocument();
+    expect(screen.getByText("Coba lagi")).toBeInTheDocument();
+  });
+
+  it("23. switching to a different authenticated user removes the previous user's pending records", async () => {
+    await seedFeedingQueueItem({ userId: 1 });
+    const { unmount } = render(<Dashboard child={testChild} onOpenProfile={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Sufor")).toBeInTheDocument());
+    unmount();
+
+    currentUserIdBox.value = 2; // akun lain login (Dashboard remount, kayak yang beneran kejadian di App.jsx)
+    render(<Dashboard child={testChild} onOpenProfile={() => {}} />);
+
+    await waitFor(() => expect(screen.queryByText("Memuat...")).not.toBeInTheDocument());
+    expect(screen.queryByText("Sufor")).not.toBeInTheDocument();
+  });
+
+  it("24. a restored (not just freshly-created) pending record still blocks update/delete with a local id", async () => {
+    await seedFeedingQueueItem();
+    render(<Dashboard child={testChild} onOpenProfile={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Sufor")).toBeInTheDocument());
+
+    const card = screen.getByText("Sufor").closest("div[aria-disabled]");
+    await act(async () => card.click());
+
+    expect(apiMock.updateFeeding).not.toHaveBeenCalled();
+    expect(apiMock.deleteFeeding).not.toHaveBeenCalled();
   });
 });

@@ -1,5 +1,12 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { api } from "../api/client";
+import { api, getCurrentUserId } from "../api/client";
+import { getQueueForUser, QUEUE_STATUS, QUEUE_CHANGE_EVENT } from "../utils/offlineQueue";
+import {
+  mapQueueItemToHistoryRecord,
+  matchesSelectedDate,
+  reconcilePendingArray,
+  dedupeByQueueIdentity,
+} from "../utils/offlineHistoryMapping";
 import DailyRadialClock from "../components/DailyRadialClock";
 import FeedingPredictionCard from "../components/FeedingPredictionCard";
 import WakeWindowCard from "../components/WakeWindowCard";
@@ -107,7 +114,14 @@ export default function Dashboard({ child, onOpenProfile }) {
       setWeeklyStats(null);
       return;
     }
-    api.getStats(child.id, 7).then((res) => setWeeklyStats(res.days || []));
+    api
+      .getStats(child.id, 7)
+      .then((res) => setWeeklyStats(res.days || []))
+      .catch(() => {
+        // gagal (mis. offline) — insight mingguan sekadar nggak tampil,
+        // BUKAN error yang perlu diributin ke user; jangan sampai jadi
+        // unhandled promise rejection
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [child.id, isToday, feedingLogs.length, sleepLogs.length, diaperLogs.length]);
 
@@ -118,6 +132,77 @@ export default function Dashboard({ child, onOpenProfile }) {
         wetDiaper: weeklyAverageExcludingToday(weeklyStats, "wet_diaper_count", date),
       }
     : null;
+
+  // null | "offline" — nyimpen kenapa loadAll() TERAKHIR gagal, biar
+  // ke-bedain dari "belum ada catatan" beneran (lihat bagian render Riwayat)
+  const [loadError, setLoadError] = useState(null);
+  const loadAllRef = useRef(null);
+
+  /**
+   * Baca ulang antrian offline milik user yang lagi login, buat anak &
+   * tanggal yang lagi ditampilin, terus SELARASKAN 6 state array riwayat:
+   * - entri optimistic (`_offlineQueued`) yang id-nya UDAH NGGAK ADA lagi
+   *   di antrian (abis kesync ATAU dibuang manual) dibuang dari state,
+   * - entri pending yang BELUM ada di state (mis. abis Dashboard di-mount
+   *   ulang, atau anak/tanggal baru dipilih) ditambahin.
+   * Fungsi murni buat kalkulasi "state array berikutnya"-nya sendiri ada
+   * di utils/offlineHistoryMapping.js (reconcilePendingArray) — di sini
+   * cuma nyambungin ke IndexedDB + state React-nya.
+   *
+   * Item yang statusnya needs_review atau ownerUnknown SENGAJA disaring di
+   * sini (nggak ikut direstorasi jadi record riwayat biasa) — itu tetap
+   * ditangani lewat QueueReviewPanel yang sudah ada.
+   */
+  const prevPendingIdsRef = useRef(new Set());
+  const reconcilePendingFromQueue = useCallback(async () => {
+    // SELURUH badan fungsi ini dibungkus try/catch — dipanggil dari
+    // beberapa tempat TANPA di-await/di-catch (mis. listener event), jadi
+    // fungsi ini WAJIB nggak pernah reject sama sekali, biar nggak ada
+    // unhandled promise rejection nongol di manapun dia dipanggil.
+    try {
+      const userId = getCurrentUserId();
+      if (userId == null) return; // nggak ada user aktif (mis. lagi proses logout) — jangan restorasi apa-apa
+
+      const queueItems = await getQueueForUser(userId);
+
+      const mapped = dedupeByQueueIdentity(
+        queueItems
+          .filter((item) => item.status === QUEUE_STATUS.PENDING && !item.ownerUnknown)
+          .map(mapQueueItemToHistoryRecord)
+          .filter(Boolean)
+          .filter((record) => record.childId === child.id)
+          .filter((record) => matchesSelectedDate(record, date)),
+      );
+
+      const currentIds = new Set(mapped.map((r) => r.id));
+      const somethingDisappeared = [...prevPendingIdsRef.current].some((id) => !currentIds.has(id));
+      prevPendingIdsRef.current = currentIds;
+
+      setFeedingLogs((prev) => reconcilePendingArray(prev, mapped.filter((r) => r.kind === "feeding")));
+      setSleepLogs((prev) => reconcilePendingArray(prev, mapped.filter((r) => r.kind === "sleep")));
+      setDiaperLogs((prev) => reconcilePendingArray(prev, mapped.filter((r) => r.kind === "diaper")));
+      setPumpingLogs((prev) => reconcilePendingArray(prev, mapped.filter((r) => r.kind === "pumping")));
+      setActivityLogs((prev) =>
+        reconcilePendingArray(prev, mapped.filter((r) => r.kind === "stroll" || r.kind === "bathing")),
+      );
+      setMedicationLogs((prev) => reconcilePendingArray(prev, mapped.filter((r) => r.kind === "vitamin")));
+
+      if (somethingDisappeared) {
+        // sesuatu yang tadinya masih pending sekarang udah nggak ada lagi
+        // di antrian — kemungkinan besar abis KESYNC (bisa juga dibuang
+        // manual lewat panel review; dua-duanya aman di-refresh, cuma 1
+        // GET ekstra yang nggak masalah) -> tarik data server terbaru
+        // biar record asli (id numerik dari server) muncul gantiin yang
+        // optimistic. loadAll() sendiri udah nggak pernah reject (self
+        // contained try/catch), jadi aman dipanggil tanpa await di sini.
+        loadAllRef.current?.();
+      }
+    } catch (_) {
+      // IndexedDB nggak kebuka, atau kegagalan nggak terduga lain — fitur
+      // restorasi sekadar nggak aktif buat siklus ini, sisa Dashboard
+      // (data server yang udah kemuat) tetap jalan normal
+    }
+  }, [child.id, date]);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -138,14 +223,51 @@ export default function Dashboard({ child, onOpenProfile }) {
       setPumpingLogs(p);
       setActivityLogs(a);
       setMedicationLogs(m);
+      setLoadError(null);
+    } catch (_err) {
+      // GET gagal (biasanya offline) — ini masalah MEMUAT data server,
+      // BUKAN kehilangan data yang udah diqueue: data offline yang udah
+      // ke-queue tetap aman di IndexedDB, direstorasi terpisah di bawah
+      setLoadError("offline");
     } finally {
       setLoading(false);
     }
-  }, [child.id, date]);
+    // reconcile SETELAH loadAll — soalnya setFeedingLogs(f) dkk di atas
+    // NGE-TIMPA seluruh array (cuma data server), jadi record yang masih
+    // pending (belum kesync) perlu ditambahin balik biar nggak ilang
+    await reconcilePendingFromQueue();
+  }, [child.id, date, reconcilePendingFromQueue]);
+
+  useEffect(() => {
+    loadAllRef.current = loadAll;
+  }, [loadAll]);
 
   useEffect(() => {
     loadAll();
   }, [loadAll]);
+
+  // reagen ke perubahan antrian offline dari MANA AJA (sync sukses, item
+  // baru diantrikan, status berubah jadi needs_review, dibuang manual,
+  // dll) — lihat utils/offlineQueue.js:QUEUE_CHANGE_EVENT. Listener-nya
+  // idempotent (baca ulang IndexedDB tiap kali), jadi aman kalau event-nya
+  // nyala berkali-kali beruntun.
+  useEffect(() => {
+    const handleQueueChange = () => {
+      reconcilePendingFromQueue();
+    };
+    window.addEventListener(QUEUE_CHANGE_EVENT, handleQueueChange);
+    return () => window.removeEventListener(QUEUE_CHANGE_EVENT, handleQueueChange);
+  }, [reconcilePendingFromQueue]);
+
+  // begitu koneksi balik, coba muat ulang data server otomatis — jalur
+  // retry buat kasus "Dashboard sempat gagal loadAll() pas offline"
+  useEffect(() => {
+    const handleOnline = () => {
+      loadAllRef.current?.();
+    };
+    window.addEventListener("online", handleOnline);
+    return () => window.removeEventListener("online", handleOnline);
+  }, []);
 
   // pill notifikasi "tersimpan offline" — SENGAJA dibikin mirip pola
   // pendingDelete di bawah (bar mengambang, ilang sendiri), bukan sistem
@@ -167,13 +289,24 @@ export default function Dashboard({ child, onOpenProfile }) {
   // nambahin record baru (asli dari server ATAU optimistic dari antrian
   // offline) ke state lokal yang sesuai jenisnya, biar langsung kelihatan
   // di riwayat tanpa perlu loadAll() dulu
+  // Nambahin record baru CUMA kalau id-nya belum ada (dedup by id, BUKAN
+  // reconcilePendingArray — itu mangkas SEMUA entri _offlineQueued lain
+  // yang nggak ada di daftar "fresh" barunya, cocok buat rekonsiliasi
+  // penuh tapi SALAH di sini karena kita cuma mau nambah 1 item, bukan
+  // ngasih daftar lengkap ulang). Dedup ini perlu soalnya item yang sama
+  // (id `local-<queueId>` yang sama) bisa aja UDAH keduluan ditambahin
+  // sama reconcilePendingFromQueue (dipicu QUEUE_CHANGE_EVENT dari
+  // enqueueRequest, yang kepanggil SEBELUM handleCreate nyampe sini).
+  const appendIfNew = (record) => (prev) =>
+    prev.some((item) => item.id === record.id) ? prev : [record, ...prev];
+
   const addOptimisticLog = (type, record) => {
-    if (type === "feeding") setFeedingLogs((prev) => [record, ...prev]);
-    else if (type === "sleep") setSleepLogs((prev) => [record, ...prev]);
-    else if (type === "diaper") setDiaperLogs((prev) => [record, ...prev]);
-    else if (type === "pumping") setPumpingLogs((prev) => [record, ...prev]);
-    else if (type === "stroll" || type === "bathing") setActivityLogs((prev) => [record, ...prev]);
-    else if (type === "vitamin") setMedicationLogs((prev) => [record, ...prev]);
+    if (type === "feeding") setFeedingLogs(appendIfNew(record));
+    else if (type === "sleep") setSleepLogs(appendIfNew(record));
+    else if (type === "diaper") setDiaperLogs(appendIfNew(record));
+    else if (type === "pumping") setPumpingLogs(appendIfNew(record));
+    else if (type === "stroll" || type === "bathing") setActivityLogs(appendIfNew(record));
+    else if (type === "vitamin") setMedicationLogs(appendIfNew(record));
   };
 
   const createByType = async (type, payload) => {
@@ -610,9 +743,24 @@ export default function Dashboard({ child, onOpenProfile }) {
         <h2 className="font-mono text-xs text-ink-faint tracking-[0.2em] uppercase mb-3">Riwayat</h2>
         {loading ? (
           <p className="text-ink-faint text-sm">Memuat...</p>
-        ) : historyItems.length === 0 ? (
-          <p className="text-ink-faint text-sm">Belum ada catatan {isToday ? "hari ini" : "di tanggal ini"}.</p>
         ) : (
+          <>
+            {loadError && (
+              <div className="mb-3 flex items-center justify-between gap-3 bg-warn/10 text-warn text-xs rounded-xl2 px-3 py-2.5">
+                <span>📡 Nggak bisa memuat data terbaru dari server — kamu sedang offline.</span>
+                <button
+                  type="button"
+                  onClick={() => loadAll()}
+                  disabled={loading}
+                  className="font-semibold underline underline-offset-2 flex-shrink-0 disabled:opacity-50"
+                >
+                  Coba lagi
+                </button>
+              </div>
+            )}
+            {historyItems.length === 0 ? (
+              <p className="text-ink-faint text-sm">Belum ada catatan {isToday ? "hari ini" : "di tanggal ini"}.</p>
+            ) : (
           <div className="space-y-4">
             {groupedHistory.map((group, groupIdx) => (
               <div key={groupIdx}>
@@ -713,6 +861,8 @@ export default function Dashboard({ child, onOpenProfile }) {
               </div>
             ))}
           </div>
+            )}
+          </>
         )}
       </div>
 
