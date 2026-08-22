@@ -47,6 +47,16 @@ def create_app(config_overrides=None):
     # yang sengaja butuh perilaku propagate aslinya.
     app.config.setdefault("PROPAGATE_EXCEPTIONS", False)
 
+    # Traceback MENTAH (bisa ngandung SQL/parameter/path/data user) di log
+    # server CUMA nyala kalau operator SENGAJA nge-set env var ini — bukan
+    # ngikutin DEBUG/FLASK_ENV (yang bisa aja kepasang True nggak sengaja
+    # di staging) — lihat utils/observability.py:handle_unexpected_exception.
+    # Default-nya False di MANA PUN, termasuk dev.
+    app.config.setdefault(
+        "OBSERVABILITY_LOG_RAW_TRACEBACKS",
+        os.environ.get("OBSERVABILITY_LOG_RAW_TRACEBACKS", "false").strip().lower() in ("1", "true", "yes"),
+    )
+
     # pastikan folder instance ada (buat SQLite)
     os.makedirs(os.path.join(app.root_path, "instance"), exist_ok=True)
 
@@ -55,7 +65,14 @@ def create_app(config_overrides=None):
         app,
         supports_credentials=True,
         origins=os.environ.get("FRONTEND_ORIGIN", "http://localhost:5173").split(","),
-        allow_headers=["Content-Type", "Authorization", "X-Idempotency-Key"],
+        # X-Request-ID di 2 daftar: allow_headers (biar browser boleh
+        # NGIRIM-nya di preflight, kalau frontend eksplisit nge-set) dan
+        # expose_headers (biar JS di browser boleh MEMBACA header respons
+        # ini — tanpa Access-Control-Expose-Headers, browser nyembunyiin
+        # header custom apa pun dari `fetch`/`XMLHttpRequest`, walau
+        # secara teknis ada di respons). Lihat backend/docs/OBSERVABILITY.md.
+        allow_headers=["Content-Type", "Authorization", "X-Idempotency-Key", "X-Request-ID"],
+        expose_headers=["X-Request-ID"],
     )
 
     logger = configure_logging(app)
@@ -102,7 +119,8 @@ def create_app(config_overrides=None):
         OBSERVABILITY.md buat kontrak lengkapnya.
         """
         request_id = getattr(g, "request_id", None) or "unknown"
-        if check_database_ok(app):
+        ok, category = check_database_ok(app)
+        if ok:
             return jsonify(
                 {
                     "status": "ok",
@@ -111,6 +129,11 @@ def create_app(config_overrides=None):
                     "request_id": request_id,
                 }
             )
+        # category ("timeout"/"error") CUMA salah satu dari 2 nilai aman —
+        # nempel ke log ringkasan request (lewat after_request hook di
+        # utils/observability.py), TIDAK PERNAH ke respons klien di bawah.
+        if category:
+            g.db_check_category = category
         return (
             jsonify({"status": "degraded", "database": "unavailable", "request_id": request_id}),
             503,

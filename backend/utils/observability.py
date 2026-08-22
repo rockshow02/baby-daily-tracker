@@ -10,26 +10,42 @@ ATURAN PRIVASI KETAT — modul ini TIDAK PERNAH mencatat/mengembalikan:
   - chat ID Telegram, error database mentah, stack trace ke KLIEN
   - path database, tipe database, nama tabel, jumlah record, hostname,
     environment variable, git remote/branch
+  - path filesystem absolut, pesan exception mentah (`str(exc)`), teks
+    traceback mentah, statement SQL, parameter SQL, request path mentah
+    buat route yang nggak match
 
-Stack trace BOLEH masuk log SERVER-SIDE (buat debugging) lewat baris log
-`unhandled_exception` yang terpisah dari log ringkasan request biasa —
-tapi TIDAK PERNAH dikembalikan ke klien.
+SECARA DEFAULT, log server-side TIDAK PERNAH ngandung pesan exception atau
+traceback mentah — cuma tipe exception + lokasi frame yang udah disaring
+(file relatif ke folder backend, nama fungsi, nomor baris — lihat
+`_safe_traceback_frames`). Traceback mentah HANYA bisa nyala lewat config
+eksplisit `OBSERVABILITY_LOG_RAW_TRACEBACKS` (bukan `DEBUG`/`FLASK_ENV`,
+biar nggak ke-aktifin nggak sengaja di staging), default False, dan bahkan
+kalau nyala TETAP cuma masuk log server — TIDAK PERNAH ke respons klien.
 """
 
 import json
 import logging
 import os
 import re
+import sqlite3
 import time
+import traceback
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from pathlib import Path
 
 from flask import g, jsonify, request
 from sqlalchemy import text
 from werkzeug.exceptions import HTTPException
 
 LOGGER_NAME = "babytracker"
+
+# backend/utils/observability.py -> dirname 2x = backend/ — dipakai buat
+# nge-relatif-in path frame traceback (lihat _safe_traceback_frames) DAN
+# buat resolve path database SQLite relatif (lihat
+# _resolve_sqlite_health_check_path), biar nggak ada path absolut yang
+# nempel di log atau di query resolusi database.
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # --------------------------------------------------------------------------
 # Request ID
@@ -85,6 +101,8 @@ _ALLOWED_EXTRA_FIELDS = (
     "duration_ms",
     "user_id",
     "exception_type",
+    "frames",
+    "db_check_category",
 )
 
 
@@ -99,9 +117,11 @@ class _JsonLineFormatter(logging.Formatter):
             value = getattr(record, key, None)
             if value is not None:
                 payload[key] = value
-        # stack trace CUMA nempel di sini kalau caller eksplisit ngasih
-        # exc_info=True (lihat handle_unexpected_exception di bawah) — log
-        # ringkasan request biasa TIDAK PERNAH lewat jalur ini.
+        # stack trace MENTAH cuma nempel di sini kalau caller eksplisit
+        # ngasih exc_info truthy DAN config OBSERVABILITY_LOG_RAW_TRACEBACKS
+        # lagi nyala (lihat handle_unexpected_exception di bawah — default
+        # exc_info=False, jadi cabang ini nggak kepakai secara default).
+        # Log ringkasan request biasa TIDAK PERNAH lewat jalur ini.
         if record.exc_info:
             payload["stack_trace"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False)
@@ -124,6 +144,27 @@ def configure_logging(app):
         logger._babytracker_configured = True
     app.babytracker_logger = logger
     return logger
+
+
+_UNMATCHED_ROUTE_LABEL = "<unmatched>"
+
+
+def safe_route_template():
+    """
+    Balikin TEMPLATE route yang match (mis.
+    "/api/children/<int:child_id>/feeding-logs"), BUKAN identifier
+    dinamisnya (bukan "42") dan BUKAN request.path mentah kalau nggak ada
+    route yang match sama sekali.
+
+    request.path buat request yang NGGAK match route manapun 100%
+    dikontrol pengirim request — bisa aja "/api/reset/token-secret-value"
+    atau "/api/user/email@example.com" — jadi TIDAK PERNAH boleh nempel
+    ke log apa pun. Dipakai konsisten di log ringkasan request DAN log
+    error, biar 2 jalur itu nggak bisa nyimpang.
+    """
+    if request.url_rule is not None:
+        return request.url_rule.rule
+    return _UNMATCHED_ROUTE_LABEL
 
 
 def _safe_current_user_id():
@@ -161,13 +202,11 @@ def register_request_hooks(app, logger):
         start = getattr(g, "request_start_time", None)
         duration_ms = round((time.monotonic() - start) * 1000, 2) if start is not None else None
 
-        route = request.url_rule.rule if request.url_rule else request.path
-
         extra = {
             "event": "request_completed",
             "request_id": request_id,
             "method": request.method,
-            "route": route,
+            "route": safe_route_template(),
             "status": response.status_code,
         }
         if duration_ms is not None:
@@ -175,6 +214,13 @@ def register_request_hooks(app, logger):
         exception_type = getattr(g, "exception_type", None)
         if exception_type is not None:
             extra["exception_type"] = exception_type
+        # diisi endpoint /api/health (lewat g.db_check_category) kalau DB
+        # check gagal — CUMA salah satu dari 2 nilai aman ("timeout"/
+        # "error"), TIDAK PERNAH pesan exception mentah (lihat
+        # check_database_ok di bawah).
+        db_check_category = getattr(g, "db_check_category", None)
+        if db_check_category is not None:
+            extra["db_check_category"] = db_check_category
         user_id = _safe_current_user_id()
         if user_id is not None:
             extra["user_id"] = user_id
@@ -223,6 +269,44 @@ _ERROR_MESSAGES = {
 _DEFAULT_ERROR_MESSAGE = "Terjadi kesalahan pada permintaan."
 
 
+_MAX_SAFE_TRACEBACK_FRAMES = 6
+
+
+def _safe_traceback_frames(exc, max_frames=_MAX_SAFE_TRACEBACK_FRAMES):
+    """
+    Ringkasan traceback yang AMAN dicatat: cuma lokasi (file relatif ke
+    folder backend, nama fungsi, nomor baris) buat beberapa frame
+    TERAKHIR (paling deket ke titik error) — TIDAK PERNAH nyertain teks
+    baris kode, pesan exception, atau nilai variabel apa pun (yang mana
+    bisa aja password/token/email/nama bayi/catatan medis/statement SQL/
+    parameter SQL, tergantung di mana error-nya kejadian).
+
+    File di luar folder backend (mis. dependency di venv/site-packages)
+    tetep direlatifin (nggak pernah path absolut), walau hasilnya jadi
+    ada "..\\..\\" — itu masih jauh lebih aman daripada path absolut penuh
+    yang bisa bocorin username OS/struktur folder server.
+    """
+    try:
+        tb = traceback.extract_tb(exc.__traceback__)
+    except Exception:
+        return []
+
+    frames = []
+    for frame in tb[-max_frames:]:
+        try:
+            rel_path = os.path.relpath(frame.filename, BACKEND_DIR)
+        except (ValueError, TypeError):
+            rel_path = os.path.basename(frame.filename or "?")
+        frames.append(
+            {
+                "file": rel_path.replace(os.sep, "/"),
+                "function": frame.name,
+                "line": frame.lineno,
+            }
+        )
+    return frames
+
+
 def _build_error_body(code_name, message):
     return {
         "error": {
@@ -250,16 +334,26 @@ def register_error_handlers(app, logger):
         exception_type = type(err).__name__
         g.exception_type = exception_type  # ikut ke log ringkasan request lewat after_request
 
+        # Traceback MENTAH (isinya pesan exception asli — bisa aja SQL,
+        # parameter SQL, path database, data user) CUMA disertain kalau
+        # operator SENGAJA nyalain config ini secara eksplisit — BUKAN
+        # otomatis ikut app.debug/FLASK_ENV, biar nggak ke-aktifin nggak
+        # sengaja di staging/production. Default-nya False di mana pun
+        # (lihat app.py:create_app). Kalau nyala pun, itu CUMA masuk log
+        # SERVER-SIDE — nggak pernah ke respons klien (lihat body di bawah).
+        include_raw_traceback = bool(app.config.get("OBSERVABILITY_LOG_RAW_TRACEBACKS", False))
+
         try:
             logger.error(
                 "unhandled_exception",
-                exc_info=True,
+                exc_info=include_raw_traceback,
                 extra={
                     "event": "unhandled_exception",
                     "request_id": getattr(g, "request_id", None) or "unknown",
                     "method": request.method,
-                    "route": request.url_rule.rule if request.url_rule else request.path,
+                    "route": safe_route_template(),
                     "exception_type": exception_type,
+                    "frames": _safe_traceback_frames(err),
                 },
             )
         except Exception:
@@ -272,25 +366,127 @@ def register_error_handlers(app, logger):
 # --------------------------------------------------------------------------
 # Pengecekan kesehatan database — RINGAN (SELECT 1), BUKAN integrity_check
 # penuh (itu cuma buat script diagnostik manual, lihat scripts/
-# production_health_check.py). Dibungkus timeout pendek di thread terpisah
-# biar 1 permintaan /api/health nggak bisa nge-hang lama walau DB-nya
-# somehow macet.
+# production_health_check.py).
+#
+# DIRANCANG KHUSUS buat deployment SQLite backend ini (lihat config.py —
+# SQLALCHEMY_DATABASE_URI SELALU SQLite file lokal di production/staging
+# PythonAnywhere, nggak pernah driver lain). Bound waktu di sini datang
+# dari `timeout=` SQLite (busy_timeout) LEVEL DRIVER/C, BUKAN dari
+# cancel/kill thread Python — sebelumnya implementasi ini pakai
+# ThreadPoolExecutor(max_workers=1).submit(...).result(timeout=...), yang
+# kalau timeout kejadian, `with ThreadPoolExecutor(...)` di baris
+# berikutnya bakal manggil executor.shutdown(wait=True) yang NUNGGU
+# worker yang macet itu SAMPAI SELESAI — jadi /api/health tetep bisa
+# nge-hang selama operasi DB-nya macet, persis kebalikan dari tujuan
+# timeout itu sendiri. Versi ini SAMA SEKALI nggak bikin thread baru buat
+# health check biasa: query "SELECT 1" jalan sinkron di thread request
+# yang sama, dibatasi busy_timeout SQLite bawaan — kalau limitnya
+# kelewat, sqlite3 sendiri yang raise OperationalError (bukan Python yang
+# nge-cancel apa pun), jadi TIDAK ADA sisa worker yang nyangkut di
+# background, TIDAK ADA thread yang dibikin per-request (jadi TIDAK ADA
+# cara buat request /api/health yang bertubi-tubi bikin jumlah thread
+# nambah terus) — resource bound-nya otomatis, bukan lewat pool.
+#
+# Kalau suatu saat aplikasi ini pindah ke database non-SQLite, bound
+# genuine kayak gini butuh dirancang ulang lewat mekanisme driver yang
+# sesuai (mis. `statement_timeout` Postgres) — jangan asal pasang balik
+# ThreadPoolExecutor buat "generalize"-nya, itu yang bikin bug ini ada.
 # --------------------------------------------------------------------------
 
 DEFAULT_HEALTH_CHECK_TIMEOUT_SECONDS = 2.0
 
+# 2 SATU-SATUNYA kategori kegagalan yang boleh nempel ke log/g.* — dipilih
+# lewat SEBERAPA LAMA pengecekan berlangsung sebelum gagal (bukan lewat
+# parsing pesan exception-nya), biar penentuannya sendiri nggak pernah
+# butuh nyimpen/ngutak-atik teks exception mentah di mana pun.
+_HEALTH_CHECK_CATEGORY_TIMEOUT = "timeout"
+_HEALTH_CHECK_CATEGORY_ERROR = "error"
 
-def check_database_ok(app, timeout_seconds=DEFAULT_HEALTH_CHECK_TIMEOUT_SECONDS):
+
+def _resolve_sqlite_health_check_path(app):
+    """
+    Path file SQLite yang lagi dikonfigurasi app ini, TANPA nyentuh
+    connection pool Flask-SQLAlchemy (beda dari
+    scripts/db_backup_common.py:resolve_active_sqlite_path, yang sengaja
+    manggil db.engine.dispose() — cocok buat backup/restore manual, TAPI
+    KEBERATAN buat dipanggil di hot path publik /api/health karena bakal
+    nutup koneksi idle yang lagi dipakai request lain).
+
+    Balikin None kalau databasenya bukan SQLite berbasis file (mis.
+    in-memory — SELALU kejadian di test suite, lihat config.py:TestConfig
+    — production/staging SELALU file-based).
+    """
     from extensions import db
 
-    def _run():
-        with app.app_context():
-            db.session.execute(text("SELECT 1"))
-            db.session.remove()
+    with app.app_context():
+        url = db.engine.url
 
+    drivername = (url.drivername or "").lower()
+    if not drivername.startswith("sqlite"):
+        return None
+
+    database = url.database
+    if not database or database == ":memory:" or database.startswith("file::memory:"):
+        return None
+
+    path = Path(database)
+    if not path.is_absolute():
+        path = Path(BACKEND_DIR) / path
+    return path.resolve()
+
+
+def _sqlite_select_1_bounded(db_path, timeout_seconds):
+    """
+    1 koneksi sqlite3 MENTAH (bukan lewat pool Flask-SQLAlchemy),
+    read-only, PENDEK UMURNYA: connect -> SELECT 1 -> close, nggak lebih.
+    `timeout=` di sini diteruskan jadi busy_timeout SQLite BENERAN (level
+    driver/C) — kalau file lagi dikunci koneksi lain, SQLite RETRY
+    otomatis sampai maksimal `timeout_seconds` baru raise
+    OperationalError. Genuine bound dari driver, BUKAN thread yang
+    di-cancel dari Python.
+    """
+    uri = f"file:{db_path.as_posix()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=timeout_seconds)
     try:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            executor.submit(_run).result(timeout=timeout_seconds)
-        return True
+        conn.execute("SELECT 1;")
+    finally:
+        conn.close()
+
+
+def check_database_ok(app, timeout_seconds=DEFAULT_HEALTH_CHECK_TIMEOUT_SECONDS):
+    """
+    Balikin (ok: bool, category: str | None).
+
+    `category` cuma diisi kalau ok=False, dan CUMA salah satu dari 2 nilai
+    aman di atas ("timeout"/"error") — TIDAK PERNAH pesan exception
+    mentah, str(exc), atau apa pun yang berasal dari isi exception-nya.
+    Ditentukan lewat SEBERAPA LAMA pengecekan berlangsung relatif ke
+    `timeout_seconds` (elapsed >= timeout_seconds -> "timeout", lebih
+    cepat dari itu -> "error" — mis. file nggak ada/rusak/config salah,
+    yang gagalnya cepat, bukan nunggu lock).
+    """
+    start = time.monotonic()
+    try:
+        db_path = _resolve_sqlite_health_check_path(app)
+        if db_path is not None:
+            _sqlite_select_1_bounded(db_path, timeout_seconds)
+        else:
+            # In-memory SQLite (test suite doang, lihat docstring di
+            # atas) -- nggak ada lock antar-koneksi yang mungkin
+            # kejadian, jadi query langsung lewat session ORM (nggak
+            # butuh wrapper tambahan; nggak ada skenario "macet" yang
+            # genuine buat database yang cuma ada di 1 proses memory).
+            from extensions import db
+
+            with app.app_context():
+                db.session.execute(text("SELECT 1"))
+                db.session.remove()
+        return True, None
     except Exception:
-        return False
+        elapsed = time.monotonic() - start
+        category = (
+            _HEALTH_CHECK_CATEGORY_TIMEOUT
+            if elapsed >= timeout_seconds
+            else _HEALTH_CHECK_CATEGORY_ERROR
+        )
+        return False, category

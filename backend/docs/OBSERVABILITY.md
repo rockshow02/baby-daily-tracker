@@ -17,9 +17,62 @@ GET /api/health
 ```
 
 Publik, **TANPA autentikasi**, murah — cuma `SELECT 1` (bukan
-`PRAGMA integrity_check` penuh), dibungkus timeout 2 detik lewat
-`ThreadPoolExecutor` biar 1 request health check nggak bisa nge-hang
-selamanya kalau DB lagi bermasalah.
+`PRAGMA integrity_check` penuh), dibatasi genuine 2 detik (default,
+`DEFAULT_HEALTH_CHECK_TIMEOUT_SECONDS`).
+
+### Bound waktu yang GENUINE (bukan thread-per-request)
+
+Implementasi SEBELUMNYA pakai
+`ThreadPoolExecutor(max_workers=1).submit(...).result(timeout=...)`. Itu
+BUG: kalau `.result()` timeout, baris `with ThreadPoolExecutor(...):`
+berikutnya tetep manggil `executor.shutdown(wait=True)` saat keluar blok
+— yang NUNGGU worker yang macet itu SAMPAI SELESAI. Jadi `/api/health`
+tetep bisa nge-hang selama operasi DB-nya macet — persis kebalikan dari
+tujuan timeout itu sendiri — DAN tiap request timeout ninggalin 1 thread
+pool yang nunggu (resource exhaustion kalau kejadian bertubi-tubi).
+
+Perbaikannya (`check_database_ok()` di
+[`utils/observability.py`](../utils/observability.py)) DIRANCANG KHUSUS
+buat deployment SQLite backend ini (lihat [`config.py`](../config.py) —
+`SQLALCHEMY_DATABASE_URI` SELALU SQLite file lokal di production/staging
+PythonAnywhere, nggak pernah driver lain):
+
+- Buka 1 koneksi `sqlite3` MENTAH, read-only, PENDEK UMURNYA (connect ->
+  `SELECT 1` -> close) — **bukan** lewat connection pool
+  Flask-SQLAlchemy, dan **bukan** di thread terpisah.
+- `timeout=` yang di-pass ke `sqlite3.connect()` adalah **busy_timeout
+  SQLite beneran** (mekanisme retry level driver/C) — kalau file lagi
+  dikunci koneksi lain, SQLite sendiri yang retry sampai batas waktu itu,
+  lalu raise `OperationalError`. Bound-nya datang dari driver, BUKAN dari
+  Python yang nge-cancel/kill thread.
+- Karena nggak ada thread yang dibikin buat pengecekan biasa, **nggak ada
+  apa pun yang bisa "nyangkut" di background** walau timeout kejadian —
+  dan karena nggak ada thread yang dibikin PER REQUEST, jumlah thread
+  hidup nggak pernah nambah gara-gara request `/api/health` yang
+  bertubi-tubi timeout (lihat
+  `test_repeated_timeouts_do_not_increase_live_thread_count` di
+  `test_observability.py`).
+- Path database di-resolve lewat helper ringan
+  (`_resolve_sqlite_health_check_path`) yang CUMA baca metadata URL
+  engine (`db.engine.url`) — **nggak** manggil `db.engine.dispose()`
+  (beda dari `scripts/db_backup_common.py:resolve_active_sqlite_path`,
+  yang sengaja dispose buat kebutuhan backup/restore manual — dispose di
+  hot path publik ini bakal nutup koneksi idle punya request LAIN).
+- Kategori kegagalan (`"timeout"` vs `"error"`) ditentukan lewat
+  **seberapa lama** pengecekan berlangsung relatif ke `timeout_seconds`
+  (elapsed >= timeout -> `"timeout"`; lebih cepat -> `"error"`, mis. file
+  nggak ada/rusak) — BUKAN lewat parsing pesan exception-nya, biar
+  kategorinya sendiri nggak pernah butuh nyimpen teks exception mentah.
+
+**Batasan yang diketahui:** `timeout=` sqlite3 cuma membatasi retry
+SQLITE_BUSY (lock antar-koneksi) — BUKAN syscall `open()` file itu
+sendiri. Kalau disk-nya sendiri yang macet total (I/O hang OS-level),
+bound ini nggak berlaku. Ini dianggap di luar scope health check level
+aplikasi buat deployment ini (disk lokal per-akun PythonAnywhere, bukan
+network drive) — kalau suatu saat pindah ke database non-SQLite, bound
+genuine kayak gini butuh dirancang ulang lewat mekanisme driver yang
+sesuai (mis. `statement_timeout` Postgres), BUKAN pasang balik
+`ThreadPoolExecutor` generik.
 
 **Sehat (200):**
 ```json
@@ -50,7 +103,10 @@ biar endpoint publik ini nggak punya jalur eksekusi command sama sekali.
 gagal): tipe/path database, nama tabel, jumlah record, hostname,
 environment variable lain, git remote/branch, atau teks exception mentah.
 Kalau DB check gagal karena exception, pesan exception-nya TIDAK PERNAH
-ikut ke body respons — cuma `"database": "unavailable"`.
+ikut ke body respons — cuma `"database": "unavailable"`. Kategori
+kegagalan internal (`"timeout"`/`"error"`) juga TIDAK PERNAH ikut ke
+body — cuma nempel di log server-side (field `db_check_category` di
+baris `request_completed`, lihat bagian logging di bawah).
 
 ## 2. Request ID korelasi (`X-Request-ID`)
 
@@ -79,6 +135,47 @@ Karena log-nya 1 JSON per baris, semua baris (`request_completed`,
 `unhandled_exception`, dst) yang punya `request_id` yang sama itu langsung
 kebaca — biasanya cukup 1-2 baris per request.
 
+**Buat tim support:** minta user screenshot/copy pesan error yang muncul
+di UI (fallback Error Boundary di bagian 5 nampilin "Kode error" client-
+side, TAPI itu ID yang beda — random di browser, BUKAN `request_id`
+backend). Buat korelasi ke log BACKEND, request ID yang relevan ada di
+header respons `X-Request-ID` — devtools browser (tab Network -> pilih
+request yang gagal -> Response Headers) selalu bisa liat ini, karena
+CORS udah expose header ini secara eksplisit (lihat bagian CORS di
+bawah) — nggak perlu akses ke source frontend buat baca headernya.
+
+### CORS buat `X-Request-ID` lintas origin
+
+Frontend (Vercel) dan backend (PythonAnywhere) beda origin — browser
+CUMA ngizinin JavaScript baca header respons CUSTOM (bukan header
+"simple" bawaan kayak `Content-Type`) kalau server eksplisit nyantumin
+di `Access-Control-Expose-Headers`. `X-Request-ID` ada di 2 daftar
+konfigurasi CORS (`app.py:create_app`):
+
+- `allow_headers` — biar browser boleh NGIRIM `X-Request-ID` di request
+  (preflight OPTIONS bakal nge-approve-nya), kalau frontend suatu saat
+  eksplisit nge-set header ini sendiri.
+- `expose_headers` — biar `fetch`/`XMLHttpRequest` di browser boleh
+  MEMBACA `X-Request-ID` dari respons. Tanpa ini, header-nya TETAP ada
+  di respons HTTP mentah (devtools tetep nunjukin), tapi kode JavaScript
+  frontend nggak bisa akses nilainya.
+
+Berlaku konsisten di SEMUA jenis respons: sukses (200), degraded (503),
+error framework (404/405/dst), DAN error nggak ketangkep (500) — juga di
+respons preflight OPTIONS itu sendiri. `Content-Type`, `Authorization`,
+`X-Idempotency-Key` tetep ada di `allow_headers` seperti sebelumnya
+(nggak dicabut), `supports_credentials=True` tetep nyala, dan origin
+TETAP dibatasi lewat whitelist `FRONTEND_ORIGIN` (nggak pernah wildcard
+`*` — flask-cors sendiri nolak kombinasi wildcard + credentials).
+
+**Frontend belum diubah buat NGIRIM `X-Request-ID` di tiap request** —
+task ini sengaja nggak nambahin itu (nggak ada kebutuhan konkret yang
+butuh korelasi request ID sisi-klien->server yang di-generate FRONTEND;
+korelasi yang ada sekarang cukup lewat request ID yang di-GENERATE
+BACKEND dan dibaca dari respons). CORS-nya udah siap kalau suatu saat
+dibutuhkan (mis. buat nyambungin log frontend custom ke request ID
+backend), tapi nambahin behavior kirim itu di frontend BELUM dikerjakan.
+
 ## 3. Logging terstruktur (JSON per baris)
 
 Lewat `logging` standar Python (logger bernama `"babytracker"`), 1 objek
@@ -88,19 +185,66 @@ biasa — nggak butuh setup tambahan).
 **Field yang DIIZINKAN muncul** (subset, tergantung event):
 `timestamp`, `level`, `event`, `request_id`, `method`, `route` (route
 TEMPLATE kayak `/api/children/<int:child_id>/feeding-logs`, bukan URL
-literal), `status`, `duration_ms`, `user_id`, `exception_type`,
-`stack_trace` (KHUSUS baris `unhandled_exception`, server-side aja).
+literal — lihat "Route yang nggak match" di bawah), `status`,
+`duration_ms`, `user_id`, `exception_type`, `db_check_category`
+(`"timeout"`/`"error"`, cuma di baris `request_completed` buat
+`/api/health` yang degraded), `frames` (lokasi traceback yang udah
+disaring, CUMA di baris `unhandled_exception` — lihat di bawah).
 
-**Field yang TIDAK PERNAH dicatat** (di baris log manapun): header
-Authorization, cookie, isi body request/response, nilai query string,
-password, token, username/email, nama bayi, catatan bebas, nama obat,
-nama file upload, chat ID Telegram, pesan/traceback error database
-mentah dari SQLAlchemy.
+**Field yang TIDAK PERNAH dicatat SECARA DEFAULT** (di baris log
+manapun): header Authorization, cookie, isi body request/response, nilai
+query string, password, token, username/email, nama bayi, catatan bebas,
+nama obat, nama file upload, chat ID Telegram, **pesan exception mentah
+(`str(exc)`), teks traceback mentah, statement SQL, parameter SQL, path
+filesystem absolut**.
+
+### Exception yang nggak ketangkep — TANPA pesan/traceback mentah secara default
 
 Setiap request yang selesai bikin 1 baris `event: "request_completed"`.
-Exception yang nggak ketangkep route manapun bikin 1 baris tambahan
-`event: "unhandled_exception"` (stack trace-nya CUMA di baris ini, CUMA
-di log server — **tidak pernah** dikembalikan ke klien).
+Exception yang nggak ketangkep route manapun (bug asli) bikin 1 baris
+tambahan `event: "unhandled_exception"`, tapi **secara default field ini
+CUMA berisi**:
+
+- `exception_type` — nama class-nya doang (mis. `"RuntimeError"`), BUKAN
+  pesannya.
+- `frames` — daftar (maks 6, paling deket ke titik error) lokasi frame
+  yang udah disaring: `{"file": "routes/auth_routes.py", "function":
+  "get_current_user_id", "line": 42}`. `file` selalu relatif ke folder
+  `backend/` (nggak pernah path absolut). **Nggak ada** teks baris kode,
+  nilai variabel, atau pesan exception di sini — cuma lokasinya.
+
+Ini KOREKSI dari implementasi awal, yang sempet nyalain
+`logger.error(..., exc_info=True)` buat SEMUA exception nggak ketangkep
+— traceback Python yang diformat SELALU diakhiri baris
+`ExceptionType: pesan`, dan pesan exception SQLAlchemy/database bisa aja
+ngandung statement SQL, parameter SQL (termasuk data user), atau path
+database. Itu pelanggaran langsung ke aturan privasi di atas walau
+"cuma" di log server, bukan di respons klien.
+
+Traceback MENTAH (exc_info beneran) cuma bisa nyala lewat config
+eksplisit `OBSERVABILITY_LOG_RAW_TRACEBACKS=true` (env var, dibaca sekali
+di `create_app()`) — **BUKAN** ngikutin `DEBUG`/`FLASK_ENV` (yang bisa
+aja kepasang True nggak sengaja di staging). Default-nya **False di mana
+pun**, termasuk `TestConfig`/`DevConfig` yang `DEBUG=True` — flag ini
+sengaja dipisah total dari `DEBUG` (lihat
+`test_raw_traceback_config_defaults_to_false_and_is_not_tied_to_debug`).
+Bahkan kalau operator sengaja nyalain buat debugging lokal, traceback itu
+**TETAP CUMA masuk log server** — nggak pernah, dalam kondisi apa pun,
+ikut ke body respons klien (lihat
+`test_raw_traceback_opt_in_still_never_leaks_to_client_response`).
+
+### Route yang nggak match route manapun
+
+`safe_route_template()` (`utils/observability.py`) dipakai KONSISTEN di
+log `request_completed` DAN `unhandled_exception`: kalau
+`request.url_rule` ada, log TEMPLATE-nya (mis.
+`/api/children/<int:child_id>`, bukan `/api/children/42`). Kalau NGGAK
+ADA route yang match (mis. request ke path acak yang bukan endpoint
+beneran), yang dicatat SELALU konstanta aman `"<unmatched>"` — TIDAK
+PERNAH `request.path` mentah, yang 100% dikontrol pengirim request dan
+bisa aja berisi apa pun (`/api/reset/token-secret-value`,
+`/api/user/email@example.com`, dst). Query string juga TIDAK PERNAH
+ikut, match atau nggak.
 
 `configure_logging()` idempotent — dipanggil ulang tiap `create_app()`
 (kejadian normal di test suite) nggak bikin handler ganda/log duplikat,
@@ -261,20 +405,41 @@ task) — jalanin manual:
    pas server nggak jalan, restart server, `curl /api/health`) — cek
    balik 503 `{"status":"degraded",...}` TANPA bocorin pesan exception,
    lalu kembalikan nama file aslinya.
+9. `curl -i http://localhost:5000/api/health -H "Origin: http://localhost:5173"`
+   — cek header respons ada `Access-Control-Allow-Origin`,
+   `Access-Control-Allow-Credentials: true`, DAN
+   `Access-Control-Expose-Headers` yang nyebut `X-Request-ID` (biar
+   browser beneran bisa baca header itu, bukan cuma ada di respons
+   mentah).
+
+## Batasan yang diketahui
+
+- Bound waktu `/api/health` genuine buat SQLITE_BUSY (lock antar-koneksi
+  SQLite), tapi TIDAK melindungi dari I/O hang level OS/filesystem
+  (mis. disk/network drive yang beneran macet total) — dianggap di luar
+  scope buat deployment SQLite-lokal-per-akun PythonAnywhere ini. Lihat
+  bagian 1 buat detail.
+- Frontend belum ngirim `X-Request-ID` di request biasa (CORS-nya udah
+  siap kalau suatu saat dibutuhkan) — lihat bagian 2.
+- Traceback mentah (`OBSERVABILITY_LOG_RAW_TRACEBACKS=true`) kalau
+  operator sengaja nyalain buat debug lokal TETAP bisa ngandung SQL/
+  parameter/path — jangan nyalain ini di staging/production, dan jangan
+  nempel isi log itu ke tempat lain (tiket support, chat) tanpa disensor
+  dulu.
 
 ## Ringkasan file yang berubah/ditambah
 
 | File | Perubahan |
 |---|---|
-| `backend/utils/observability.py` | BARU — inti request ID, logging, error handler, DB health check |
-| `backend/app.py` | Wiring observability + endpoint `/api/health` baru |
+| `backend/utils/observability.py` | Inti request ID, logging, error handler, DB health check — DIREVISI: health check dibatasi genuine lewat busy_timeout SQLite (bukan ThreadPoolExecutor), log exception default nggak lagi bawa pesan/traceback mentah (cuma frame lokasi yang disaring), route yang nggak match dicatat sebagai `"<unmatched>"` (bukan `request.path` mentah) |
+| `backend/app.py` | Wiring observability + endpoint `/api/health` — DIREVISI: config `OBSERVABILITY_LOG_RAW_TRACEBACKS` (default False), CORS `allow_headers`/`expose_headers` nyantumin `X-Request-ID`, route health pakai signature `check_database_ok()` yang baru (`(ok, category)`) |
 | `backend/tests/test_notifications.py` | 1 test disesuaikan (`PROPAGATE_EXCEPTIONS=False`), invariant intinya sama |
-| `backend/tests/test_observability.py` | BARU — 24 test |
-| `backend/scripts/production_health_check.py` | BARU |
-| `backend/tests/test_production_health_check.py` | BARU — 16 test |
-| `backend/scripts/post_deploy_smoke_test.py` | BARU |
-| `backend/tests/test_post_deploy_smoke_test.py` | BARU — 13 test |
-| `frontend/src/components/ErrorBoundary.jsx` | BARU |
-| `frontend/src/components/ErrorBoundary.test.jsx` | BARU — 9 test |
+| `backend/tests/test_observability.py` | 45 test — termasuk test korektif buat bound health check, privasi log exception, normalisasi route, dan CORS `X-Request-ID` |
+| `backend/scripts/production_health_check.py` | Diagnostik manual (nggak diubah di ronde korektif ini) |
+| `backend/tests/test_production_health_check.py` | 16 test |
+| `backend/scripts/post_deploy_smoke_test.py` | Smoke test manual (nggak diubah di ronde korektif ini) |
+| `backend/tests/test_post_deploy_smoke_test.py` | 13 test |
+| `frontend/src/components/ErrorBoundary.jsx` | Error Boundary React (nggak diubah di ronde korektif ini) |
+| `frontend/src/components/ErrorBoundary.test.jsx` | 9 test |
 | `frontend/src/main.jsx` | Membungkus `<App />` dengan `<ErrorBoundary>` |
-| `backend/docs/OBSERVABILITY.md` | BARU — dokumen ini |
+| `backend/docs/OBSERVABILITY.md` | Dokumen ini — direvisi buat 4 perbaikan korektif di atas |

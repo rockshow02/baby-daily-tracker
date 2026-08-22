@@ -11,15 +11,31 @@ sebenarnya.
 import logging
 import os
 import re
+import sqlite3
 import threading
+import time
 
 import pytest
 from sqlalchemy.pool import NullPool
 
 from app import create_app
 from extensions import db
-from tests.conftest import auth_headers, register
-from utils.observability import REQUEST_ID_RE, resolve_app_version, resolve_request_id
+from tests.conftest import auth_headers, create_child, register
+from utils.observability import (
+    REQUEST_ID_RE,
+    check_database_ok,
+    resolve_app_version,
+    resolve_request_id,
+)
+
+
+def make_file_app(db_path):
+    """create_app() nunjuk ke file SQLite sementara (bukan in-memory) —
+    dibutuhkan buat test check_database_ok yang beneran nguji jalur
+    sqlite3 mentah + busy_timeout (lihat utils/observability.py), yang
+    SENGAJA cuma aktif buat database berbasis file (jalur in-memory dipakai
+    fixture client/app biasa dari conftest.py)."""
+    return create_app(config_overrides={"SQLALCHEMY_DATABASE_URI": f"sqlite:///{db_path}"})
 
 
 @pytest.fixture
@@ -65,7 +81,7 @@ def test_2_response_shape_is_safe(client):
 
 
 def test_3_select_1_failure_returns_503(client, monkeypatch):
-    monkeypatch.setattr("app.check_database_ok", lambda app: False)
+    monkeypatch.setattr("app.check_database_ok", lambda app: (False, "error"))
     resp = client.get("/api/health")
     assert resp.status_code == 503
     body = resp.get_json()
@@ -334,7 +350,7 @@ def test_27_cors_headers_remain_present(client, monkeypatch):
     ok_resp = client.get("/api/health", headers={"Origin": origin})
     assert "Access-Control-Allow-Origin" in ok_resp.headers
 
-    monkeypatch.setattr("app.check_database_ok", lambda app: False)
+    monkeypatch.setattr("app.check_database_ok", lambda app: (False, "error"))
     degraded_resp = client.get("/api/health", headers={"Origin": origin})
     assert "Access-Control-Allow-Origin" in degraded_resp.headers
 
@@ -362,3 +378,380 @@ def test_405_uses_standardized_error_shape(client):
     assert resp.status_code == 405
     body = resp.get_json()
     assert body["error"]["code"] == "method_not_allowed"
+
+
+# --------------------------------------------------------------------------
+# Isu 1 — health check dibatasi genuine (bukan thread-per-request yang
+# nunggu worker macet selesai lewat executor.shutdown(wait=True))
+# --------------------------------------------------------------------------
+
+
+def test_healthy_file_database_check_succeeds(tmp_path):
+    app = make_file_app(tmp_path / "health.db")
+    ok, category = check_database_ok(app)
+    assert ok is True
+    assert category is None
+
+
+def test_database_exception_returns_degraded_with_error_category(tmp_path):
+    db_path = tmp_path / "health.db"
+    app = make_file_app(db_path)
+    with app.app_context():
+        db.engine.dispose()
+    os.remove(db_path)
+
+    ok, category = check_database_ok(app, timeout_seconds=2.0)
+    assert ok is False
+    assert category == "error"
+
+
+def test_locked_database_returns_within_strict_upper_bound(tmp_path):
+    db_path = tmp_path / "health.db"
+    app = make_file_app(db_path)
+
+    # koneksi sqlite3 MENTAH terpisah, nahan EXCLUSIVE lock di file yang
+    # SAMA — mensimulasikan database yang beneran macet/dikunci, tanpa
+    # perlu mock apa pun (locking SQLite asli).
+    lock_conn = sqlite3.connect(str(db_path), isolation_level=None)
+    lock_conn.execute("BEGIN EXCLUSIVE;")
+    try:
+        timeout_seconds = 0.3
+        start = time.monotonic()
+        ok, category = check_database_ok(app, timeout_seconds=timeout_seconds)
+        elapsed = time.monotonic() - start
+
+        assert ok is False
+        assert category == "timeout"
+        # bound GENUINE: nggak pernah nunggu jauh lebih lama dari
+        # timeout_seconds yang diminta (beda dari implementasi lama yang
+        # bisa nunggu SAMPAI operasi macet-nya selesai sendiri, alias
+        # nggak ada batas atas sama sekali). Margin longgar sengaja
+        # dipakai (bukan threshold ketat) biar nggak flaky di CI yang
+        # lambat, tapi tetap membuktikan ini BUKAN hang tanpa batas.
+        assert elapsed < timeout_seconds + 3.0
+    finally:
+        lock_conn.execute("ROLLBACK;")
+        lock_conn.close()
+
+
+def test_repeated_timeouts_do_not_increase_live_thread_count(tmp_path):
+    db_path = tmp_path / "health.db"
+    app = make_file_app(db_path)
+
+    lock_conn = sqlite3.connect(str(db_path), isolation_level=None)
+    lock_conn.execute("BEGIN EXCLUSIVE;")
+    try:
+        before = threading.active_count()
+        for _ in range(5):
+            ok, category = check_database_ok(app, timeout_seconds=0.2)
+            assert ok is False
+            assert category == "timeout"
+        after = threading.active_count()
+        assert after == before, (
+            f"jumlah thread hidup naik dari {before} ke {after} setelah 5x "
+            "timeout beruntun — health check nggak boleh ninggalin worker"
+        )
+    finally:
+        lock_conn.execute("ROLLBACK;")
+        lock_conn.close()
+
+
+def test_health_endpoint_timeout_is_safe_in_response_and_logged_as_category(client, captured_logs, monkeypatch):
+    monkeypatch.setattr("app.check_database_ok", lambda app: (False, "timeout"))
+
+    resp = client.get("/api/health")
+
+    assert resp.status_code == 503
+    assert resp.get_json() == {
+        "status": "degraded",
+        "database": "unavailable",
+        "request_id": resp.headers["X-Request-ID"],
+    }
+    # kategori kegagalan TIDAK PERNAH ikut ke respons klien — cuma masuk
+    # log server-side (diperiksa di bawah)
+    assert "timeout" not in resp.get_data(as_text=True).lower()
+
+    completion_records = [r for r in captured_logs if getattr(r, "event", None) == "request_completed"]
+    assert len(completion_records) == 1
+    assert completion_records[0].db_check_category == "timeout"
+
+
+def test_health_check_never_runs_pragma_integrity_check(tmp_path, monkeypatch):
+    db_path = tmp_path / "health.db"
+    app = make_file_app(db_path)
+
+    executed_statements = []
+    original_connect = sqlite3.connect
+
+    # sqlite3.Connection adalah tipe C-extension — nggak bisa nge-timpa
+    # atribut instance-nya langsung (mis. `conn.execute = ...`), jadi
+    # spy-nya lewat subclass Connection yang di-pass ke `factory=`
+    # (mekanisme resmi yang didukung modul sqlite3 buat kasus ini).
+    class _SpyConnection(sqlite3.Connection):
+        def execute(self, sql, *a, **k):
+            executed_statements.append(sql)
+            return super().execute(sql, *a, **k)
+
+    def spy_connect(*args, **kwargs):
+        kwargs["factory"] = _SpyConnection
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr("utils.observability.sqlite3.connect", spy_connect)
+
+    ok, category = check_database_ok(app)
+
+    assert ok is True
+    assert executed_statements == ["SELECT 1;"]
+    assert not any("integrity_check" in s.lower() or "pragma" in s.lower() for s in executed_statements)
+
+
+# --------------------------------------------------------------------------
+# Isu 2 — log exception nggak ketangkep TIDAK PERNAH ngandung pesan
+# exception mentah / str(exc) / traceback mentah secara default
+# --------------------------------------------------------------------------
+
+
+_SENSITIVE_MARKERS = (
+    "SuperSecretPass123",
+    "Bearer.fake.jwt.token.value",
+    "rahasia@example.com",
+    "Kiran Mustika",
+    "alergi susu sapi, dosis amoxicillin 5ml",
+    "SELECT * FROM users WHERE email",
+    "params=('rahasia@example.com', 'SuperSecretPass123')",
+)
+
+
+def test_unhandled_exception_message_never_appears_anywhere_in_logs(client, captured_logs, monkeypatch):
+    user = register(client)
+    secret_message = (
+        "password=SuperSecretPass123 token=Bearer.fake.jwt.token.value "
+        "user=rahasia@example.com baby=Kiran Mustika notes='alergi susu sapi, "
+        "dosis amoxicillin 5ml' sql=\"SELECT * FROM users WHERE email = ?\" "
+        "params=('rahasia@example.com', 'SuperSecretPass123') "
+        f"db_path={os.path.join('C:', os.sep, 'Users', 'opname', 'baby-daily-tracker', 'backend', 'instance', 'tracker.db')}"
+    )
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError(secret_message)
+
+    monkeypatch.setattr("routes.auth_routes.get_current_user_id", _boom)
+    resp = client.get("/api/auth/me", headers=auth_headers(user["token"]))
+    assert resp.status_code == 500
+
+    from utils.observability import _JsonLineFormatter
+
+    full_text = "\n".join(_JsonLineFormatter().format(r) for r in captured_logs)
+
+    assert secret_message not in full_text
+    for marker in _SENSITIVE_MARKERS:
+        assert marker not in full_text, f"marker sensitif {marker!r} nyelip ke log"
+    assert "tracker.db" not in full_text
+    assert "opname" not in full_text
+
+    # field yang MEMANG boleh/harus ada tetap ada
+    assert "RuntimeError" in full_text
+    assert resp.headers["X-Request-ID"] in full_text
+
+    error_records = [r for r in captured_logs if getattr(r, "event", None) == "unhandled_exception"]
+    assert len(error_records) == 1
+    record = error_records[0]
+    # default: exc_info nggak pernah diisi True -> nggak ada stack_trace mentah
+    assert not record.exc_info
+    assert isinstance(record.frames, list)
+    assert len(record.frames) > 0
+    for frame in record.frames:
+        assert set(frame.keys()) == {"file", "function", "line"}
+        assert not os.path.isabs(frame["file"])
+
+
+def test_unhandled_exception_log_route_uses_safe_template(client, captured_logs, monkeypatch):
+    user = register(client)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("routes.auth_routes.get_current_user_id", _boom)
+    client.get("/api/auth/me", headers=auth_headers(user["token"]))
+
+    error_records = [r for r in captured_logs if getattr(r, "event", None) == "unhandled_exception"]
+    assert len(error_records) == 1
+    assert error_records[0].route == "/api/auth/me"
+
+
+def test_raw_traceback_config_defaults_to_false_and_is_not_tied_to_debug(monkeypatch):
+    monkeypatch.delenv("OBSERVABILITY_LOG_RAW_TRACEBACKS", raising=False)
+    app = create_app()
+    # TestConfig punya DEBUG=True, tapi flag traceback mentah TETAP False —
+    # membuktikan ini nggak "nempel"/ngikutin DEBUG sama sekali.
+    assert app.config.get("DEBUG") is True
+    assert app.config["OBSERVABILITY_LOG_RAW_TRACEBACKS"] is False
+
+
+def test_raw_traceback_opt_in_still_never_leaks_to_client_response(monkeypatch):
+    app = create_app(config_overrides={"OBSERVABILITY_LOG_RAW_TRACEBACKS": True})
+    client = app.test_client()
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("pesan rahasia harus tetap gak nongol di respons klien")
+
+    monkeypatch.setattr("routes.auth_routes.get_current_user_id", _boom)
+    user = register(client)
+    resp = client.get("/api/auth/me", headers=auth_headers(user["token"]))
+
+    assert resp.status_code == 500
+    assert "pesan rahasia" not in resp.get_data(as_text=True)
+    assert resp.get_json() == {
+        "error": {
+            "code": "internal_error",
+            "message": "Terjadi kesalahan pada server.",
+            "request_id": resp.headers["X-Request-ID"],
+        }
+    }
+
+
+# --------------------------------------------------------------------------
+# Isu 3 — path yang nggak match route apa pun nggak pernah ditulis mentah
+# ke log (safe_route_template())
+# --------------------------------------------------------------------------
+
+
+def test_matched_dynamic_route_logs_only_its_template(client, captured_logs):
+    user = register(client)
+    child = create_child(client, user["token"])
+
+    resp = client.get(f"/api/children/{child['id']}", headers=auth_headers(user["token"]))
+    assert resp.status_code == 200
+
+    completion_records = [
+        r for r in captured_logs
+        if getattr(r, "event", None) == "request_completed" and getattr(r, "method", None) == "GET"
+    ]
+    matching = [r for r in completion_records if r.route == "/api/children/<int:child_id>"]
+    assert len(matching) == 1
+    assert str(child["id"]) not in matching[0].route
+
+
+def test_unmatched_secret_like_path_logs_only_the_safe_constant(client, captured_logs):
+    resp = client.get("/api/reset/token-secret-value?leak=should-not-appear")
+    assert resp.status_code == 404
+
+    completion_records = [r for r in captured_logs if getattr(r, "event", None) == "request_completed"]
+    assert len(completion_records) == 1
+    record = completion_records[0]
+    assert record.route == "<unmatched>"
+
+    from utils.observability import _JsonLineFormatter
+
+    full_text = _JsonLineFormatter().format(record)
+    assert "token-secret-value" not in full_text
+    assert "leak" not in full_text
+    assert "should-not-appear" not in full_text
+    assert "/api/reset/" not in full_text
+
+
+def test_error_logs_use_the_same_normalized_route_logic(client, captured_logs, monkeypatch):
+    user = register(client)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("routes.auth_routes.get_current_user_id", _boom)
+    client.get("/api/auth/me", headers=auth_headers(user["token"]))
+
+    error_records = [r for r in captured_logs if getattr(r, "event", None) == "unhandled_exception"]
+    assert len(error_records) == 1
+    # sama persis mekanisme yang dipakai request_completed (matched route
+    # template) — bukan request.path mentah
+    assert error_records[0].route == "/api/auth/me"
+
+
+# --------------------------------------------------------------------------
+# Isu 4 — X-Request-ID lengkap di CORS (allow + expose), lintas origin
+# --------------------------------------------------------------------------
+
+_FRONTEND_ORIGIN = "http://localhost:5173"
+
+
+def test_preflight_allows_x_request_id_header(client):
+    resp = client.open(
+        "/api/health",
+        method="OPTIONS",
+        headers={
+            "Origin": _FRONTEND_ORIGIN,
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "X-Request-ID",
+        },
+    )
+    allow_headers = resp.headers.get("Access-Control-Allow-Headers", "").lower()
+    assert "x-request-id" in allow_headers
+
+
+def test_preflight_still_allows_existing_headers(client):
+    resp = client.open(
+        "/api/health",
+        method="OPTIONS",
+        headers={
+            "Origin": _FRONTEND_ORIGIN,
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "Authorization, X-Idempotency-Key, Content-Type",
+        },
+    )
+    allow_headers = resp.headers.get("Access-Control-Allow-Headers", "").lower()
+    for expected in ("authorization", "x-idempotency-key", "content-type"):
+        assert expected in allow_headers
+
+
+def test_preflight_response_itself_carries_cors_origin_header(client):
+    resp = client.open(
+        "/api/health",
+        method="OPTIONS",
+        headers={
+            "Origin": _FRONTEND_ORIGIN,
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "X-Request-ID",
+        },
+    )
+    assert resp.headers.get("Access-Control-Allow-Origin") is not None
+
+
+def test_successful_response_exposes_x_request_id_header(client):
+    resp = client.get("/api/health", headers={"Origin": _FRONTEND_ORIGIN})
+    expose_headers = resp.headers.get("Access-Control-Expose-Headers", "").lower()
+    assert "x-request-id" in expose_headers
+
+
+def test_degraded_response_exposes_x_request_id_header(client, monkeypatch):
+    monkeypatch.setattr("app.check_database_ok", lambda app: (False, "error"))
+    resp = client.get("/api/health", headers={"Origin": _FRONTEND_ORIGIN})
+    assert resp.status_code == 503
+    expose_headers = resp.headers.get("Access-Control-Expose-Headers", "").lower()
+    assert "x-request-id" in expose_headers
+
+
+def test_unexpected_500_response_exposes_x_request_id_header(client, monkeypatch):
+    user = register(client)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("routes.auth_routes.get_current_user_id", _boom)
+    resp = client.get("/api/auth/me", headers={**auth_headers(user["token"]), "Origin": _FRONTEND_ORIGIN})
+
+    assert resp.status_code == 500
+    expose_headers = resp.headers.get("Access-Control-Expose-Headers", "").lower()
+    assert "x-request-id" in expose_headers
+
+
+def test_unapproved_origin_does_not_get_cors_access(client):
+    resp = client.get("/api/health", headers={"Origin": "https://evil.example.com"})
+    assert resp.status_code == 200  # CORS ditegakkan browser, bukan server — route tetep jalan
+    acao = resp.headers.get("Access-Control-Allow-Origin")
+    assert acao != "https://evil.example.com"
+    assert acao != "*"
+
+
+def test_credentials_support_and_no_wildcard_origin_unchanged(client):
+    resp = client.get("/api/health", headers={"Origin": _FRONTEND_ORIGIN})
+    assert resp.headers.get("Access-Control-Allow-Credentials") == "true"
+    assert resp.headers.get("Access-Control-Allow-Origin") != "*"
