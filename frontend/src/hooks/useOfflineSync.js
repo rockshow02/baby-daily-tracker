@@ -13,6 +13,7 @@ import {
 } from "../utils/offlineQueue";
 import { getToken, getCurrentUserId, generateRequestId, api } from "../api/client";
 import { getLastSyncedAt, setLastSyncedAt } from "../utils/syncMetadata";
+import { sanitizeRequestId } from "../utils/requestId";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
@@ -43,26 +44,19 @@ async function readErrorMessage(res) {
   return `Server menolak request ini (${res.status})`;
 }
 
-// Sama persis format request ID yang divalidasi backend (lihat
-// backend/utils/observability.py:REQUEST_ID_RE) — whitelist ketat, bukan
-// blacklist, biar nggak mungkin ada karakter aneh/kontrol/newline yang
-// nyelip ke tampilan atau ke penyimpanan lewat header ini. Header respons
-// diperlakukan sebagai DATA TIDAK TERPERCAYA sepenuhnya: kalau formatnya
-// nggak persis cocok, dianggap TIDAK ADA (bukan disaring sebagian).
-const SAFE_REQUEST_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
-
 /**
  * Ambil X-Request-ID dari respons server buat troubleshooting — CUMA
- * kalau formatnya cocok whitelist di atas. Nggak pernah men-generate ID
- * palsu kalau headernya nggak ada (mis. kegagalan jaringan murni, yang
- * memang nggak pernah nyampe ke server sama sekali).
+ * kalau formatnya cocok whitelist di utils/requestId.js (dipakai bareng
+ * sama lapis validasi TAMPILAN di components/RequestIdDetail.jsx —
+ * header respons diperlakukan sebagai DATA TIDAK TERPERCAYA sepenuhnya,
+ * kalau formatnya nggak persis cocok, dianggap TIDAK ADA, bukan disaring
+ * sebagian). Nggak pernah men-generate ID palsu kalau headernya nggak ada
+ * (mis. kegagalan jaringan murni, yang memang nggak pernah nyampe ke
+ * server sama sekali).
  */
 function extractSafeRequestId(res) {
   try {
-    const raw = res?.headers?.get?.("X-Request-ID");
-    if (!raw) return null;
-    const trimmed = String(raw).trim();
-    return SAFE_REQUEST_ID_RE.test(trimmed) ? trimmed : null;
+    return sanitizeRequestId(res?.headers?.get?.("X-Request-ID"));
   } catch (_) {
     return null;
   }
@@ -214,7 +208,16 @@ export function useOfflineSync() {
 
         if (res.status === 401) {
           // sesi login abis — STOP total, jangan sentuh item ini ataupun
-          // yang di belakangnya, tunggu login ulang
+          // yang di belakangnya, tunggu login ulang. TETAP simpen
+          // X-Request-ID buat troubleshooting (kalau ada & valid) — ini
+          // CUMA metadata diagnostik aman, BUKAN data fungsional: nggak
+          // nambah attempts, nggak ubah body/url/userId/status/
+          // clientRequestId, dan urutan retry-nya nggak berubah sama
+          // sekali (item ini tetep "pending" persis di posisi yang sama).
+          // Eksplisit null-kan kalau nggak ada/nggak valid, biar nggak
+          // nyisain lastRequestId BASI dari percobaan SEBELUMNYA yang beda
+          // sama sekali dari kegagalan 401 ini.
+          await updateQueueItem(item.id, { lastRequestId: extractSafeRequestId(res) });
           setRunState("auth_required");
           return;
         }

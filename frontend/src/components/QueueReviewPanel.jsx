@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { describeQueueItem, REVIEW_REASON } from "../utils/offlineQueue";
+import RequestIdDetail from "./RequestIdDetail";
 import {
   FIELD_TYPE,
   getEditableSchema,
@@ -198,6 +199,12 @@ function NeedsReviewCard({ item, onDiscard, onRetry, onConfirmingChange }) {
       ) : (
         <SummaryChips summary={summary} />
       )}
+
+      {/* Item ini SUDAH punya owner yang jelas (needs_review, BUKAN
+          legacy/unclaimed) — aman nampilin request ID buat troubleshooting.
+          Item legacy (LegacyCard di bawah) SENGAJA nggak pernah dikasih
+          komponen ini sama sekali, kepemilikannya belum diverifikasi. */}
+      <RequestIdDetail requestId={item.lastRequestId} />
 
       <div className="flex items-center gap-3 pt-1">
         {!cannotBeFixedByEditing && !needsManualRecreate && !editing && (

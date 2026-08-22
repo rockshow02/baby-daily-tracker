@@ -147,7 +147,7 @@ describe("useOfflineSync", () => {
     expect(delay).toBeLessThanOrEqual(3000);
   });
 
-  it("5a. 401 pauses the whole run without touching any item", async () => {
+  it("5a. 401 pauses the whole run without touching any FUNCTIONAL queue data (diagnostic metadata may still update)", async () => {
     await seed({ url: "/children/1/feeding-logs", clientRequestId: "req-1" });
     await seed({ url: "/children/1/sleep-logs", clientRequestId: "req-2" });
     global.fetch.mockResolvedValueOnce({
@@ -165,6 +165,15 @@ describe("useOfflineSync", () => {
     const items = await getQueue();
     expect(items).toHaveLength(2);
     expect(items.every((i) => i.attempts === 0)).toBe(true);
+    // Item ke-1 (yang beneran kena 401) TETAP kesimpen sama data
+    // fungsionalnya persis semula — cuma lastRequestId (metadata
+    // diagnostik AMAN) yang boleh berubah, bukan status/body/url/owner.
+    const first = items.find((i) => i.clientRequestId === "req-1");
+    expect(first.status).toBe("pending");
+    expect(first.url).toBe("/children/1/feeding-logs");
+    expect(first.userId).toBe(1);
+    expect(first.clientRequestId).toBe("req-1");
+    expect(first.lastRequestId).toBeNull(); // headers.get() balikin null di test ini -> disaring jadi null eksplisit
   });
 
   it("5b. 403 parks the item as needs_review (access_revoked) and lets the next item still sync", async () => {
@@ -413,12 +422,12 @@ describe("useOfflineSync", () => {
   });
 
   describe("401 re-authentication flow", () => {
-    it("retains queued records after pausing on 401 (they are never touched)", async () => {
+    it("retains queued records after pausing on 401 (functional data never touched — only lastRequestId may update)", async () => {
       const id = await seed();
       global.fetch.mockResolvedValueOnce({
         ok: false,
         status: 401,
-        headers: { get: () => null },
+        headers: { get: (name) => (name === "X-Request-ID" ? "auth-fail-req-id" : null) },
         json: async () => ({ error: "Belum login" }),
       });
 
@@ -428,6 +437,13 @@ describe("useOfflineSync", () => {
       const [item] = await getQueue();
       expect(item.id).toBe(id);
       expect(item.status).toBe("pending"); // TIDAK diubah, TIDAK dihapus
+      expect(item.attempts).toBe(0); // BUKAN dihitung sebagai percobaan gagal
+      expect(item.body).toBe(JSON.stringify({ feed_type: "asi_langsung" }));
+      expect(item.url).toBe("/children/1/feeding-logs");
+      expect(item.userId).toBe(1);
+      expect(item.clientRequestId).toBe("req-1");
+      // 1 hal yang BOLEH berubah: metadata diagnostik aman
+      expect(item.lastRequestId).toBe("auth-fail-req-id");
     });
 
     it("cancels the scheduled retry timer on unmount (logout), not just a generic cleanup call", async () => {
@@ -512,6 +528,88 @@ describe("useOfflineSync", () => {
       const [item] = await getQueue();
       expect(item.id).toBe(id);
       expect(item.userId).toBe(1); // tetap punya user 1, TIDAK disync pakai sesi user 2
+    });
+  });
+
+  describe("Issue 1 — 401 captures X-Request-ID as safe diagnostic metadata", () => {
+    it("1. a valid X-Request-ID on 401 is stored on the affected item", async () => {
+      await seed();
+      global.fetch.mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        headers: { get: (name) => (name === "X-Request-ID" ? "valid-req-id-123" : null) },
+        json: async () => ({ error: "Belum login" }),
+      });
+
+      const { result } = renderHook(() => useOfflineSync());
+      await waitFor(() => expect(result.current.status).toBe("auth_required"));
+
+      const [item] = await getQueue();
+      expect(item.lastRequestId).toBe("valid-req-id-123");
+    });
+
+    it("2. a missing/invalid X-Request-ID on 401 clears stale request-ID metadata from an earlier attempt", async () => {
+      const id = await seed();
+      // simulasikan item ini SEBELUMNYA udah punya lastRequestId dari
+      // kegagalan LAIN (mis. 500 sebelumnya) — request 401 ini nggak
+      // ngasih header valid sama sekali, jadi metadata basi itu HARUS
+      // ke-clear, bukan nyangkut nunjukin percobaan yang udah nggak relevan.
+      await updateQueueItem(id, { lastRequestId: "stale-from-earlier-500" });
+
+      global.fetch.mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        headers: { get: (name) => (name === "X-Request-ID" ? "not valid! <script>" : null) },
+        json: async () => ({ error: "Belum login" }),
+      });
+
+      const { result } = renderHook(() => useOfflineSync());
+      await waitFor(() => expect(result.current.status).toBe("auth_required"));
+
+      const [item] = await getQueue();
+      expect(item.lastRequestId).toBeNull();
+    });
+
+    it("3. the item remains queued with the same owner, body, url, status, and idempotency key after 401", async () => {
+      const id = await seed({ url: "/children/1/feeding-logs", clientRequestId: "stable-key-401" });
+      global.fetch.mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        headers: { get: (name) => (name === "X-Request-ID" ? "req-id-abc" : null) },
+        json: async () => ({ error: "Belum login" }),
+      });
+
+      const { result } = renderHook(() => useOfflineSync());
+      await waitFor(() => expect(result.current.status).toBe("auth_required"));
+
+      const [item] = await getQueue();
+      expect(item.id).toBe(id);
+      expect(item.userId).toBe(1);
+      expect(item.body).toBe(JSON.stringify({ feed_type: "asi_langsung" }));
+      expect(item.url).toBe("/children/1/feeding-logs");
+      expect(item.status).toBe("pending");
+      expect(item.clientRequestId).toBe("stable-key-401");
+    });
+
+    it("4. the next item in the queue is not attempted after a 401", async () => {
+      await seed({ url: "/children/1/feeding-logs", clientRequestId: "req-1" });
+      await seed({ url: "/children/1/sleep-logs", clientRequestId: "req-2" });
+      global.fetch.mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        headers: { get: (name) => (name === "X-Request-ID" ? "req-id-abc" : null) },
+        json: async () => ({ error: "Belum login" }),
+      });
+
+      const { result } = renderHook(() => useOfflineSync());
+      await waitFor(() => expect(result.current.status).toBe("auth_required"));
+
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      const items = await getQueue();
+      const second = items.find((i) => i.clientRequestId === "req-2");
+      expect(second.status).toBe("pending");
+      expect(second.attempts).toBe(0);
+      expect(second.lastRequestId).toBeFalsy(); // item ke-2 nggak pernah dicoba sama sekali
     });
   });
 

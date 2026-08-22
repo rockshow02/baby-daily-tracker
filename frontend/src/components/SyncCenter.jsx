@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { describeQueueItem } from "../utils/offlineQueue";
 import QueueReviewPanel from "./QueueReviewPanel";
+import RequestIdDetail from "./RequestIdDetail";
 
 const CURRENT_STATE_LABELS = {
   idle: "Semua catatan tersinkron",
@@ -37,57 +38,6 @@ function formatTimestamp(iso) {
   }
 }
 
-/**
- * Tombol "info teknis" yang expandable — SATU-SATUNYA tempat request ID
- * server (X-Request-ID) ditampilkan, dan CUMA kalau beneran ada (nggak
- * pernah nampilin placeholder kosong buat item yang nggak punya, mis.
- * kegagalan jaringan murni yang nggak pernah nyampe ke server). Nggak
- * pernah nampilin body/respons/exception server mentah — cuma ID
- * korelasi ini doang, yang formatnya udah disaring whitelist ketat di
- * hooks/useOfflineSync.js SEBELUM disimpan.
- */
-function RequestIdDetail({ requestId }) {
-  const [open, setOpen] = useState(false);
-  const [copied, setCopied] = useState(false);
-
-  if (!requestId) return null;
-
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard?.writeText?.(requestId);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch (_) {
-      // clipboard API nggak tersedia/ditolak browser — nggak fatal,
-      // ID-nya tetap kebaca manual dari teks yang udah ditampilkan
-    }
-  };
-
-  return (
-    <div className="mt-1">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="text-[10px] underline underline-offset-2 text-ink-faint"
-      >
-        {open ? "Sembunyikan info teknis" : "Info teknis"}
-      </button>
-      {open && (
-        <div className="mt-1 flex items-center gap-2 bg-void-bg rounded px-2 py-1">
-          <code className="text-[10px] text-ink-faint break-all flex-1">{requestId}</code>
-          <button
-            type="button"
-            onClick={handleCopy}
-            className="text-[10px] text-feed underline underline-offset-2 flex-shrink-0"
-          >
-            {copied ? "Tersalin" : "Salin"}
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 function PendingItemRow({ item }) {
   const { typeLabel } = describeQueueItem(item);
   return (
@@ -114,24 +64,43 @@ function PendingItemRow({ item }) {
  */
 export default function SyncCenter({ sync, onClose }) {
   const panelRef = useRef(null);
-  const confirmActiveRef = useRef(false);
+  // STATE (bukan cuma ref) — tombol tutup di header/footer perlu RE-RENDER
+  // buat nunjukin feedback (pesan "selesaikan konfirmasi dulu") pas nilai
+  // ini true, jadi ref doang nggak cukup di sini.
+  const [confirmActive, setConfirmActive] = useState(false);
 
   useEffect(() => {
     panelRef.current?.focus();
   }, []);
 
+  /**
+   * SATU pintu tertutup buat SEMUA jalur nutup Sync Center — Escape,
+   * tombol ✕ header, tombol "Tutup" footer, dan (kalau suatu saat
+   * ditambahin) klik backdrop — SEMUA WAJIB lewat sini, bukan manggil
+   * `onClose()` langsung masing-masing sendiri-sendiri. Kalau lagi ada
+   * konfirmasi "Yakin? Batal/Buang" 2-langkah yang kebuka di
+   * QueueReviewPanel (bisa lebih dari 1 card sekaligus — lihat
+   * components/QueueReviewPanel.jsx:onAnyConfirmingChange, yang cuma
+   * ngelaporin false lagi kalau SEMUA konfirmasi yang lagi kebuka udah
+   * ketutup), nutup ditolak dengan aman — TIDAK meng-crash, TIDAK
+   * mengganggu operasi buang yang lagi berlangsung, cuma diam nggak
+   * ngapa-ngapain, dan halaman nunjukin pesan penjelasnya (lihat render
+   * di bawah).
+   */
+  const requestClose = () => {
+    if (confirmActive) return;
+    onClose();
+  };
+
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key !== "Escape") return;
-      // Jangan nutup diam-diam sambil user lagi di tengah konfirmasi
-      // "Yakin? Batal/Buang" 2-langkah di QueueReviewPanel — lihat
-      // components/QueueReviewPanel.jsx:onAnyConfirmingChange.
-      if (confirmActiveRef.current) return;
-      onClose();
+      requestClose();
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [confirmActive, onClose]);
 
   const {
     status,
@@ -155,6 +124,10 @@ export default function SyncCenter({ sync, onClose }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center sm:justify-center">
+      {/* SENGAJA nggak nutup pas backdrop ini diklik (beda dari
+          CaregiverModal) — kalau nanti ditambahin, WAJIB lewat
+          requestClose() di atas, bukan onClose() langsung, biar guard
+          konfirmasi di atas tetap berlaku konsisten di semua jalur tutup. */}
       <div className="absolute inset-0 bg-black/50" />
       <div
         ref={panelRef}
@@ -172,13 +145,20 @@ export default function SyncCenter({ sync, onClose }) {
           </h2>
           <button
             type="button"
-            onClick={onClose}
+            onClick={requestClose}
             aria-label="Tutup"
             className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-full border border-void-hairline text-ink-muted"
           >
             ✕
           </button>
         </div>
+
+        {confirmActive && (
+          <p className="text-[11px] text-warn bg-warn/10 border border-warn/30 rounded-lg px-3 py-2 mb-4">
+            Selesaikan konfirmasi buang catatan di bawah dulu (pilih "Buang" atau "Batal") sebelum
+            menutup jendela ini.
+          </p>
+        )}
 
         <div className="space-y-4 text-sm">
           <div className="flex items-center justify-between bg-void border border-void-hairline rounded-xl2 px-4 py-3">
@@ -259,9 +239,7 @@ export default function SyncCenter({ sync, onClose }) {
                   discardItem={discardItem}
                   claimLegacyItem={claimLegacyItem}
                   retryWithEdits={retryWithEdits}
-                  onAnyConfirmingChange={(active) => {
-                    confirmActiveRef.current = active;
-                  }}
+                  onAnyConfirmingChange={setConfirmActive}
                 />
               </div>
             </div>
@@ -269,7 +247,7 @@ export default function SyncCenter({ sync, onClose }) {
         </div>
 
         <button
-          onClick={onClose}
+          onClick={requestClose}
           className="w-full py-3 mt-6 rounded-lg border border-void-hairline text-ink-muted text-sm font-medium"
         >
           Tutup

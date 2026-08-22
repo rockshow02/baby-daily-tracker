@@ -92,6 +92,113 @@ describe("SyncCenter — accessibility", () => {
   });
 });
 
+describe("SyncCenter — Issue 4: centralized close guard while confirming a discard", () => {
+  function itemNeedingReview(overrides = {}) {
+    return {
+      id: 9,
+      url: "/children/1/feeding-logs",
+      queuedAt: "2026-01-15T09:00:00.000Z",
+      status: "needs_review",
+      lastError: "Server menolak",
+      ...overrides,
+    };
+  }
+
+  it("blocks the header (✕) close button while a discard confirmation is active", () => {
+    const onClose = vi.fn();
+    render(<SyncCenter sync={baseSync({ needsReviewCount: 1, needsReviewItems: [itemNeedingReview()] })} onClose={onClose} />);
+
+    fireEvent.click(screen.getByText("Buang"));
+    expect(screen.getByText("Yakin?")).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Tutup" })[0]); // header ✕, aria-label "Tutup"
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("blocks the footer 'Tutup' text button while a discard confirmation is active", () => {
+    const onClose = vi.fn();
+    render(<SyncCenter sync={baseSync({ needsReviewCount: 1, needsReviewItems: [itemNeedingReview()] })} onClose={onClose} />);
+
+    fireEvent.click(screen.getByText("Buang"));
+    expect(screen.getByText("Yakin?")).toBeInTheDocument();
+
+    const footerClose = screen.getAllByText("Tutup").find((el) => el.tagName === "BUTTON" && el.textContent === "Tutup" && !el.getAttribute("aria-label"));
+    fireEvent.click(footerClose);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("shows clear feedback while a confirmation blocks closing", () => {
+    render(<SyncCenter sync={baseSync({ needsReviewCount: 1, needsReviewItems: [itemNeedingReview()] })} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByText("Buang"));
+    expect(screen.getByText(/Selesaikan konfirmasi/)).toBeInTheDocument();
+  });
+
+  it("restores all close methods (Escape, header, footer) once the confirmation is canceled", () => {
+    const onClose = vi.fn();
+    render(<SyncCenter sync={baseSync({ needsReviewCount: 1, needsReviewItems: [itemNeedingReview()] })} onClose={onClose} />);
+
+    fireEvent.click(screen.getByText("Buang"));
+    expect(screen.getByText("Yakin?")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Batal"));
+    expect(screen.queryByText("Yakin?")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Selesaikan konfirmasi/)).not.toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not restore closing while a SECOND confirmation is still active, even after canceling the first", () => {
+    const onClose = vi.fn();
+    const items = [itemNeedingReview({ id: 9 }), itemNeedingReview({ id: 10 })];
+    render(<SyncCenter sync={baseSync({ needsReviewCount: 2, needsReviewItems: items })} onClose={onClose} />);
+
+    const buangButtons = screen.getAllByText("Buang");
+    fireEvent.click(buangButtons[0]);
+    fireEvent.click(buangButtons[1]);
+    expect(screen.getAllByText("Yakin?")).toHaveLength(2);
+
+    // batalin CUMA yang pertama
+    fireEvent.click(screen.getAllByText("Batal")[0]);
+    expect(screen.getAllByText("Yakin?")).toHaveLength(1); // yang ke-2 MASIH kebuka
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled(); // masih ada 1 konfirmasi aktif — Escape tetap ditolak
+  });
+
+  it("allows closing again once ALL confirmations are cleared", () => {
+    const onClose = vi.fn();
+    const items = [itemNeedingReview({ id: 9 }), itemNeedingReview({ id: 10 })];
+    render(<SyncCenter sync={baseSync({ needsReviewCount: 2, needsReviewItems: items })} onClose={onClose} />);
+
+    const buangButtons = screen.getAllByText("Buang");
+    fireEvent.click(buangButtons[0]);
+    fireEvent.click(buangButtons[1]);
+
+    fireEvent.click(screen.getAllByText("Batal")[0]);
+    fireEvent.click(screen.getAllByText("Batal")[0]); // sisanya yang terakhir
+
+    expect(screen.queryByText("Yakin?")).not.toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not interfere with the actual discard operation itself while guarding close", () => {
+    const discardItem = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <SyncCenter
+        sync={baseSync({ needsReviewCount: 1, needsReviewItems: [itemNeedingReview()], discardItem })}
+        onClose={onClose}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("Buang"));
+    fireEvent.click(screen.getByText("Buang")); // konfirmasi ke-2 (tombol "Buang" di dalam "Yakin?")
+    expect(discardItem).toHaveBeenCalledWith(9);
+  });
+});
+
 describe("SyncCenter — connectivity and state rendering", () => {
   it("shows Online when connected", () => {
     render(<SyncCenter sync={baseSync({ isOnline: true })} onClose={vi.fn()} />);

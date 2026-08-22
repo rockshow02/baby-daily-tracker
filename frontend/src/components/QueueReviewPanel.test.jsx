@@ -355,4 +355,50 @@ describe("QueueReviewPanel", () => {
     render(<QueueReviewPanel needsReviewItems={[]} legacyItems={[]} discardItem={noop} claimLegacyItem={noop} retryWithEdits={noop} />);
     expect(screen.queryByText("Menyusui")).not.toBeInTheDocument();
   });
+
+  // ---------- Issue 2: request ID visibility for owned vs. legacy items ----------
+
+  it("shows a valid request ID for an OWNED needs-review item, collapsed by default", () => {
+    render(
+      <QueueReviewPanel
+        needsReviewItems={[makeItem({ lastRequestId: "owned-req-id-abc" })]}
+        legacyItems={[]}
+        discardItem={noop}
+        claimLegacyItem={noop}
+        retryWithEdits={noop}
+      />,
+    );
+
+    expect(screen.queryByText("owned-req-id-abc")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("Info teknis"));
+    expect(screen.getByText("owned-req-id-abc")).toBeInTheDocument();
+  });
+
+  it("never shows a request ID for an unclaimed legacy item, even if one happens to be present on the record", () => {
+    render(
+      <QueueReviewPanel
+        needsReviewItems={[]}
+        legacyItems={[legacyMedicationItem({ lastRequestId: "should-never-appear-legacy" })]}
+        discardItem={noop}
+        claimLegacyItem={vi.fn()}
+        retryWithEdits={noop}
+      />,
+    );
+
+    expect(screen.queryByText("Info teknis")).not.toBeInTheDocument();
+    expect(screen.queryByText("should-never-appear-legacy")).not.toBeInTheDocument();
+  });
+
+  it("does not render the request-ID detail toggle for a needs-review item without one", () => {
+    render(
+      <QueueReviewPanel
+        needsReviewItems={[makeItem({ lastRequestId: null })]}
+        legacyItems={[]}
+        discardItem={noop}
+        claimLegacyItem={noop}
+        retryWithEdits={noop}
+      />,
+    );
+    expect(screen.queryByText("Info teknis")).not.toBeInTheDocument();
+  });
 });
