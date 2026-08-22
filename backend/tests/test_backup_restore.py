@@ -449,19 +449,28 @@ def test_23_prune_is_dry_run_by_default(source_db_path, backup_dir):
 
     result = dbc.prune_backups(backup_dir, keep=1, apply=False)
 
+    assert result["applied"] is False
+    assert result["deleted"] == []  # 19/20. dry-run -> "deleted" HARUS kosong, bukan cuma "to_delete"
     assert len(result["to_delete"]) == 2
-    # dry-run -> nggak ada satupun file yang beneran kehapus
+    assert len(result["existing"]) == 3  # 19. existing selalu mencerminkan SEMUA backup yang beneran ada
+    assert len(result["remaining_after_apply"]) == 1  # 20. proyeksi sisa KALAU seandainya di-apply
+
+    # dry-run -> nggak ada satupun file yang beneran kehapus di disk
     assert len(dbc.list_backups(backup_dir)) == 3
 
 
 def test_24_prune_never_deletes_the_newest_valid_backup(source_db_path, backup_dir):
     _seed_backups(source_db_path, backup_dir, ["20260101-090000", "20260101-100000", "20260101-110000"])
 
-    result = dbc.prune_backups(backup_dir, keep=0, apply=True)  # keep=0, kasus ekstrem
+    # keep=MIN_KEEP (1) — kasus paling ekstrem yang masih valid sejak keep
+    # sekarang wajib >= 1 (lihat test_prune_keep_below_minimum_is_rejected)
+    result = dbc.prune_backups(backup_dir, keep=dbc.MIN_KEEP, apply=True)
 
     remaining = {e["filename"] for e in dbc.list_backups(backup_dir)}
-    assert remaining == {"tracker-staging-20260101-110000.db"}  # TERBARU tetap ada walau keep=0
+    assert remaining == {"tracker-staging-20260101-110000.db"}  # TERBARU tetap ada walau keep di batas minimal
     assert len(result["to_delete"]) == 2
+    assert len(result["deleted"]) == 2
+    assert result["aborted"] is False
 
 
 # --------------------------------------------------------------------------
@@ -482,3 +491,299 @@ def test_25_never_touches_the_real_project_database(workdir):
     assert not str(resolved).startswith(str(Path(BACKEND_DIR).resolve()))
     if REAL_INSTANCE_DB.exists():
         assert resolved != REAL_INSTANCE_DB.resolve()
+
+
+# --------------------------------------------------------------------------
+# validate_backup_directory — corrective fix for the broad-directory /
+# unsafe-prune safety issue (db_backup_common.validate_backup_directory)
+# --------------------------------------------------------------------------
+
+
+def _symlinks_supported(workdir):
+    """Cek dukungan symlink SEKALI di awal test (bukan nunggu ketauan gagal
+    di tengah-tengah setup yang lebih rumit) — di Windows tanpa privilese
+    elevated, os.symlink() nolak bikin symlink sama sekali."""
+    target = workdir / "symlink-capability-target"
+    link = workdir / "symlink-capability-check"
+    target.write_text("x")
+    try:
+        os.symlink(target, link)
+        link.unlink()
+        return True
+    except (OSError, NotImplementedError):
+        return False
+    finally:
+        target.unlink(missing_ok=True)
+
+
+def test_backupdir_1_filesystem_root_is_rejected():
+    root = Path(BACKEND_DIR).anchor  # "/" di POSIX, drive root (mis. "Z:\\") di Windows
+    with pytest.raises(dbc.BackupError, match="root filesystem"):
+        dbc.validate_backup_directory(root)
+
+
+def test_backupdir_2_windows_drive_root_is_rejected_where_applicable():
+    if os.name != "nt":
+        pytest.skip("cuma relevan di Windows")
+    drive_root = Path(BACKEND_DIR).drive + "\\"
+    with pytest.raises(dbc.BackupError, match="root filesystem"):
+        dbc.validate_backup_directory(drive_root)
+
+
+def test_backupdir_3_home_directory_itself_is_rejected():
+    with pytest.raises(dbc.BackupError, match="home directory"):
+        dbc.validate_backup_directory(str(Path.home()))
+
+
+def test_backupdir_4_repository_root_is_rejected():
+    with pytest.raises(dbc.BackupError, match="root repository"):
+        dbc.validate_backup_directory(str(dbc.REPO_ROOT))
+
+
+def test_backupdir_5_backend_root_is_rejected():
+    with pytest.raises(dbc.BackupError, match="root folder backend"):
+        dbc.validate_backup_directory(str(dbc.BACKEND_DIR))
+
+
+def test_backupdir_6_backend_instance_directory_is_rejected():
+    with pytest.raises(dbc.BackupError, match="instance"):
+        dbc.validate_backup_directory(str(dbc.BACKEND_DIR / "instance"))
+
+
+def test_backupdir_7_active_database_parent_directory_is_rejected(workdir):
+    active_db = workdir / "active.db"
+    active_db.write_bytes(b"")
+    with pytest.raises(dbc.BackupError, match="folder induk database aktif"):
+        dbc.validate_backup_directory(str(workdir), active_db_path=active_db)
+
+
+def test_backupdir_8_active_database_file_itself_is_rejected(workdir):
+    active_db = workdir / "active.db"
+    active_db.write_bytes(b"")
+    with pytest.raises(dbc.BackupError, match="database aktif itu sendiri"):
+        dbc.validate_backup_directory(str(active_db), active_db_path=active_db)
+
+
+def test_backupdir_9_symlink_resolving_to_forbidden_directory_is_rejected(workdir):
+    if not _symlinks_supported(workdir):
+        pytest.skip("symlink nggak didukung/diizinkan di environment ini")
+
+    link_path = workdir / "link-to-home"
+    os.symlink(Path.home(), link_path, target_is_directory=True)
+
+    with pytest.raises(dbc.BackupError, match="home directory"):
+        dbc.validate_backup_directory(str(link_path))
+
+
+def test_backupdir_10_unexpanded_dollar_home_is_rejected():
+    with pytest.raises(dbc.BackupError, match="placeholder"):
+        dbc.validate_backup_directory("$HOME/database-backups")
+
+
+def test_backupdir_11_unexpanded_braced_dollar_home_is_rejected():
+    with pytest.raises(dbc.BackupError, match="placeholder"):
+        dbc.validate_backup_directory("${HOME}/database-backups")
+
+
+def test_backupdir_12_unexpanded_userprofile_percent_is_rejected():
+    with pytest.raises(dbc.BackupError, match="placeholder"):
+        dbc.validate_backup_directory("%USERPROFILE%\\database-backups")
+
+
+def test_backupdir_13_default_database_backups_remains_accepted():
+    resolved = dbc.validate_backup_directory(str(dbc.DEFAULT_BACKUP_DIR))
+    assert resolved == Path.home().resolve() / "database-backups"
+
+
+def test_backupdir_14_valid_nested_dedicated_directory_remains_accepted():
+    resolved = dbc.validate_backup_directory(str(dbc.DEFAULT_BACKUP_DIR / "staging"))
+    assert resolved == Path.home().resolve() / "database-backups" / "staging"
+
+
+def test_backupdir_15_cli_rejects_negative_keep():
+    # keep negatif ditolak SEBELUM create_app()/resolve_backup_dir() pernah
+    # kepanggil (lihat run_prune) — aman dites di sini tanpa perlu override
+    # database apa pun, karena nggak pernah sampai nyentuh app Flask.
+    exit_code = backup_database.main(["--prune", "--keep", "-1"])
+    assert exit_code != 0
+
+
+def test_backupdir_16_prune_backups_rejects_negative_keep_directly(source_db_path, backup_dir):
+    with pytest.raises(dbc.BackupError):
+        dbc.prune_backups(backup_dir, keep=-1, apply=False)
+
+
+def test_backupdir_17_keep_zero_is_rejected():
+    with pytest.raises(dbc.BackupError):
+        dbc.prune_backups(Path.home() / "irrelevant-nonexistent-dir", keep=0, apply=False)
+
+
+def test_backupdir_18_dry_run_deletes_nothing(source_db_path, backup_dir):
+    _seed_backups(source_db_path, backup_dir, ["20260101-090000", "20260101-100000", "20260101-110000"])
+
+    result = dbc.prune_backups(backup_dir, keep=1, apply=False)
+
+    assert result["applied"] is False
+    assert result["deleted"] == []
+    for f in ["tracker-staging-20260101-090000.db", "tracker-staging-20260101-100000.db", "tracker-staging-20260101-110000.db"]:
+        assert (backup_dir / f).is_file()
+
+
+def test_backupdir_19_dry_run_existing_contains_all_current_backups(source_db_path, backup_dir):
+    _seed_backups(source_db_path, backup_dir, ["20260101-090000", "20260101-100000", "20260101-110000"])
+
+    result = dbc.prune_backups(backup_dir, keep=1, apply=False)
+
+    assert {e["filename"] for e in result["existing"]} == {
+        "tracker-staging-20260101-090000.db",
+        "tracker-staging-20260101-100000.db",
+        "tracker-staging-20260101-110000.db",
+    }
+
+
+def test_backupdir_20_dry_run_remaining_after_apply_is_projected_correctly(source_db_path, backup_dir):
+    _seed_backups(source_db_path, backup_dir, ["20260101-090000", "20260101-100000", "20260101-110000"])
+
+    result = dbc.prune_backups(backup_dir, keep=2, apply=False)
+
+    assert {e["filename"] for e in result["remaining_after_apply"]} == {
+        "tracker-staging-20260101-100000.db",
+        "tracker-staging-20260101-110000.db",
+    }
+    # proyeksi doang — disk belum berubah apa-apa
+    assert len(dbc.list_backups(backup_dir)) == 3
+
+
+def test_backupdir_21_apply_never_deletes_the_newest_backup(source_db_path, backup_dir):
+    _seed_backups(source_db_path, backup_dir, ["20260101-090000", "20260101-100000", "20260101-110000"])
+
+    result = dbc.prune_backups(backup_dir, keep=1, apply=True)
+
+    assert result["aborted"] is False
+    remaining = {e["filename"] for e in dbc.list_backups(backup_dir)}
+    assert remaining == {"tracker-staging-20260101-110000.db"}
+    assert {e["filename"] for e in result["deleted"]} == {
+        "tracker-staging-20260101-090000.db",
+        "tracker-staging-20260101-100000.db",
+    }
+
+
+def test_backupdir_22_candidate_replaced_by_symlink_before_deletion_aborts(source_db_path, backup_dir, workdir, monkeypatch):
+    if not _symlinks_supported(workdir):
+        pytest.skip("symlink nggak didukung/diizinkan di environment ini")
+
+    r1 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-090000")
+    r2 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-100000")  # newest, dilindungi
+
+    outside_dir = workdir / "elsewhere"
+    outside_dir.mkdir()
+    elsewhere_file = outside_dir / "not-a-backup.db"
+    elsewhere_file.write_bytes(b"whatever")
+
+    real_list_backups = dbc.list_backups
+    swapped = {"done": False}
+
+    def fake_list_backups(bdir, **kwargs):
+        # snapshot listing DULU (ini yang dipakai prune_backups buat nentuin
+        # kandidat hapus) — BARU SETELAH ITU r1 diganti jadi symlink, meniru
+        # perubahan yang kejadian ANTARA listing dan mulai penghapusan
+        listing = real_list_backups(bdir, **kwargs)
+        if not swapped["done"]:
+            swapped["done"] = True
+            r1.path.unlink()
+            os.symlink(elsewhere_file, r1.path)
+        return listing
+
+    monkeypatch.setattr(dbc, "list_backups", fake_list_backups)
+
+    result = dbc.prune_backups(backup_dir, keep=1, apply=True)
+
+    assert result["aborted"] is True
+    assert "symlink" in result["abort_reason"]
+    assert r2.path.is_file()  # newest tetap utuh, nggak sempat disentuh
+
+
+def test_backupdir_23_candidate_moved_outside_directory_before_deletion_aborts(source_db_path, backup_dir, workdir, monkeypatch):
+    r1 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-090000")
+    r2 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-100000")  # newest, dilindungi
+
+    outside_dir = workdir / "elsewhere"
+    outside_dir.mkdir()
+
+    real_list_backups = dbc.list_backups
+    moved = {"done": False}
+
+    def fake_list_backups(bdir, **kwargs):
+        listing = real_list_backups(bdir, **kwargs)
+        if not moved["done"]:
+            moved["done"] = True
+            shutil.move(str(r1.path), str(outside_dir / r1.path.name))
+        return listing
+
+    monkeypatch.setattr(dbc, "list_backups", fake_list_backups)
+
+    result = dbc.prune_backups(backup_dir, keep=1, apply=True)
+
+    assert result["aborted"] is True
+    assert r2.path.is_file()  # newest tetap utuh
+
+
+def test_backupdir_24_unrelated_json_files_are_never_deleted(source_db_path, backup_dir):
+    r1 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-090000")
+    r2 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-100000")  # newest
+
+    unrelated_json = backup_dir / "unrelated-notes.json"
+    unrelated_json.write_text('{"not": "a backup metadata file"}')
+
+    dbc.prune_backups(backup_dir, keep=1, apply=True)
+
+    assert unrelated_json.is_file()  # nggak ikut kehapus sama sekali
+    assert not r1.metadata_path.exists()  # metadata backup yang DIHAPUS ikut kehapus
+    assert r2.metadata_path.exists()
+
+
+def test_backupdir_25_only_exact_adjacent_metadata_is_deleted(source_db_path, backup_dir):
+    r1 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-090000")
+    dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-100000")  # newest
+
+    # file .json yang MIRIP tapi BUKAN metadata r1 (nama beda dikit)
+    decoy = backup_dir / "tracker-staging-20260101-090000-decoy.db.json"
+    decoy.write_text("{}")
+
+    dbc.prune_backups(backup_dir, keep=1, apply=True)
+
+    assert not r1.metadata_path.exists()
+    assert decoy.is_file()  # nama nggak PERSIS cocok -> nggak disentuh
+
+
+def test_backupdir_26_partial_deletion_failure_is_reported_accurately(source_db_path, backup_dir, monkeypatch):
+    r1 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-090000")
+    r2 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-100000")
+    r3 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-110000")  # newest, dilindungi
+
+    # urutan proses (descending timestamp, newest dikecualikan): r2 duluan, baru r1
+    real_unlink = Path.unlink
+
+    def selective_boom(self, *a, **k):
+        if self == r1.path:
+            raise OSError("simulated failure deleting r1")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", selective_boom)
+
+    result = dbc.prune_backups(backup_dir, keep=1, apply=True)
+
+    assert result["applied"] is True
+    assert result["aborted"] is True
+    assert {e["filename"] for e in result["deleted"]} == {"tracker-staging-20260101-100000.db"}  # r2 SUDAH kehapus
+    assert not r2.path.exists()  # beneran hilang dari disk
+    assert r1.path.is_file()  # r1 GAGAL dihapus, tapi TETAP ada (bukan setengah-hapus)
+    assert r3.path.is_file()  # newest nggak pernah disentuh
+
+
+def test_backupdir_28_no_test_touches_the_real_instance_database():
+    # penegasan eksplisit KEDUA (di luar test_25) khusus buat rangkaian test
+    # validate_backup_directory di atas — semuanya beroperasi di
+    # tempfile.mkdtemp() lewat fixture workdir/backup_dir/source_db_path,
+    # nggak pernah menyentuh REAL_INSTANCE_DB.
+    assert REAL_INSTANCE_DB == Path(BACKEND_DIR) / "instance" / "tracker.db"

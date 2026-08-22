@@ -43,6 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import create_app  # noqa: E402
 from db_backup_common import (  # noqa: E402
+    MIN_KEEP,
     BackupError,
     create_backup,
     list_backups,
@@ -55,11 +56,28 @@ from db_backup_common import (  # noqa: E402
 )
 
 
+def _resolve_active_db_path_best_effort():
+    """
+    Dipakai cuma buat validasi TAMBAHAN folder backup (menolak folder induk/
+    path database aktif itu sendiri) di --list/--verify/--prune — operasi
+    ini SENDIRI nggak butuh app Flask buat kerjanya (baca file backup, bukan
+    database aktif), jadi kalau resolusi app/database aktif gagal karena
+    sebab lain, itu JANGAN sampai bikin --list/--verify/--prune ikut gagal
+    total. Validasi folder backup yang lain (root filesystem, home, repo,
+    dst) tetap jalan penuh terlepas dari ini.
+    """
+    try:
+        app = create_app()
+        return resolve_active_sqlite_path(app)
+    except Exception:
+        return None
+
+
 def run_backup(args) -> int:
     app = create_app()
     try:
         source_path = resolve_active_sqlite_path(app)
-        backup_dir = resolve_backup_dir(args.backup_dir, create=True)
+        backup_dir = resolve_backup_dir(args.backup_dir, create=True, active_db_path=source_path)
         environment = resolve_environment_label(args.environment)
 
         log(f"backup start — environment={environment} source={source_path} dest_dir={backup_dir}")
@@ -90,8 +108,13 @@ def run_backup(args) -> int:
 
 
 def run_list(args) -> int:
-    backup_dir = resolve_backup_dir(args.backup_dir, create=False)
-    entries = list_backups(backup_dir)
+    try:
+        backup_dir = resolve_backup_dir(args.backup_dir, create=False, active_db_path=_resolve_active_db_path_best_effort())
+        entries = list_backups(backup_dir)
+    except BackupError as exc:
+        log(f"list GAGAL — {exc}")
+        print(f"\nGAGAL: {exc}", file=sys.stderr)
+        return 1
 
     log(f"list — dir={backup_dir} count={len(entries)}")
     print(f"Folder backup: {backup_dir}")
@@ -109,8 +132,8 @@ def run_list(args) -> int:
 
 
 def run_verify(args) -> int:
-    backup_dir = resolve_backup_dir(args.backup_dir, create=False)
     try:
+        backup_dir = resolve_backup_dir(args.backup_dir, create=False, active_db_path=_resolve_active_db_path_best_effort())
         result = verify_backup(args.verify, backup_dir, allow_outside=args.allow_outside_backup_dir)
     except BackupError as exc:
         log(f"verify GAGAL — {exc}")
@@ -137,22 +160,49 @@ def run_verify(args) -> int:
 
 
 def run_prune(args) -> int:
-    backup_dir = resolve_backup_dir(args.backup_dir, create=False)
-    result = prune_backups(backup_dir, args.keep, apply=args.apply)
+    if args.keep < MIN_KEEP:
+        print(f"\nGAGAL: --keep harus >= {MIN_KEEP} (minimal 1 backup wajib dipertahankan eksplisit), dapat: {args.keep}", file=sys.stderr)
+        return 1
+
+    try:
+        backup_dir = resolve_backup_dir(args.backup_dir, create=False, active_db_path=_resolve_active_db_path_best_effort())
+        result = prune_backups(backup_dir, args.keep, apply=args.apply)
+    except BackupError as exc:
+        log(f"prune GAGAL — {exc}")
+        print(f"\nPrune GAGAL: {exc}", file=sys.stderr)
+        return 1
 
     mode = "APPLY (menghapus beneran)" if args.apply else "DRY RUN (tidak menghapus apa pun)"
-    log(f"prune — dir={backup_dir} keep={args.keep} mode={'apply' if args.apply else 'dry-run'} to_delete={len(result['to_delete'])}")
-    print(f"Mode               : {mode}")
-    print(f"Folder backup      : {backup_dir}")
-    print(f"Dipertahankan      : {len(result['kept'])} backup")
-    print(f"{'Akan dihapus' if not args.apply else 'Dihapus'}       : {len(result['to_delete'])} backup")
-    for e in result["to_delete"]:
-        print(f"  - {e['filename']} ({e['size_bytes']} bytes)")
+    log(
+        f"prune — dir={backup_dir} keep={args.keep} mode={'apply' if args.apply else 'dry-run'} "
+        f"to_delete={len(result['to_delete'])} deleted={len(result['deleted'])} aborted={result['aborted']}"
+    )
+    print(f"Mode                    : {mode}")
+    print(f"Folder backup           : {backup_dir}")
+    print(f"Backup saat ini         : {len(result['existing'])}")
+    if args.apply:
+        print(f"Berhasil dihapus        : {len(result['deleted'])} backup")
+        for e in result["deleted"]:
+            print(f"  - {e['filename']} ({e['size_bytes']} bytes)")
+    else:
+        print(f"Akan dihapus (proyeksi) : {len(result['to_delete'])} backup")
+        for e in result["to_delete"]:
+            print(f"  - {e['filename']} ({e['size_bytes']} bytes)")
+    print(f"Sisa setelah operasi    : {len(result['remaining_after_apply'])} backup")
 
-    if result["to_delete"]:
+    if result["aborted"]:
+        print(f"\nDIHENTIKAN DI TENGAH JALAN: {result['abort_reason']}")
+        print(
+            f"{len(result['deleted'])} dari {len(result['to_delete'])} kandidat SUDAH terhapus sebelum "
+            "penghentian ini — sisanya TIDAK disentuh."
+        )
+        log(f"prune ABORTED — {result['abort_reason']}")
+        return 1
+
+    if result["to_delete"] or result["existing"]:
         print("\nCatatan: penghapusan file backup TIDAK bisa dipulihkan (bukan masuk trash/recycle bin).")
     if not args.apply and result["to_delete"]:
-        print("Ini masih dry-run — tambahkan --apply buat beneran menghapus.")
+        print("Ini masih dry-run — tidak ada yang dihapus. Tambahkan --apply buat beneran menghapus setelah dicek daftarnya.")
     return 0
 
 
@@ -177,7 +227,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Izinkan --verify menunjuk file DI LUAR folder backup yang dikonfigurasi. Hati-hati.",
     )
     parser.add_argument("--prune", action="store_true", help="Mode pruning (hapus backup lama). Dry-run kecuali --apply dikasih.")
-    parser.add_argument("--keep", type=int, default=10, help="Jumlah backup terbaru yang dipertahankan saat --prune (default: 10).")
+    parser.add_argument(
+        "--keep",
+        type=int,
+        default=10,
+        help="Jumlah backup terbaru yang dipertahankan saat --prune (default: 10, minimal 1 — nggak boleh 0/negatif).",
+    )
     parser.add_argument("--apply", action="store_true", help="Beneran hapus file saat --prune. Tanpa ini, --prune cuma dry-run.")
     return parser
 

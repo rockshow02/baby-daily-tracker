@@ -33,6 +33,36 @@ di-override dengan:
 - flag `--backup-dir /path/lain`, atau
 - environment variable `DATABASE_BACKUP_DIR`
 
+### Kenapa folder backup HARUS folder khusus (bukan folder sembarangan)
+
+`--prune --apply` menghapus file berdasarkan POLA NAMA (`tracker-<env>-
+<timestamp>.db`) di dalam folder yang dikonfigurasi. Kalau folder itu
+kebetulan folder yang luas/sensitif — home directory, root repo, folder
+`instance/` tempat database aktif hidup, dst — risiko salah hapus jadi
+jauh lebih besar, walau pola namanya sendiri udah spesifik.
+
+Karena itu, `--backup-dir` (dan env var `DATABASE_BACKUP_DIR`) **selalu**
+divalidasi lewat `validate_backup_directory()` di setiap operasi (backup,
+list, verify, restore, prune dry-run, prune apply) — bukan cuma sekali di
+level CLI. Yang **ditolak**:
+
+- Root filesystem (`/` di Linux/macOS, drive root kayak `C:\` di Windows)
+- Home directory operator itu sendiri (`~`)
+- Root repository (`baby-daily-tracker/`)
+- Root folder `backend/`
+- Folder `backend/instance/` (tempat `tracker.db` hidup)
+- Folder induk database aktif, dan path database aktif itu sendiri
+- Symlink yang RESOLVE ke salah satu lokasi di atas
+- Placeholder environment variable yang belum ter-substitusi (mis. literal
+  `$HOME`, `${HOME}`, `%USERPROFILE%` di `.env` — python-dotenv nggak
+  melakukan shell expansion, jadi nilai itu bakal kepake APA ADANYA kalau
+  nggak divalidasi)
+- Path yang ternyata sebuah file biasa, bukan folder
+
+Folder khusus di BAWAH lokasi-lokasi itu (mis. `~/database-backups` atau
+`~/database-backups/staging`) **tetap valid** — yang ditolak cuma lokasi
+luas itu PERSIS, bukan semua yang ada di bawahnya.
+
 ## 2. Manual backup
 
 ```bash
@@ -102,18 +132,59 @@ sengaja pakai `--allow-outside-backup-dir`, hati-hati).
 
 ## 5. Retensi / pruning (opsional, manual)
 
-```bash
-# lihat dulu apa yang AKAN dihapus — DEFAULT selalu dry-run, TIDAK menghapus apa pun
-python scripts/backup_database.py --prune --keep 10
+**Selalu tunjuk folder backup khusus secara eksplisit** (jangan andalkan
+default kalau kamu nggak yakin `DATABASE_BACKUP_DIR` ke-set dengan benar)
+— path yang direkomendasikan di PythonAnywhere:
 
-# baru beneran hapus setelah dicek daftarnya
-python scripts/backup_database.py --prune --keep 10 --apply
+```text
+/home/xaleena/database-backups
 ```
 
+Cek dulu (WAJIB) — dry-run, TIDAK menghapus apa pun:
+
+```bash
+python scripts/backup_database.py \
+  --backup-dir /home/xaleena/database-backups \
+  --prune --keep 10
+```
+
+**Baca daftar "Akan dihapus (proyeksi)" di outputnya baik-baik** sebelum
+lanjut — itu daftar PERSIS file yang bakal kehapus kalau kamu jalanin ulang
+dengan `--apply`. Kalau daftarnya keliatan aneh (lebih banyak dari
+dugaan, atau ada nama yang nggak dikenal), BERHENTI dan investigasi dulu
+sebelum lanjut ke langkah berikutnya.
+
+Baru setelah dicek, beneran hapus:
+
+```bash
+python scripts/backup_database.py \
+  --backup-dir /home/xaleena/database-backups \
+  --prune --keep 10 \
+  --apply
+```
+
+Aturan:
+
+- `--keep` **wajib minimal 1** (`--keep 0` atau negatif ditolak, baik di
+  level CLI maupun di dalam `prune_backups()` sendiri) — selalu ada
+  setidaknya 1 backup yang dipertahankan eksplisit dalam 1 kali jalan.
 - Backup **terbaru** tidak pernah dihapus, apa pun nilai `--keep`.
-- Hanya beroperasi di dalam folder backup yang dikonfigurasi, dan hanya
+- Hanya beroperasi di dalam folder backup yang SUDAH tervalidasi (lihat
+  bagian "Kenapa folder backup HARUS folder khusus" di atas), dan hanya
   menyentuh file yang cocok pola nama `tracker-<environment>-<timestamp>.db`
-  hasil script ini sendiri.
+  hasil script ini sendiri — divalidasi ULANG tepat sebelum tiap file
+  beneran dihapus (bukan cuma sekali di awal), buat jaga-jaga kalau ada
+  yang berubah di folder itu di antara pengecekan awal dan eksekusi.
+- **Dry-run TIDAK PERNAH menghapus apa pun** — laporannya membedakan
+  jelas antara `existing` (semua backup yang ADA sekarang), `to_delete`
+  (proyeksi yang AKAN dihapus), dan `remaining_after_apply` (proyeksi sisa
+  KALAU seandainya di-apply). Kalau `--apply` beneran dipakai, laporannya
+  cuma menyebut file yang **BENERAN** berhasil terhapus sebagai "dihapus"
+  — bukan daftar yang cuma "akan" dihapus.
+- Kalau penghapusan gagal di tengah jalan (mis. 1 file gagal dihapus),
+  script berhenti di situ dan melaporkan dengan jujur file mana yang
+  SUDAH terlanjur terhapus dan mana yang nggak — bukan pura-pura semuanya
+  berhasil atau semuanya gagal.
 - Penghapusan **tidak bisa dipulihkan** (bukan masuk trash/recycle bin) —
   makanya default-nya dry-run dan butuh `--apply` eksplisit.
 
@@ -272,6 +343,12 @@ cd backend
 pytest tests/test_backup_restore.py -v
 ```
 
-Semua test di file itu pakai file SQLite di `tempfile.mkdtemp()` — **tidak
-pernah** membaca, menimpa, atau menghapus `instance/tracker.db` yang
-sebenarnya.
+Termasuk rangkaian test khusus `validate_backup_directory()` (root
+filesystem, home directory, root repo, root backend, folder `instance/`,
+folder/path database aktif, placeholder env var, symlink yang lolos ke
+lokasi terlarang, `--keep` di bawah minimum, dan revalidasi tepat-sebelum-
+hapus di `--prune --apply`). Semua test di file itu pakai file SQLite di
+`tempfile.mkdtemp()` — **tidak pernah** membaca, menimpa, atau menghapus
+`instance/tracker.db` yang sebenarnya. Test yang butuh symlink otomatis
+di-skip (bukan gagal) di environment yang nggak bisa bikin symlink tanpa
+privilese elevated (mis. Windows tanpa Developer Mode).

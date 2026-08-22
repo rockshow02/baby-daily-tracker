@@ -29,6 +29,11 @@ REPO_ROOT = BACKEND_DIR.parent
 DEFAULT_BACKUP_DIR_ENV_VAR = "DATABASE_BACKUP_DIR"
 DEFAULT_BACKUP_DIR = Path("~/database-backups")
 
+# --keep minimal — setidaknya 1 backup WAJIB dipertahankan eksplisit, nggak
+# boleh 0 (apalagi negatif), biar --prune nggak pernah bisa ngosongin folder
+# backup sama sekali dalam 1 kali jalan.
+MIN_KEEP = 1
+
 # tracker-<environment>-<YYYYMMDD-HHMMSS>.db — sesuai contoh di spesifikasi
 BACKUP_FILENAME_RE = re.compile(
     r"^tracker-(?P<environment>[a-z0-9][a-z0-9_-]{0,31})-(?P<timestamp>\d{8}-\d{6})\.db$"
@@ -191,21 +196,104 @@ def resolve_active_sqlite_path(app) -> Path:
     return resolve_sqlite_path_from_url(url.drivername, url.database)
 
 
-def resolve_backup_dir(cli_value: Optional[str] = None, *, create: bool = False) -> Path:
+def validate_backup_directory(raw_value: Optional[str], *, active_db_path: Optional[Path] = None) -> Path:
     """
-    Urutan prioritas: --backup-dir eksplisit > env var DATABASE_BACKUP_DIR >
-    default ~/database-backups. Selalu dikembalikan sebagai absolute path
-    yang udah di-resolve (symlink diikuti).
+    Validasi 1 folder backup CALON (belum tentu ada di disk) — dipanggil di
+    SETIAP operasi yang menyentuh backup_dir (create/list/verify/restore/
+    prune), BUKAN cuma di titik masuk CLI, biar fungsi inti (create_backup,
+    list_backups, verify_backup, prune_backups) tetep melindungi diri
+    sendiri walau dipanggil langsung dari test/script lain, bukan cuma
+    lewat argparse.
+
+    Menolak:
+    - nilai kosong/ambigu
+    - placeholder environment variable yang belum ter-substitusi
+      ($HOME, ${HOME}, %USERPROFILE%, dst)
+    - root filesystem (POSIX "/" ATAU drive root Windows kayak "C:\\")
+    - home directory operator
+    - root repository
+    - root folder backend
+    - folder backend/instance
+    - folder induk database aktif (kalau active_db_path dikasih)
+    - path database aktif itu sendiri (kalau active_db_path dikasih)
+    - symlink yang RESOLVE ke salah satu lokasi di atas (path.resolve()
+      ngikutin symlink ke lokasi ASLI-nya sebelum semua pengecekan di atas
+      dijalankan)
+    - path yang udah ada sebagai FILE biasa (bukan folder)
+    - path yang nggak bisa di-resolve dengan aman (mis. symlink loop)
+
+    SENGAJA cuma nolak lokasi-lokasi itu PERSIS (exact match), BUKAN semua
+    yang ada DI BAWAHNYA — folder khusus kayak ~/database-backups atau
+    ~/database-backups/staging harus TETAP valid walau ada di bawah home
+    directory.
     """
-    raw = cli_value or os.environ.get(DEFAULT_BACKUP_DIR_ENV_VAR) or str(DEFAULT_BACKUP_DIR)
-    path = Path(raw).expanduser()
+    if raw_value is None or not str(raw_value).strip():
+        raise BackupError("Folder backup kosong/tidak valid — nggak bisa dipakai.")
+
+    raw_str = str(raw_value)
+    if _ENV_VAR_PLACEHOLDER_RE.search(raw_str):
+        raise BackupError(
+            f"Folder backup sepertinya mengandung placeholder environment variable yang belum "
+            f"ter-substitusi ({raw_str!r}) — perbaiki dulu nilainya (--backup-dir atau env var "
+            f"{DEFAULT_BACKUP_DIR_ENV_VAR})."
+        )
+
+    path = Path(raw_str).expanduser()
     if not path.is_absolute():
         path = Path.cwd() / path
 
-    if create:
-        path.mkdir(parents=True, exist_ok=True)
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise BackupError(f"Folder backup {raw_str!r} nggak bisa di-resolve dengan aman: {exc}")
 
-    return path.resolve()
+    if resolved.parent == resolved:
+        raise BackupError(f"Folder backup nggak boleh berupa root filesystem: {resolved}")
+
+    forbidden = {
+        Path.home().resolve(): "home directory operator",
+        REPO_ROOT.resolve(): "root repository",
+        BACKEND_DIR.resolve(): "root folder backend",
+        (BACKEND_DIR / "instance").resolve(): "folder instance/ backend",
+    }
+    if active_db_path is not None:
+        try:
+            active_resolved = Path(active_db_path).resolve()
+            forbidden[active_resolved] = "path database aktif itu sendiri"
+            forbidden[active_resolved.parent] = "folder induk database aktif"
+        except (OSError, RuntimeError):
+            pass  # kalau active_db_path-nya sendiri nggak valid, itu urusan pemanggilnya — jangan gagalin validasi folder backup di sini
+
+    if resolved in forbidden:
+        raise BackupError(
+            f"Folder backup nggak boleh menunjuk ke {forbidden[resolved]} ({resolved}) — "
+            "pakai folder khusus buat backup, misalnya ~/database-backups."
+        )
+
+    if resolved.is_file():
+        raise BackupError(f"Folder backup ternyata sebuah file biasa, bukan folder: {resolved}")
+
+    return resolved
+
+
+def resolve_backup_dir(
+    cli_value: Optional[str] = None,
+    *,
+    create: bool = False,
+    active_db_path: Optional[Path] = None,
+) -> Path:
+    """
+    Urutan prioritas: --backup-dir eksplisit > env var DATABASE_BACKUP_DIR >
+    default ~/database-backups. Selalu dikembalikan sebagai absolute path
+    yang udah di-resolve DAN tervalidasi (lihat validate_backup_directory).
+    """
+    raw = cli_value or os.environ.get(DEFAULT_BACKUP_DIR_ENV_VAR) or str(DEFAULT_BACKUP_DIR)
+    resolved = validate_backup_directory(raw, active_db_path=active_db_path)
+
+    if create:
+        resolved.mkdir(parents=True, exist_ok=True)
+
+    return resolved
 
 
 def is_within_directory(path: Path, directory: Path) -> bool:
@@ -325,6 +413,14 @@ def create_backup(
     dalam keadaan setengah jadi.
     """
     environment = sanitize_environment_label(environment)
+    # revalidasi backup_dir DI SINI JUGA (bukan cuma percaya pemanggilnya
+    # udah bener) — create_backup() dipanggil LANGSUNG oleh restore_database.py
+    # (safety backup) dan bisa dipanggil langsung oleh script/test lain,
+    # jadi fungsi inti ini juga wajib melindungi diri sendiri, bukan cuma
+    # CLI-nya doang. `source_path` (database yang lagi di-backup) dikasih
+    # sebagai konteks active_db_path — dua-duanya (backup manual & safety
+    # backup restore) SELALU nge-backup database yang lagi aktif.
+    backup_dir = validate_backup_directory(str(backup_dir), active_db_path=source_path)
     backup_dir.mkdir(parents=True, exist_ok=True)
 
     ts = timestamp or timestamp_for_filename()
@@ -424,7 +520,14 @@ def resolve_and_validate_backup_path(raw_path: str, backup_dir: Path, *, allow_o
     return resolved
 
 
-def verify_backup(backup_path: Path, backup_dir: Path, *, allow_outside: bool = False) -> VerifyResult:
+def verify_backup(
+    backup_path: Path,
+    backup_dir: Path,
+    *,
+    allow_outside: bool = False,
+    active_db_path: Optional[Path] = None,
+) -> VerifyResult:
+    backup_dir = validate_backup_directory(str(backup_dir), active_db_path=active_db_path)
     resolved = resolve_and_validate_backup_path(str(backup_path), backup_dir, allow_outside=allow_outside)
 
     ok, detail = check_integrity(resolved)
@@ -437,14 +540,14 @@ def verify_backup(backup_path: Path, backup_dir: Path, *, allow_outside: bool = 
     return VerifyResult(path=resolved, integrity_ok=ok, integrity_detail=detail, checksum_ok=checksum_ok, metadata=metadata)
 
 
-def list_backups(backup_dir: Path) -> list[dict]:
+def list_backups(backup_dir: Path, *, active_db_path: Optional[Path] = None) -> list[dict]:
     """
     Daftar backup yang valid di backup_dir — file lain (nggak cocok pola
     nama tracker-<env>-<timestamp>.db), folder, dan symlink yang nunjuk
     KELUAR backup_dir semuanya DIABAIKAN (bukan error), biar --list aman
     dipakai walau ada file lain nyasar di folder yang sama.
     """
-    backup_dir_resolved = backup_dir.resolve()
+    backup_dir_resolved = validate_backup_directory(str(backup_dir), active_db_path=active_db_path)
     if not backup_dir_resolved.is_dir():
         return []
 
@@ -477,21 +580,126 @@ def list_backups(backup_dir: Path) -> list[dict]:
     return entries
 
 
-def prune_backups(backup_dir: Path, keep: int, *, apply: bool = False, protect: Optional[set] = None) -> dict:
+def _revalidate_deletion_candidate(
+    path: Path,
+    backup_dir_resolved: Path,
+    *,
+    newest_path: Optional[Path],
+    protect: set,
+) -> Path:
+    """
+    Validasi ULANG 1 kandidat file TEPAT SEBELUM beneran di-unlink() —
+    dipanggil lagi di sini, BUKAN cuma percaya hasil listing di awal, buat
+    ngurangin risiko time-of-check/time-of-use (mis. file itu diganti jadi
+    symlink, atau dipindah keluar folder, ANTARA saat listing awal dan saat
+    penghapusan beneran dieksekusi).
+    """
+    if path.is_symlink():
+        raise BackupError(f"Batal hapus — target ternyata symlink (nggak diizinkan): {path}")
+
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise BackupError(f"Batal hapus — target nggak bisa di-resolve ulang dengan aman ({exc}): {path}")
+
+    if resolved != path:
+        raise BackupError(f"Batal hapus — target berubah antara listing dan penghapusan: {path} -> {resolved}")
+
+    if not is_within_directory(resolved, backup_dir_resolved):
+        raise BackupError(f"Batal hapus — target ternyata di LUAR folder backup yang tervalidasi: {resolved}")
+
+    if newest_path is not None and resolved == newest_path:
+        raise BackupError(f"Batal hapus — target ternyata backup TERBARU (selalu dilindungi): {resolved}")
+
+    if resolved in protect:
+        raise BackupError(f"Batal hapus — target dilindungi eksplisit (mis. safety backup operasi ini): {resolved}")
+
+    if not parse_backup_filename(resolved.name):
+        raise BackupError(f"Batal hapus — nama file nggak cocok pola backup yang dibuat script ini: {resolved.name}")
+
+    if not resolved.is_file():
+        raise BackupError(f"Batal hapus — target bukan file biasa: {resolved}")
+
+    return resolved
+
+
+def _revalidate_metadata_deletion_candidate(backup_resolved: Path, backup_dir_resolved: Path) -> Optional[Path]:
+    """
+    Sama kayak _revalidate_deletion_candidate, tapi buat file metadata .json
+    yang PERSIS bersebelahan sama 1 backup yang barusan divalidasi ulang.
+    Cuma nama PERSIS "<nama-backup>.json" yang dipertimbangkan — nggak ada
+    file .json lain yang boleh ikut tersentuh oleh operasi ini.
+    """
+    meta_path = backup_resolved.with_name(backup_resolved.name + ".json")
+    if not meta_path.exists() and not meta_path.is_symlink():
+        return None  # nggak ada metadata — nggak masalah, memang opsional
+
+    if meta_path.is_symlink():
+        raise BackupError(f"Batal hapus metadata — target ternyata symlink (nggak diizinkan): {meta_path}")
+
+    try:
+        resolved_meta = meta_path.resolve(strict=True)
+    except OSError as exc:
+        raise BackupError(f"Batal hapus metadata — nggak bisa di-resolve ulang dengan aman ({exc}): {meta_path}")
+
+    if resolved_meta != meta_path:
+        raise BackupError(f"Batal hapus metadata — target berubah antara listing dan penghapusan: {meta_path} -> {resolved_meta}")
+
+    if not is_within_directory(resolved_meta, backup_dir_resolved):
+        raise BackupError(f"Batal hapus metadata — ternyata di LUAR folder backup yang tervalidasi: {resolved_meta}")
+
+    if resolved_meta.name != backup_resolved.name + ".json":
+        raise BackupError(f"Batal hapus metadata — nama nggak cocok PERSIS dengan backup-nya: {resolved_meta}")
+
+    if not resolved_meta.is_file():
+        raise BackupError(f"Batal hapus metadata — bukan file biasa: {resolved_meta}")
+
+    return resolved_meta
+
+
+def prune_backups(
+    backup_dir: Path,
+    keep: int,
+    *,
+    apply: bool = False,
+    protect: Optional[set] = None,
+    active_db_path: Optional[Path] = None,
+) -> dict:
     """
     Dry-run secara DEFAULT (apply=False) — cuma nentuin & ngelaporin apa
-    yang AKAN dihapus. Backup TERBARU (berdasarkan timestamp di nama file)
-    nggak pernah masuk daftar hapus, apapun nilai `keep`-nya. `protect`
-    (opsional) buat nge-exclude path tertentu tambahan (mis. safety backup
-    yang baru aja dibikin di operasi yang sama).
-    """
-    protect = protect or set()
-    backup_dir_resolved = backup_dir.resolve()
-    entries = list_backups(backup_dir_resolved)
-    entries.sort(key=lambda e: e["timestamp"], reverse=True)
+    yang AKAN dihapus, TIDAK PERNAH beneran menghapus apa pun. Backup
+    TERBARU (berdasarkan timestamp di nama file) nggak pernah masuk daftar
+    hapus, apapun nilai `keep`-nya. `protect` (opsional) buat nge-exclude
+    path tertentu tambahan (mis. safety backup yang baru aja dibikin di
+    operasi yang sama).
 
-    newest_path = entries[0]["path"] if entries else None
-    to_delete_candidates = entries[keep:] if keep >= 0 else entries
+    `keep` WAJIB >= MIN_KEEP — ini dicek di sini (fungsi inti), bukan cuma
+    di level CLI, biar pemanggil langsung (test/script lain) juga kena.
+
+    Skema hasil (SELALU dikembalikan, baik dry-run maupun apply):
+    - existing             : semua backup valid yang ADA SEKARANG (sebelum operasi apa pun)
+    - to_delete             : kandidat yang AKAN (dry-run) atau DICOBA (apply) dihapus
+    - deleted               : yang BENERAN berhasil dihapus — kosong kalau dry-run,
+                              subset dari to_delete kalau apply (bisa < to_delete kalau abort di tengah)
+    - remaining_after_apply : proyeksi (dry-run) ATAU sisa AKTUAL (apply) setelah operasi
+    - applied               : True kalau apply BENERAN dijalankan (bukan cuma diminta)
+    - aborted               : True kalau apply dihentikan di tengah jalan karena revalidasi gagal
+    - abort_reason          : pesan penjelasan kalau aborted True, None kalau nggak
+
+    Kalau apply dihentikan di tengah, backup yang UDAH kehapus TETAP kehapus
+    (nggak bisa "dibatalkan mundur") — deleted mencerminkan itu secara jujur,
+    dan aborted+abort_reason menjelaskan kenapa sisanya nggak ikut dihapus.
+    """
+    if keep < MIN_KEEP:
+        raise BackupError(f"--keep harus >= {MIN_KEEP} (minimal 1 backup wajib dipertahankan eksplisit), dapat: {keep}")
+
+    protect = protect or set()
+    backup_dir_resolved = validate_backup_directory(str(backup_dir), active_db_path=active_db_path)
+    existing = list_backups(backup_dir_resolved, active_db_path=active_db_path)
+    existing_sorted = sorted(existing, key=lambda e: e["timestamp"], reverse=True)
+
+    newest_path = existing_sorted[0]["path"] if existing_sorted else None
+    to_delete_candidates = existing_sorted[keep:]
 
     final_delete = []
     for e in to_delete_candidates:
@@ -503,12 +711,60 @@ def prune_backups(backup_dir: Path, keep: int, *, apply: bool = False, protect: 
             continue
         final_delete.append(e)
 
-    if apply:
-        for e in final_delete:
-            e["path"].unlink(missing_ok=True)
-            meta_path = e["path"].with_name(e["path"].name + ".json")
-            if meta_path.is_file() and is_within_directory(meta_path.resolve(), backup_dir_resolved):
-                meta_path.unlink(missing_ok=True)
+    to_delete_paths = {e["path"] for e in final_delete}
+    remaining_projected = [e for e in existing_sorted if e["path"] not in to_delete_paths]
 
-    kept = [e for e in entries if e not in final_delete]
-    return {"kept": kept, "to_delete": final_delete, "applied": apply}
+    result = {
+        "existing": existing_sorted,
+        "to_delete": final_delete,
+        "deleted": [],
+        "remaining_after_apply": remaining_projected,
+        "applied": False,
+        "aborted": False,
+        "abort_reason": None,
+    }
+
+    if not apply:
+        return result
+
+    # revalidasi folder backup-nya sendiri lagi TEPAT SEBELUM mulai
+    # menghapus apa pun — jaga-jaga kalau backup_dir sempat "berubah"
+    # (mis. ditimpa symlink) antara resolusi awal dan mulai eksekusi
+    revalidated_dir = validate_backup_directory(str(backup_dir_resolved), active_db_path=active_db_path)
+    if revalidated_dir != backup_dir_resolved:
+        raise BackupError(
+            f"Folder backup berubah antara validasi awal dan mulai penghapusan "
+            f"({backup_dir_resolved} -> {revalidated_dir}) — dibatalkan demi keamanan, tidak ada yang dihapus."
+        )
+
+    deleted = []
+    for e in final_delete:
+        # revalidasi DAN eksekusi unlink()-nya sendiri SAMA-SAMA di dalam
+        # try/except yang sama — kegagalan beneran pas unlink() (disk
+        # error, permission, file kekunci proses lain, dst) HARUS
+        # dilaporkan sebagai abort yang jujur juga, bukan cuma kegagalan
+        # revalidasi pre-emptive; dua-duanya sama-sama "stop safely, report
+        # clearly", dan yang UDAH kehapus di iterasi-iterasi sebelumnya
+        # TETAP tercatat di `deleted` (nggak bisa "dibatalkan mundur").
+        try:
+            revalidated = _revalidate_deletion_candidate(
+                e["path"], backup_dir_resolved, newest_path=newest_path, protect=protect
+            )
+            meta_target = _revalidate_metadata_deletion_candidate(revalidated, backup_dir_resolved)
+            revalidated.unlink()
+            if meta_target is not None:
+                meta_target.unlink(missing_ok=True)
+        except (BackupError, OSError) as exc:
+            result["deleted"] = deleted
+            result["remaining_after_apply"] = [e2 for e2 in existing_sorted if e2["path"] not in {d["path"] for d in deleted}]
+            result["applied"] = True
+            result["aborted"] = True
+            result["abort_reason"] = str(exc)
+            return result
+
+        deleted.append(e)
+
+    result["deleted"] = deleted
+    result["remaining_after_apply"] = remaining_projected
+    result["applied"] = True
+    return result

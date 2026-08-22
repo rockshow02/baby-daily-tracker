@@ -93,7 +93,7 @@ def restore(args) -> int:
 
         app = create_app()
         active_db_path = resolve_active_sqlite_path(app)
-        backup_dir = resolve_backup_dir(args.backup_dir, create=True)
+        backup_dir = resolve_backup_dir(args.backup_dir, create=True, active_db_path=active_db_path)
 
         backup_path = resolve_and_validate_backup_path(args.backup, backup_dir, allow_outside=args.allow_outside_backup_dir)
 
