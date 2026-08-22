@@ -117,10 +117,12 @@ def _seed_pre_audit_trail_schema(path):
                 "created_at": datetime(2024, 1, 1),
             },
         )
-        conn.execute(
-            db.metadata.tables["child_caregivers"].insert(),
-            {"child_id": 1, "user_id": 1, "role": "owner", "created_at": datetime(2024, 1, 1)},
-        )
+        # TIDAK ADA baris child_caregivers buat user 1 di sini — user 1
+        # ADALAH pemilik anak ini (children.user_id di atas), dan sejak
+        # Caregiver Roles & Permissions Phase 1 pemilik SENGAJA nggak
+        # pernah punya baris child_caregivers sama sekali (lihat
+        # models.py:ChildCaregiver docstring — role di tabel itu CUMA
+        # boleh 'editor'/'viewer', ditegakkan CHECK constraint).
         conn.execute(
             db.metadata.tables["feeding_logs"].insert(),
             {
@@ -335,10 +337,12 @@ def _seed_schema_with_old_style_audit_fk(path):
                 "created_at": datetime(2024, 1, 1),
             },
         )
-        conn.execute(
-            db.metadata.tables["child_caregivers"].insert(),
-            {"child_id": 1, "user_id": 1, "role": "owner", "created_at": datetime(2024, 1, 1)},
-        )
+        # TIDAK ADA baris child_caregivers buat user 1 di sini — user 1
+        # ADALAH pemilik anak ini (children.user_id di atas), dan sejak
+        # Caregiver Roles & Permissions Phase 1 pemilik SENGAJA nggak
+        # pernah punya baris child_caregivers sama sekali (lihat
+        # models.py:ChildCaregiver docstring — role di tabel itu CUMA
+        # boleh 'editor'/'viewer', ditegakkan CHECK constraint).
         conn.execute(text(
             """
             INSERT INTO caregiver_audit_events
@@ -408,3 +412,198 @@ def test_fresh_database_already_has_the_correct_actor_fk_without_any_extra_migra
     _run_migrate_against(temp_db_path, monkeypatch)
 
     assert (_actor_fk_ondelete(temp_db_path) or "").upper() == "SET NULL"
+
+
+# --------------------------------------------------------------------------
+# Caregiver Roles & Permissions Phase 1 — migrasi 'child_caregivers.role'
+# (buang 'owner', 'caregiver' -> 'editor', CHECK constraint) + kolom baru
+# 'child_invites.role' (default 'editor'). Lihat
+# backend/docs/ROLES_PERMISSIONS.md buat kebijakan lengkapnya.
+# --------------------------------------------------------------------------
+
+
+def _role_check_present(path):
+    conn = sqlite3.connect(path)
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='child_caregivers'"
+        ).fetchone()
+        return bool(row and row[0] and "CHECK" in row[0].upper())
+    finally:
+        conn.close()
+
+
+def _seed_pre_roles_schema(path):
+    """
+    Simulasi database SEBELUM Caregiver Roles & Permissions Phase 1:
+    `child_caregivers` skema LAMA (role bisa 'owner'/'caregiver', TANPA
+    CHECK constraint), `child_invites` skema LAMA (TANPA kolom `role`
+    sama sekali). Diisi: 1 owner (role='owner', redundan — user yang
+    SAMA juga children.user_id), 1 caregiver biasa (role='caregiver'),
+    dan 1 undangan yang belum dipakai — buat mbuktiin migrasi
+    mempertahankan/mengonversi semuanya dengan benar.
+    """
+    engine = create_engine(f"sqlite:///{path}")
+    tables_to_create = [
+        t for t in db.metadata.sorted_tables
+        if t.name not in ("caregiver_audit_events", "child_caregivers", "child_invites")
+    ]
+    db.metadata.create_all(bind=engine, tables=tables_to_create)
+
+    with engine.begin() as conn:
+        conn.execute(text(
+            """
+            CREATE TABLE child_caregivers (
+                id INTEGER NOT NULL PRIMARY KEY,
+                child_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                role VARCHAR(15) NOT NULL,
+                created_at DATETIME,
+                UNIQUE(child_id, user_id)
+            )
+            """
+        ))
+        conn.execute(text("CREATE INDEX ix_child_caregivers_child_id ON child_caregivers (child_id)"))
+        conn.execute(text("CREATE INDEX ix_child_caregivers_user_id ON child_caregivers (user_id)"))
+
+        conn.execute(text(
+            """
+            CREATE TABLE child_invites (
+                id INTEGER NOT NULL PRIMARY KEY,
+                child_id INTEGER NOT NULL,
+                code VARCHAR(12) NOT NULL UNIQUE,
+                created_by INTEGER NOT NULL,
+                created_at DATETIME,
+                expires_at DATETIME NOT NULL,
+                used_by INTEGER,
+                used_at DATETIME
+            )
+            """
+        ))
+        conn.execute(text("CREATE INDEX ix_child_invites_code ON child_invites (code)"))
+
+        conn.execute(
+            db.metadata.tables["users"].insert(),
+            [
+                {"id": 1, "name": "Legacy Owner", "email": "legacy-owner@example.com", "password_hash": "h", "telegram_chat_id": None, "created_at": datetime(2024, 1, 1)},
+                {"id": 2, "name": "Legacy Caregiver", "email": "legacy-caregiver@example.com", "password_hash": "h", "telegram_chat_id": None, "created_at": datetime(2024, 1, 1)},
+            ],
+        )
+        conn.execute(
+            db.metadata.tables["children"].insert(),
+            {"id": 1, "user_id": 1, "name": "Legacy Child", "nickname": None, "birth_date": date(2024, 1, 1), "gender": "L", "birth_weight_kg": None, "birth_height_cm": None, "photo_filename": None, "created_at": datetime(2024, 1, 1)},
+        )
+        conn.execute(text(
+            "INSERT INTO child_caregivers (child_id, user_id, role, created_at) VALUES "
+            "(1, 1, 'owner', '2024-01-01'), (1, 2, 'caregiver', '2024-01-01')"
+        ))
+        conn.execute(text(
+            "INSERT INTO child_invites (child_id, code, created_by, created_at, expires_at) VALUES "
+            "(1, 'LEGACY001', 1, '2024-01-01', '2099-01-01')"
+        ))
+    engine.dispose()
+
+
+def test_role_migration_preserves_memberships_and_invitations(temp_db_path, monkeypatch):
+    _seed_pre_roles_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    conn = sqlite3.connect(temp_db_path)
+    try:
+        rows = conn.execute("SELECT child_id, user_id, role FROM child_caregivers ORDER BY user_id;").fetchall()
+        # baris 'owner' (user 1) DIBUANG — user 1 udah pemilik lewat
+        # children.user_id, nggak perlu (nggak boleh) baris duplikat di sini
+        assert rows == [(1, 2, "editor")]
+
+        invites = conn.execute("SELECT code, role FROM child_invites;").fetchall()
+        assert invites == [("LEGACY001", "editor")]  # undangan lama TETAP ada, defaultnya 'editor'
+    finally:
+        conn.close()
+
+
+def test_role_migration_defaults_legacy_caregivers_and_invitations_to_editor(temp_db_path, monkeypatch):
+    """Requirement eksplisit: caregiver lama -> editor, undangan lama -> default editor (PERSIS perilaku lama — semua caregiver/undangan lama selalu bisa create/update/delete)."""
+    _seed_pre_roles_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    conn = sqlite3.connect(temp_db_path)
+    try:
+        (caregiver_role,) = conn.execute(
+            "SELECT role FROM child_caregivers WHERE user_id = 2;"
+        ).fetchone()
+        assert caregiver_role == "editor"
+
+        (invite_role,) = conn.execute("SELECT role FROM child_invites WHERE code = 'LEGACY001';").fetchone()
+        assert invite_role == "editor"
+    finally:
+        conn.close()
+
+
+def test_role_migration_is_idempotent(temp_db_path, monkeypatch):
+    _seed_pre_roles_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+    _run_migrate_against(temp_db_path, monkeypatch)  # kedua kalinya HARUS no-op, bukan error/dobel
+
+    assert _role_check_present(temp_db_path) is True
+    conn = sqlite3.connect(temp_db_path)
+    try:
+        rows = conn.execute("SELECT child_id, user_id, role FROM child_caregivers;").fetchall()
+        assert rows == [(1, 2, "editor")]  # tetep cuma 1 baris, nggak didobelin
+    finally:
+        conn.close()
+
+
+def test_role_migration_never_touches_the_real_project_database(temp_db_path, monkeypatch):
+    real_db_existed_before = os.path.exists(REAL_INSTANCE_DB)
+    real_mtime_before = os.path.getmtime(REAL_INSTANCE_DB) if real_db_existed_before else None
+
+    _seed_pre_roles_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    assert os.path.exists(REAL_INSTANCE_DB) == real_db_existed_before
+    if real_db_existed_before:
+        assert os.path.getmtime(REAL_INSTANCE_DB) == real_mtime_before
+
+
+def test_fresh_and_migrated_schemas_have_the_same_effective_child_caregivers_shape(temp_db_path, monkeypatch):
+    """
+    Fresh database (db.create_all() dari model terbaru) HARUS berperilaku
+    SAMA kayak database yang termigrasi dari skema lama — kolom, index,
+    dan CHECK constraint-nya harus identik secara efektif (requirement
+    eksplisit: 'a fresh database created from models must have the same
+    effective schema as a migrated database').
+    """
+    _seed_pre_roles_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+    migrated_columns = _column_names(temp_db_path, "child_caregivers")
+    migrated_indexed = _indexed_columns(temp_db_path, "child_caregivers")
+    assert _role_check_present(temp_db_path) is True
+
+    fresh_fd, fresh_path = tempfile.mkstemp(suffix=".sqlite")
+    os.close(fresh_fd)
+    os.remove(fresh_path)
+    try:
+        _run_migrate_against(fresh_path, monkeypatch)  # database KOSONG dari awal -> murni lewat db.create_all()
+        assert _column_names(fresh_path, "child_caregivers") == migrated_columns
+        assert _indexed_columns(fresh_path, "child_caregivers") == migrated_indexed
+        assert _role_check_present(fresh_path) is True
+    finally:
+        if os.path.exists(fresh_path):
+            os.remove(fresh_path)
+
+
+@pytest.mark.parametrize("bad_role", ["owner", "caregiver", "admin", ""])
+def test_role_check_constraint_rejects_invalid_role_values_after_migration(temp_db_path, monkeypatch, bad_role):
+    """CHECK constraint DB-level (bukan cuma validasi Python) — pertahanan lapis kedua kalau suatu saat ada jalur insert yang lolos dari validasi endpoint."""
+    _seed_pre_roles_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    conn = sqlite3.connect(temp_db_path)
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO child_caregivers (child_id, user_id, role, created_at) VALUES (1, 999, ?, '2024-01-01')",
+                (bad_role,),
+            )
+    finally:
+        conn.close()

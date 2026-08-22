@@ -347,7 +347,7 @@ describe("QueueReviewPanel", () => {
       />,
     );
 
-    expect(screen.getByText(/sudah tidak punya akses/i)).toBeInTheDocument();
+    expect(screen.getByText(/akses atau peranmu.*mungkin sudah berubah/i)).toBeInTheDocument();
     expect(screen.queryByText("Edit")).not.toBeInTheDocument();
   });
 

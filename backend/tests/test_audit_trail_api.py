@@ -51,7 +51,12 @@ def test_2_caregiver_can_read_events(client):
 
     resp = _list(client, caregiver["token"], child["id"])
     assert resp.status_code == 200
-    assert len(resp.get_json()["events"]) == 1
+    events = resp.get_json()["events"]
+    # add_caregiver() sendiri sekarang JUGA nyatet 1 event membership
+    # ("caregiver diundang" — Caregiver Roles & Permissions Phase 1),
+    # jadi bukan cuma 1 event feeding_log doang lagi — yang mau dites di
+    # sini murni "caregiver BISA baca event", bukan jumlah persisnya.
+    assert len([e for e in events if e["entity_type"] == "feeding_log" and e["action"] == "create"]) == 1
 
 
 def test_3_removed_caregiver_cannot_read_events_after_access_removal(client):

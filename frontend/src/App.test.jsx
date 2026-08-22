@@ -67,6 +67,10 @@ const testChild = {
   photo_filename: null,
   birth_weight_kg: 3.2,
   birth_height_cm: 50,
+  // Caregiver Roles & Permissions Phase 1 — fixture default "owner" biar
+  // test existing di file ini (yang nggak spesifik soal peran) tetap
+  // ngetes user yang punya akses penuh, sama kayak sebelum peran ini ada.
+  role: "owner",
 };
 
 function todayAt(hour) {
@@ -497,5 +501,40 @@ describe("App — Aktivitas Pengasuh (Caregiver Audit Trail menu entry)", () => 
     await waitFor(() =>
       expect(screen.queryByText("Tidak ada catatan yang perlu disinkronkan saat ini.")).not.toBeInTheDocument(),
     );
+  });
+});
+
+describe("App — Caregiver Roles & Permissions Phase 1: owner-only caregiver-management menu entry", () => {
+  async function renderAuthenticatedWithRole(role) {
+    setToken("tok-5");
+    setCurrentUser(5);
+    apiMock.me.mockResolvedValue(testUser);
+    apiMock.listChildren.mockResolvedValue([{ ...testChild, role }]);
+    setOnline(true);
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByText("Dedek").length).toBeGreaterThan(0));
+  }
+
+  it("shows the '👥 Pengasuh' entry to the owner", async () => {
+    await renderAuthenticatedWithRole("owner");
+    fireEvent.click(screen.getByText("☰"));
+    expect(await screen.findByText("Pengasuh")).toBeInTheDocument();
+  });
+
+  it("hides the '👥 Pengasuh' entry from an editor", async () => {
+    await renderAuthenticatedWithRole("editor");
+    fireEvent.click(screen.getByText("☰"));
+    // "Aktivitas Pengasuh" (menu audit trail, beda fitur) TETAP ada buat
+    // semua peran — cuma "Pengasuh" (kelola caregiver) yang owner-only,
+    // jadi query di sini exact-match biar nggak salah ke-match ke situ.
+    await screen.findByText("Status Sinkronisasi"); // pastikan menu udah selesai render
+    expect(screen.queryByText("Pengasuh")).not.toBeInTheDocument();
+  });
+
+  it("hides the '👥 Pengasuh' entry from a viewer", async () => {
+    await renderAuthenticatedWithRole("viewer");
+    fireEvent.click(screen.getByText("☰"));
+    await screen.findByText("Status Sinkronisasi");
+    expect(screen.queryByText("Pengasuh")).not.toBeInTheDocument();
   });
 });

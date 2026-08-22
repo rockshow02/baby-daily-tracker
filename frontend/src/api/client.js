@@ -396,12 +396,24 @@ export const api = {
   getStats: (childId, days = 7) =>
     request(`/children/${childId}/stats?days=${days}`),
 
-  // multi-caregiver
+  // multi-caregiver (Caregiver Roles & Permissions Phase 1 — lihat
+  // backend/docs/ROLES_PERMISSIONS.md)
   listCaregivers: (childId) => request(`/children/${childId}/caregivers`),
   removeCaregiver: (childId, userId) =>
     request(`/children/${childId}/caregivers/${userId}`, { method: "DELETE" }),
-  createInvite: (childId) =>
-    request(`/children/${childId}/invite`, { method: "POST" }),
+  // `role` WAJIB — "editor" | "viewer", dipilih pemilik. Backend
+  // memvalidasi lewat allowlist ketat; frontend TIDAK PERNAH nawarin
+  // "owner" sebagai pilihan.
+  updateCaregiverRole: (childId, userId, role) =>
+    request(`/children/${childId}/caregivers/${userId}`, {
+      method: "PUT",
+      body: JSON.stringify({ role }),
+    }),
+  createInvite: (childId, role) =>
+    request(`/children/${childId}/invite`, {
+      method: "POST",
+      body: JSON.stringify({ role }),
+    }),
   joinChild: (code) =>
     request("/children/join", {
       method: "POST",

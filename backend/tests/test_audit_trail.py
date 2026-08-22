@@ -203,8 +203,19 @@ def _list_events(client, token, child_id, **params):
     return client.get(f"/api/children/{child_id}/audit-events", query_string=params, headers=auth_headers(token))
 
 
-def add_caregiver(client, owner_token, child_id, caregiver_token):
-    invite = client.post(f"/api/children/{child_id}/invite", headers=auth_headers(owner_token))
+def add_caregiver(client, owner_token, child_id, caregiver_token, role="editor"):
+    """
+    Undang + gabungkan 1 caregiver ke 1 anak. `role` default 'editor' —
+    Caregiver Roles & Permissions Phase 1 (lihat backend/docs/
+    ROLES_PERMISSIONS.md) mewajibkan owner milih peran eksplisit pas
+    bikin undangan; 'editor' dipilih sebagai default DI SINI (bukan di
+    backend) biar test-test LAMA yang manggil helper ini tanpa argumen
+    role tetap dapet caregiver yang bisa create/update/delete — PERSIS
+    perilaku 'caregiver' generik sebelum peran ini ada.
+    """
+    invite = client.post(
+        f"/api/children/{child_id}/invite", json={"role": role}, headers=auth_headers(owner_token)
+    )
     assert invite.status_code == 201, invite.get_json()
     code = invite.get_json()["code"]
     join = client.post("/api/children/join", json={"code": code}, headers=auth_headers(caregiver_token))

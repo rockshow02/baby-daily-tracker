@@ -159,8 +159,13 @@ function NeedsReviewCard({ item, onDiscard, onRetry, onConfirmingChange }) {
   // — jangan nawarin edit yang nggak bakal nolong.
   const needsManualRecreate = !cannotBeFixedByEditing && (schema.length === 0 || hasUnsupportedField(typeLabel, parsedBody));
 
+  // Caregiver Roles & Permissions Phase 1 — backend balikin 403 yang
+  // SAMA baik buat "akses dicabut total" MAUPUN "peran diturunkan jadi
+  // Hanya melihat" (lihat backend/docs/ROLES_PERMISSIONS.md), jadi pesan
+  // di sini SENGAJA nyebut dua-duanya sebagai kemungkinan, bukan
+  // nebak salah satu.
   const reasonLabel = isAccessIssue
-    ? "Kamu mungkin sudah tidak punya akses ke anak ini."
+    ? "Akses atau peranmu untuk anak ini mungkin sudah berubah (dicabut, atau diubah jadi Hanya melihat) — catatan ini tidak bisa disimpan otomatis."
     : isConflict
     ? "Request ini sudah pernah diproses server dengan data yang berbeda — catatan ini TIDAK disimpan otomatis lagi supaya nggak nyimpen data yang salah."
     : item.lastError || "Server menolak catatan ini.";

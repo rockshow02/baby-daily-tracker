@@ -19,6 +19,7 @@ import SmartInsightsBell from "../components/SmartInsightsBell";
 import MotorActivityCard from "../components/MotorActivityCard";
 import { weeklyAverageExcludingToday } from "../utils/insights";
 import { todayWIB, toWIBDateStr, timePeriodLabel } from "../utils/date";
+import { canWrite as canWriteRole, canDeleteRecord } from "../utils/roles";
 
 const todayStr = () => todayWIB();
 
@@ -106,6 +107,17 @@ export default function Dashboard({ child, onOpenProfile }) {
   const [weeklyStats, setWeeklyStats] = useState(null);
 
   const isToday = date === todayStr();
+
+  // Caregiver Roles & Permissions Phase 1 (lihat
+  // backend/docs/ROLES_PERMISSIONS.md) — backend TETAP otoritatif buat
+  // SEMUA keputusan izin (401/403 tetap ditangani aman di mana pun
+  // panggilan API bisa nembus, lihat handleCreate/handleUpdate/
+  // handleDelete di bawah); flag di sini CUMA nyembunyiin kontrol yang
+  // bakal ditolak backend, biar viewer nggak nawarin tombol yang
+  // percuma. `child.role` yang undefined/null (cache lama sebelum field
+  // ini ada) otomatis kehitung read-only lewat canWriteRole().
+  const canWrite = canWriteRole(child.role);
+  const currentUserId = getCurrentUserId();
 
   // insight cuma masuk akal buat "hari ini" (bandingin ke tren beberapa
   // hari terakhir) — pas lihat riwayat tanggal lama, nggak perlu fetch ini
@@ -373,6 +385,9 @@ export default function Dashboard({ child, onOpenProfile }) {
     // catatan yang masih nunggu sinkron belum punya id asli di server —
     // belum bisa diedit sampai selesai disinkronkan
     if (isPendingOfflineItem(item)) return;
+    // viewer (atau role yang nggak dikenal) nggak boleh ubah apa pun —
+    // backend bakal nolak juga, ini cuma nyegah modal edit percuma kebuka
+    if (!canWrite) return;
     setSheetType(item.kind);
     setEditingItem(item);
   };
@@ -768,12 +783,19 @@ export default function Dashboard({ child, onOpenProfile }) {
                 <div className="space-y-2">
                   {group.items.map((item) => {
                     const pending = isPendingOfflineItem(item);
+                    const itemClickable = !pending && canWrite;
+                    // Editor CUMA boleh hapus catatan buatan sendiri;
+                    // owner boleh hapus catatan siapa pun; viewer nggak
+                    // pernah boleh hapus — backend juga menegakkan ulang
+                    // ini (utils/access.py:can_delete_record), ini CUMA
+                    // buat nyembunyiin tombolnya di UI.
+                    const itemCanDelete = canWrite && canDeleteRecord(child.role, item.created_by_user_id, currentUserId);
                     const card = (
                       <div
-                        onClick={pending ? undefined : () => openEdit(item)}
-                        aria-disabled={pending || undefined}
+                        onClick={itemClickable ? () => openEdit(item) : undefined}
+                        aria-disabled={!itemClickable || undefined}
                         className={`flex items-center justify-between bg-void-card border border-void-hairline rounded-xl2 px-4 py-3 ${
-                          pending ? "" : "cursor-pointer active:bg-void-raised"
+                          itemClickable ? "cursor-pointer active:bg-void-raised" : ""
                         }`}
                       >
                         <div className="flex items-center gap-3">
@@ -812,7 +834,7 @@ export default function Dashboard({ child, onOpenProfile }) {
                             )}
                           </div>
                         </div>
-                        {!pending && (
+                        {!pending && canWrite && (
                           <div className="flex items-center gap-2">
                             {item.kind === "sleep" && !item.end_time && (
                               <button
@@ -825,16 +847,18 @@ export default function Dashboard({ child, onOpenProfile }) {
                                 🌤️ Bangun
                               </button>
                             )}
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleSoftDelete(item);
-                              }}
-                              className="text-ink-faint text-xs px-2 py-1"
-                              aria-label="Hapus catatan"
-                            >
-                              Hapus
-                            </button>
+                            {itemCanDelete && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleSoftDelete(item);
+                                }}
+                                className="text-ink-faint text-xs px-2 py-1"
+                                aria-label="Hapus catatan"
+                              >
+                                Hapus
+                              </button>
+                            )}
                           </div>
                         )}
                       </div>
@@ -843,8 +867,11 @@ export default function Dashboard({ child, onOpenProfile }) {
                     // catatan yang masih nunggu sinkron TIDAK dibungkus
                     // SwipeableHistoryItem — nggak ada aksi swipe (duplikat/
                     // hapus) yang valid buat ditawarin sebelum record-nya
-                    // beneran ada di server
-                    if (pending) {
+                    // beneran ada di server. Viewer (atau role yang nggak
+                    // dikenal) juga nggak dibungkus sama sekali — nggak
+                    // ada aksi geser yang boleh ditawarin (duplikat =
+                    // bikin record baru, tetap butuh izin tulis).
+                    if (pending || !canWrite) {
                       return <div key={`${item.kind}-${item.id}`}>{card}</div>;
                     }
                     return (
@@ -852,6 +879,7 @@ export default function Dashboard({ child, onOpenProfile }) {
                         key={`${item.kind}-${item.id}`}
                         onDuplicate={() => handleDuplicate(item)}
                         onDelete={() => handleSoftDelete(item)}
+                        canDelete={itemCanDelete}
                       >
                         {card}
                       </SwipeableHistoryItem>
@@ -885,7 +913,9 @@ export default function Dashboard({ child, onOpenProfile }) {
         <RelatedArticles category="feeding" ageMonths={summary ? summary.age_days / 30.4375 : null} />
       </div>
 
-      {/* quick log bar */}
+      {/* quick log bar — viewer (baca-saja) nggak ditawarin sama sekali,
+          backend juga bakal nolak POST-nya kalau somehow ke-panggil */}
+      {canWrite && (
       <div className="fixed bottom-0 left-0 right-0 px-6 pb-6 pt-4 bg-gradient-to-t from-void via-void to-transparent">
         <div className="max-w-sm mx-auto grid grid-cols-4 gap-2.5">
           <button
@@ -918,9 +948,10 @@ export default function Dashboard({ child, onOpenProfile }) {
           </button>
         </div>
       </div>
+      )}
 
       {/* menu "lainnya" */}
-      {showMoreMenu && (
+      {canWrite && showMoreMenu && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center sm:justify-center">
           <div className="absolute inset-0 bg-black/60" onClick={() => setShowMoreMenu(false)} />
           <div className="relative w-full sm:max-w-sm bg-void-card border-t sm:border border-void-hairline rounded-t-xl2 sm:rounded-xl2 p-6 pb-8">
@@ -963,7 +994,11 @@ export default function Dashboard({ child, onOpenProfile }) {
           }
           onClose={closeSheet}
           onSubmit={handleSheetSubmit}
-          onDelete={editingItem ? () => handleDelete(editingItem.kind, editingItem.id) : undefined}
+          onDelete={
+            editingItem && canDeleteRecord(child.role, editingItem.created_by_user_id, currentUserId)
+              ? () => handleDelete(editingItem.kind, editingItem.id)
+              : undefined
+          }
         />
       )}
     </div>

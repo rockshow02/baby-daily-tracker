@@ -32,10 +32,17 @@ whitelist), [`backend/routes/audit_routes.py`](../routes/audit_routes.py)
 11. Catatan mood (`mood_log`)
 12. Catatan milestone (`milestone_log`)
 
+**Juga diaudit** (perluasan minimal & kompatibel — Caregiver Roles &
+Permissions Phase 1, lihat [`ROLES_PERMISSIONS.md`](ROLES_PERMISSIONS.md)):
+kejadian keamanan membership caregiver (`entity_type =
+"caregiver_membership"`) — caregiver diundang/perannya diubah/aksesnya
+dicabut. TERPISAH dari 12 tipe record di atas, TIDAK PERNAH menyimpan
+kode undangan, email, atau nilai peran lama/baru — cukup metadata "apa
+yang kejadian, siapa pelakunya".
+
 **SENGAJA DIKECUALIKAN di Phase 1** (kandidat Phase 2, belum dikerjakan):
 
 - Edit profil anak (nama, tanggal lahir, foto, dst di `Child`)
-- Membership/undangan caregiver (`ChildCaregiver`, `ChildInvite`)
 - Status vaksinasi (`ChildVaccination`)
 - Perubahan profil user (nama, password, dst)
 - Konfigurasi Telegram
@@ -75,7 +82,7 @@ Yang BENERAN disimpan (lihat `CaregiverAuditEvent` di `models.py`):
 | `child_id` | anak yang bersangkutan (index) |
 | `actor_user_id` | user yang MELAKUKAN aksi ini (index, `NULL` kalau akun aktornya sudah dihapus — lihat bagian "Otorisasi" di bawah) |
 | `action` | `"create"` \| `"update"` \| `"delete"` |
-| `entity_type` | salah satu dari 12 tipe di atas (allowlist ketat) |
+| `entity_type` | salah satu dari 12 tipe record di atas, ATAU `"caregiver_membership"` (allowlist ketat) |
 | `entity_id` | ID record aslinya (bukan FK — record-nya bisa aja udah kehapus) |
 | `changed_fields_json` | list nama field AMAN dan/atau marker generik yang berubah (CUMA action=`update`) |
 | `recorded_at` | waktu KEJADIAN ASLI record-nya (mis. `FeedingLog.timestamp`) |
@@ -172,7 +179,7 @@ GET /api/children/<child_id>/audit-events
 - Filter opsional (SEMUA lewat SQLAlchemy query builder — TIDAK PERNAH
   nyusun SQL mentah dari input):
   - `action` — harus salah satu dari `create`/`update`/`delete`, else `400`.
-  - `entity_type` — harus salah satu dari 12 tipe allowlist, else `400`.
+  - `entity_type` — harus salah satu dari 12 tipe record ATAU `"caregiver_membership"`, else `400`.
   - `actor_user_id` — harus integer positif, else `400`.
 
 Contoh respons (2 event — 1 update field aman, 1 update yang nyentuh

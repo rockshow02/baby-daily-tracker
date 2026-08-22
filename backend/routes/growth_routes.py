@@ -5,13 +5,16 @@ from flask import Blueprint, request, jsonify, session
 from extensions import db
 from models import Child, GrowthMeasurement, User
 from utils.telegram import notify_other_caregivers
-from utils.access import get_accessible_child
+from utils.access import get_accessible_child, resolve_role, can_delete_record, WRITE_ROLES
 from utils.auth import get_current_user_id
 from utils.timezone_utils import today_wib
 from utils.growth_calc import evaluate_measurement, get_reference, value_at_zscore
 from utils.audit import record_audit_event, snapshot_fields, diff_snapshots
 
 growth_bp = Blueprint("growth", __name__)
+
+NO_WRITE_ROLE_MESSAGE = "Peran Anda hanya bisa melihat data, tidak bisa menambah/mengubah catatan."
+NO_DELETE_PERMISSION_MESSAGE = "Anda tidak punya izin untuk menghapus catatan ini."
 
 
 def _owned_child(child_id):
@@ -65,6 +68,10 @@ def create_growth_measurement(child_id):
     if not child:
         return jsonify({"error": "Anak tidak ditemukan"}), 404
 
+    user_id = get_current_user_id()
+    if resolve_role(child, user_id) not in WRITE_ROLES:
+        return jsonify({"error": NO_WRITE_ROLE_MESSAGE}), 403
+
     data = request.get_json() or {}
     measured_date_str = data.get("measured_date")
     if not measured_date_str:
@@ -84,7 +91,6 @@ def create_growth_measurement(child_id):
     if head_circumference_cm is not None and not (20 <= float(head_circumference_cm) <= 60):
         return jsonify({"error": "Lingkar kepala tidak wajar (20-60 cm)"}), 400
 
-    user_id = get_current_user_id()
     measurement = GrowthMeasurement(
         created_by_user_id=user_id,
         child_id=child_id,
@@ -141,8 +147,11 @@ def update_or_delete_growth_measurement(measurement_id):
         return jsonify({"error": "Tidak diizinkan"}), 403
 
     user_id = get_current_user_id()
+    role = resolve_role(child, user_id)
 
     if request.method == "DELETE":
+        if not can_delete_record(role, measurement.created_by_user_id, user_id):
+            return jsonify({"error": NO_DELETE_PERMISSION_MESSAGE}), 403
         record_audit_event(
             child_id=measurement.child_id, actor_user_id=user_id, action="delete",
             entity_type="growth_measurement", entity_id=measurement.id, recorded_at=measurement.measured_date,
@@ -150,6 +159,9 @@ def update_or_delete_growth_measurement(measurement_id):
         db.session.delete(measurement)
         db.session.commit()
         return jsonify({"success": True})
+
+    if role not in WRITE_ROLES:
+        return jsonify({"error": NO_WRITE_ROLE_MESSAGE}), 403
 
     data = request.get_json() or {}
     before = snapshot_fields(measurement, "growth_measurement")

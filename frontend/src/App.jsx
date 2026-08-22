@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { api, ApiError, getCurrentUserId } from "./api/client";
+import { isOwner } from "./utils/roles";
 import { getQueueForUser, QUEUE_STATUS } from "./utils/offlineQueue";
 import { useOfflineSync } from "./hooks/useOfflineSync";
 import {
@@ -331,16 +332,18 @@ function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, s
                 <span className="text-base">👤</span>
                 Profil Saya
               </button>
-              <button
-                onClick={() => {
-                  setShowMenu(false);
-                  setShowCaregivers(true);
-                }}
-                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl2 text-sm text-ink text-left"
-              >
-                <span className="text-base">👥</span>
-                Pengasuh
-              </button>
+              {isOwner(activeChild.role) && (
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
+                    setShowCaregivers(true);
+                  }}
+                  className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl2 text-sm text-ink text-left"
+                >
+                  <span className="text-base">👥</span>
+                  Pengasuh
+                </button>
+              )}
               <button
                 onClick={() => {
                   setShowMenu(false);

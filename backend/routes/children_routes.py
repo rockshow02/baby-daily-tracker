@@ -9,8 +9,16 @@ from werkzeug.utils import secure_filename
 from extensions import db
 from models import Child, VaccineSchedule, ChildVaccination, ChildCaregiver, ChildInvite, User
 from utils.timezone_utils import today_wib
-from utils.access import get_accessible_child, get_accessible_children, get_caregiver_role
+from utils.access import (
+    get_accessible_child,
+    get_accessible_children,
+    resolve_role,
+    ROLE_OWNER,
+    MEMBERSHIP_ROLES,
+    WRITE_ROLES,
+)
 from utils.auth import get_current_user_id
+from utils.audit import record_audit_event, MEMBERSHIP_ENTITY_TYPE
 
 children_bp = Blueprint("children", __name__)
 
@@ -24,6 +32,36 @@ def _require_login():
 
 def _owned_child(child_id, user_id):
     return get_accessible_child(child_id, user_id)
+
+
+def _child_dict_with_role(child, role):
+    """
+    `Child.to_dict()` + peran EFEKTIF user yang lagi minta (owner/editor/
+    viewer) — SATU field tambahan di respons child-scoped yang udah ada
+    (bukan endpoint terpisah), biar frontend nggak pernah perlu ngitung
+    ulang peran sendiri dari data lain. `to_dict()` sendiri SENGAJA tetap
+    nggak tau soal peran (model layer nggak boleh butuh konteks "siapa
+    yang nanya") — role-nya disuntik di sini, di layer route.
+    """
+    return {**child.to_dict(), "role": role}
+
+
+def _owner_or_error(child_id, user_id):
+    """
+    (child, None) kalau user_id ADALAH pemilik anak ini. Else (None,
+    (response, status)) — 404 kalau nggak ada akses SAMA SEKALI (anak
+    nggak ada/nggak ke-invite, pola existing biar nggak bocorin
+    keberadaan resource), 403 kalau ADA akses (editor/viewer) tapi bukan
+    pemilik. Dipakai SERAGAM di semua operasi owner-only file ini (edit/
+    hapus anak, foto, kelola caregiver) — Caregiver Roles & Permissions
+    Phase 1, lihat backend/docs/ROLES_PERMISSIONS.md.
+    """
+    child = get_accessible_child(child_id, user_id)
+    if not child:
+        return None, (jsonify({"error": "Anak tidak ditemukan"}), 404)
+    if resolve_role(child, user_id) != ROLE_OWNER:
+        return None, (jsonify({"error": "Hanya pemilik anak yang bisa melakukan aksi ini"}), 403)
+    return child, None
 
 
 def _age_in_months(birth_date):
@@ -80,7 +118,7 @@ def list_children():
     if not user_id:
         return jsonify({"error": "Belum login"}), 401
     children = get_accessible_children(user_id)
-    return jsonify([c.to_dict() for c in children])
+    return jsonify([_child_dict_with_role(c, resolve_role(c, user_id)) for c in children])
 
 
 @children_bp.route("/children", methods=["POST"])
@@ -120,11 +158,14 @@ def create_child():
         birth_weight_kg=birth_weight_kg,
         birth_height_cm=birth_height_cm,
     )
+    # TIDAK ADA baris ChildCaregiver dibikin buat pembuat anak ini —
+    # status pemilik SATU-SATUNYA sumber kebenarannya Child.user_id di
+    # atas (lihat models.py:ChildCaregiver docstring +
+    # utils/access.py:resolve_role). Baris child_caregivers CUMA PERNAH
+    # dibikin buat caregiver NON-PEMILIK (lewat join_child, di bawah).
     db.session.add(child)
-    db.session.flush()  # biar dapet child.id sebelum commit
-    db.session.add(ChildCaregiver(child_id=child.id, user_id=user_id, role="owner"))
     db.session.commit()
-    return jsonify(child.to_dict()), 201
+    return jsonify(_child_dict_with_role(child, ROLE_OWNER)), 201
 
 
 @children_bp.route("/children/<int:child_id>", methods=["GET"])
@@ -136,7 +177,7 @@ def get_child(child_id):
     child = _owned_child(child_id, user_id)
     if not child:
         return jsonify({"error": "Anak tidak ditemukan"}), 404
-    return jsonify(child.to_dict())
+    return jsonify(_child_dict_with_role(child, resolve_role(child, user_id)))
 
 
 @children_bp.route("/children/<int:child_id>", methods=["PUT", "DELETE"])
@@ -145,13 +186,14 @@ def update_or_delete_child(child_id):
     if not user_id:
         return jsonify({"error": "Belum login"}), 401
 
-    child = _owned_child(child_id, user_id)
-    if not child:
-        return jsonify({"error": "Anak tidak ditemukan"}), 404
+    # Edit & hapus profil anak SAMA-SAMA owner-only (Caregiver Roles &
+    # Permissions Phase 1) — editor/viewer boleh BACA profil anak (lihat
+    # get_child di atas), tapi nggak boleh ubah ATAUPUN hapus.
+    child, err = _owner_or_error(child_id, user_id)
+    if err:
+        return err
 
     if request.method == "DELETE":
-        if get_caregiver_role(child_id, user_id) != "owner":
-            return jsonify({"error": "Hanya pemilik anak yang bisa menghapus data anak"}), 403
         # hapus juga file foto kalau ada
         if child.photo_filename:
             path = os.path.join(_uploads_dir(), child.photo_filename)
@@ -179,7 +221,7 @@ def update_or_delete_child(child_id):
     if "birth_height_cm" in data:
         child.birth_height_cm = data["birth_height_cm"]
     db.session.commit()
-    return jsonify(child.to_dict())
+    return jsonify(_child_dict_with_role(child, ROLE_OWNER))
 
 
 # ---------- FOTO ----------
@@ -190,9 +232,11 @@ def upload_child_photo(child_id):
     if not user_id:
         return jsonify({"error": "Belum login"}), 401
 
-    child = _owned_child(child_id, user_id)
-    if not child:
-        return jsonify({"error": "Anak tidak ditemukan"}), 404
+    # Foto anak = bagian dari profil anak -> owner-only, sama kayak
+    # update_or_delete_child di atas.
+    child, err = _owner_or_error(child_id, user_id)
+    if err:
+        return err
 
     if "photo" not in request.files:
         return jsonify({"error": "File foto tidak ditemukan"}), 400
@@ -222,7 +266,7 @@ def upload_child_photo(child_id):
 
     child.photo_filename = filename
     db.session.commit()
-    return jsonify(child.to_dict())
+    return jsonify(_child_dict_with_role(child, ROLE_OWNER))
 
 
 @children_bp.route("/uploads/<path:filename>", methods=["GET"])
@@ -351,6 +395,12 @@ def update_child_vaccinations(child_id):
     if not child:
         return jsonify({"error": "Anak tidak ditemukan"}), 404
 
+    # Status vaksinasi = record kesehatan anak yang mutable (di luar 12
+    # tipe audit-trail Phase 1, tapi kebijakan izinnya SAMA: owner/editor
+    # boleh ubah, viewer nggak boleh).
+    if resolve_role(child, user_id) not in WRITE_ROLES:
+        return jsonify({"error": "Peran Anda hanya bisa melihat data, tidak bisa mengubah status vaksinasi."}), 403
+
     data = request.get_json() or {}
     items = data.get("items", [])
 
@@ -378,7 +428,27 @@ def update_child_vaccinations(child_id):
     return jsonify({"age_months": age_months, "vaccinations": _build_vaccination_list(child, age_months)})
 
 
-# ---------- MULTI-CAREGIVER ----------
+# ---------- MULTI-CAREGIVER & PERAN (Caregiver Roles & Permissions Phase 1) ----------
+# Lihat backend/docs/ROLES_PERMISSIONS.md buat matriks izin lengkapnya.
+
+
+def _owner_entry(child):
+    """
+    Baris 'owner' sintetis buat respons list_caregivers — pemilik SENGAJA
+    TIDAK PERNAH punya baris di child_caregivers (lihat models.py:
+    ChildCaregiver docstring), jadi harus digabung manual dari
+    Child.user_id di sini biar OWNER TETAP MUNCUL di daftar caregiver,
+    persis kontrak respons lama (sebelum Phase 1, owner munculnya dari
+    baris child_caregivers role='owner').
+    """
+    owner_user = db.session.get(User, child.user_id)
+    return {
+        "user_id": child.user_id,
+        "name": owner_user.name if owner_user else None,
+        "email": owner_user.email if owner_user else None,
+        "role": ROLE_OWNER,
+    }
+
 
 @children_bp.route("/children/<int:child_id>/caregivers", methods=["GET"])
 def list_caregivers(child_id):
@@ -391,7 +461,54 @@ def list_caregivers(child_id):
         return jsonify({"error": "Anak tidak ditemukan"}), 404
 
     caregivers = ChildCaregiver.query.filter_by(child_id=child_id).order_by(ChildCaregiver.created_at.asc()).all()
-    return jsonify([c.to_dict() for c in caregivers])
+    return jsonify([_owner_entry(child)] + [c.to_dict() for c in caregivers])
+
+
+@children_bp.route("/children/<int:child_id>/caregivers/<int:caregiver_user_id>", methods=["PUT"])
+def update_caregiver_role(child_id, caregiver_user_id):
+    """
+    Ubah peran caregiver AKTIF antara editor <-> viewer. Owner-only.
+    Nggak bisa dipakai buat menjadikan siapa pun 'owner' (MEMBERSHIP_ROLES
+    cuma editor/viewer — lihat utils/access.py), nggak bisa dipakai owner
+    buat ubah perannya sendiri (dia bukan baris child_caregivers sama
+    sekali), dan filter child_id+user_id sekaligus di query di bawah
+    ngeblok manipulasi membership anak LAIN (IDOR) — caregiver_user_id
+    yang sah di anak lain otomatis nggak ketemu ('Caregiver tidak
+    ditemukan'), bukan diam-diam kena.
+    """
+    user_id = _require_login()
+    if not user_id:
+        return jsonify({"error": "Belum login"}), 401
+
+    child, err = _owner_or_error(child_id, user_id)
+    if err:
+        return err
+
+    if caregiver_user_id == user_id:
+        return jsonify({"error": "Pemilik tidak bisa mengubah perannya sendiri"}), 400
+
+    data = request.get_json() or {}
+    new_role = data.get("role")
+    if new_role not in MEMBERSHIP_ROLES:
+        return jsonify({"error": f"role harus salah satu dari: {', '.join(MEMBERSHIP_ROLES)}"}), 400
+
+    cc = ChildCaregiver.query.filter_by(child_id=child_id, user_id=caregiver_user_id).first()
+    if not cc:
+        return jsonify({"error": "Caregiver tidak ditemukan"}), 404
+
+    if cc.role == new_role:
+        # no-op semantik — SAMA kebijakannya kayak update record biasa
+        # (lihat utils/audit.py): nggak ada perubahan beneran, nggak ada
+        # audit event yang dibikin.
+        return jsonify(cc.to_dict())
+
+    cc.role = new_role
+    record_audit_event(
+        child_id=child_id, actor_user_id=user_id, action="update",
+        entity_type=MEMBERSHIP_ENTITY_TYPE, entity_id=cc.id,
+    )
+    db.session.commit()
+    return jsonify(cc.to_dict())
 
 
 @children_bp.route("/children/<int:child_id>/caregivers/<int:caregiver_user_id>", methods=["DELETE"])
@@ -401,8 +518,9 @@ def remove_caregiver(child_id, caregiver_user_id):
     if not user_id:
         return jsonify({"error": "Belum login"}), 401
 
-    if get_caregiver_role(child_id, user_id) != "owner":
-        return jsonify({"error": "Hanya pemilik anak yang bisa mengelola caregiver"}), 403
+    child, err = _owner_or_error(child_id, user_id)
+    if err:
+        return err
 
     if caregiver_user_id == user_id:
         return jsonify({"error": "Pemilik tidak bisa mencabut akses diri sendiri"}), 400
@@ -411,6 +529,10 @@ def remove_caregiver(child_id, caregiver_user_id):
     if not cc:
         return jsonify({"error": "Caregiver tidak ditemukan"}), 404
 
+    record_audit_event(
+        child_id=child_id, actor_user_id=user_id, action="delete",
+        entity_type=MEMBERSHIP_ENTITY_TYPE, entity_id=cc.id,
+    )
     db.session.delete(cc)
     db.session.commit()
     return jsonify({"success": True})
@@ -418,24 +540,46 @@ def remove_caregiver(child_id, caregiver_user_id):
 
 @children_bp.route("/children/<int:child_id>/invite", methods=["POST"])
 def create_invite(child_id):
-    """Bikin kode undangan buat nambah caregiver baru. Berlaku 7 hari, sekali pakai.
-    Semua pengasuh (bukan cuma pemilik) boleh bikin, biar nggak harus lewat satu orang doang."""
+    """
+    Bikin kode undangan buat nambah caregiver baru. Berlaku 7 hari,
+    sekali pakai. Owner-only (Caregiver Roles & Permissions Phase 1 —
+    sebelumnya semua caregiver boleh bikin; sekarang mengundang orang
+    baru adalah keputusan pemilik, sama kayak ubah peran/cabut akses).
+    Body wajib: {"role": "editor" | "viewer"} — peran yang DIPILIH
+    pemilik buat orang yang bakal pakai kode ini, diterapkan APA ADANYA
+    pas kode-nya dipakai (lihat join_child di bawah) — orang yang
+    nerima TIDAK PERNAH bisa milih/nimpa peran ini sendiri.
+    """
     user_id = _require_login()
     if not user_id:
         return jsonify({"error": "Belum login"}), 401
 
-    child = get_accessible_child(child_id, user_id)
-    if not child:
-        return jsonify({"error": "Anak tidak ditemukan"}), 404
+    child, err = _owner_or_error(child_id, user_id)
+    if err:
+        return err
+
+    data = request.get_json() or {}
+    invite_role = data.get("role")
+    if invite_role not in MEMBERSHIP_ROLES:
+        return jsonify({"error": f"role harus salah satu dari: {', '.join(MEMBERSHIP_ROLES)}"}), 400
 
     code = secrets.token_hex(4).upper()  # cth. "A1B2C3D4"
     invite = ChildInvite(
         child_id=child_id,
         code=code,
+        role=invite_role,
         created_by=user_id,
         expires_at=datetime.utcnow() + timedelta(days=7),
     )
     db.session.add(invite)
+    db.session.flush()
+    # entity_id = ChildInvite.id ("caregiver diundang") — TIDAK PERNAH
+    # kode undangannya sendiri (token), email, ataupun peran yang
+    # dipilih tersimpan di audit trail sama sekali.
+    record_audit_event(
+        child_id=child_id, actor_user_id=user_id, action="create",
+        entity_type=MEMBERSHIP_ENTITY_TYPE, entity_id=invite.id,
+    )
     db.session.commit()
     return jsonify(invite.to_dict()), 201
 
@@ -460,14 +604,28 @@ def join_child():
     if invite.expires_at < datetime.utcnow():
         return jsonify({"error": "Kode undangan sudah kedaluwarsa"}), 400
 
+    child = db.session.get(Child, invite.child_id)
+
+    # Pemilik anak ini SENGAJA nggak punya baris child_caregivers (lihat
+    # models.py:ChildCaregiver docstring), jadi pengecekan "udah punya
+    # akses" HARUS mencakup 2 kasus: udah jadi caregiver TERDAFTAR, ATAU
+    # dia sendiri pemiliknya — tanpa cek kedua ini, pemilik yang kepencet
+    # kode undangannya sendiri bakal dobel-tercatat (jadi owner SEKALIGUS
+    # editor/viewer di anak yang sama).
+    if child and child.user_id == user_id:
+        return jsonify({"error": "Kamu adalah pemilik anak ini"}), 400
     existing = ChildCaregiver.query.filter_by(child_id=invite.child_id, user_id=user_id).first()
     if existing:
         return jsonify({"error": "Kamu sudah punya akses ke anak ini"}), 400
 
-    db.session.add(ChildCaregiver(child_id=invite.child_id, user_id=user_id, role="caregiver"))
+    # Peran-nya PERSIS yang dipilih pemilik pas bikin undangan ini
+    # (invite.role, divalidasi & disetel di create_invite di atas) — user
+    # yang nerima TIDAK PERNAH bisa milih perannya sendiri lewat body
+    # request ini (nggak ada field role yang dibaca dari `data` sama
+    # sekali di sini).
+    db.session.add(ChildCaregiver(child_id=invite.child_id, user_id=user_id, role=invite.role))
     invite.used_by = user_id
     invite.used_at = datetime.utcnow()
     db.session.commit()
 
-    child = Child.query.get(invite.child_id)
-    return jsonify({"success": True, "child": child.to_dict()}), 201
+    return jsonify({"success": True, "child": _child_dict_with_role(child, invite.role)}), 201

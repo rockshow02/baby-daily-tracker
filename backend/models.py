@@ -108,6 +108,7 @@ class FeedingLog(db.Model):
             "volume_ml": self.volume_ml,
             "breast_side": self.breast_side,
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -143,6 +144,7 @@ class SleepLog(db.Model):
             "sleep_type": self.sleep_type,
             "duration_minutes": self.duration_minutes,
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -175,6 +177,7 @@ class DiaperLog(db.Model):
             "consistency": self.consistency,
             "color": self.color,
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -313,6 +316,7 @@ class PumpingLog(db.Model):
             "volume_ml": self.volume_ml,
             "breast_side": self.breast_side,
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -348,6 +352,7 @@ class ActivityLog(db.Model):
             "timestamp": self.timestamp.isoformat() + "+07:00",
             "duration_minutes": self.duration_minutes,
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -402,6 +407,7 @@ class GrowthMeasurement(db.Model):
             "height_cm": self.height_cm,
             "head_circumference_cm": self.head_circumference_cm,
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -440,6 +446,7 @@ class DoctorVisitLog(db.Model):
             "diagnosis": self.diagnosis,
             "next_visit_date": self.next_visit_date.isoformat() if self.next_visit_date else None,
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -472,6 +479,7 @@ class TemperatureLog(db.Model):
             "temperature_celsius": self.temperature_celsius,
             "method": self.method,
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -510,6 +518,7 @@ class IllnessLog(db.Model):
             "symptoms": self.symptoms,
             "notes": self.notes,
             "is_ongoing": self.end_date is None,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -544,6 +553,7 @@ class MedicationLog(db.Model):
             "dosage": self.dosage,
             "timestamp": self.timestamp.isoformat() + "+07:00",
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -572,6 +582,7 @@ class MoodLog(db.Model):
             "timestamp": self.timestamp.isoformat() + "+07:00",
             "mood": self.mood,
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -605,6 +616,7 @@ class MilestoneLog(db.Model):
             "custom_label": self.custom_label,
             "achieved_date": self.achieved_date.isoformat(),
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -614,15 +626,32 @@ class ChildCaregiver(db.Model):
     """
     Relasi banyak-ke-banyak antara User dan Child — satu anak bisa punya
     beberapa pengasuh (orang tua, ART, dll), satu akun bisa akses beberapa anak.
+
+    Baris di tabel ini CUMA PERNAH merepresentasikan caregiver NON-PEMILIK
+    (`role` CUMA boleh `'editor'` atau `'viewer'`, ditegakkan CHECK
+    constraint di bawah — lihat Caregiver Roles & Permissions Phase 1,
+    backend/docs/ROLES_PERMISSIONS.md). PEMILIK anak SENGAJA TIDAK PERNAH
+    punya baris di sini — status pemilik SATU-SATUNYA sumber kebenarannya
+    tetap `Child.user_id` (lihat utils/access.py:resolve_role()), BUKAN
+    baris `role='owner'` di tabel ini kayak versi sebelumnya (yang bikin
+    2 sumber kebenaran ganda/kontradiktif buat 1 hal yang sama). Migrasi
+    Phase 1 (scripts/migrate_production.py) MENGHAPUS baris `role='owner'`
+    lama yang tersisa dari versi sebelumnya, dan mengonversi baris
+    `role='caregiver'` lama jadi `'editor'` (persis perilaku lama —
+    caregiver yang diundang SEBELUM fitur role ini selalu bisa
+    create/update/delete, sama kayak editor sekarang).
     """
     __tablename__ = "child_caregivers"
-    __table_args__ = (db.UniqueConstraint("child_id", "user_id", name="uq_child_caregiver"),)
+    __table_args__ = (
+        db.UniqueConstraint("child_id", "user_id", name="uq_child_caregiver"),
+        db.CheckConstraint("role IN ('editor', 'viewer')", name="ck_child_caregivers_role"),
+    )
 
     id = db.Column(db.Integer, primary_key=True)
     child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
 
-    role = db.Column(db.String(15), nullable=False, default="caregiver")  # 'owner' | 'caregiver'
+    role = db.Column(db.String(15), nullable=False, default="editor")  # 'editor' | 'viewer' — LIHAT docstring kelas
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     user = db.relationship("User")
@@ -655,12 +684,28 @@ class ChildInvite(db.Model):
     used_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     used_at = db.Column(db.DateTime, nullable=True)
 
+    # Peran yang DIPILIH PEMILIK pas bikin undangan ini ('editor' | 'viewer'
+    # — SAMA whitelist-nya kayak ChildCaregiver.role, ditegakkan CHECK
+    # constraint yang sama pola-nya di bawah). Diterapkan APA ADANYA ke
+    # ChildCaregiver.role begitu undangan ini dipakai (join_child) — user
+    # yang nerima undangan TIDAK PERNAH bisa milih/nimpa peran ini sendiri.
+    # Default 'editor' buat undangan yang dibikin SEBELUM kolom ini ada
+    # (lihat scripts/migrate_production.py) — PERSIS perilaku lama
+    # (caregiver yang gabung lewat undangan lama selalu bisa create/
+    # update/delete).
+    role = db.Column(db.String(15), nullable=False, default="editor")
+
     child = db.relationship("Child", backref=db.backref("invites", lazy="dynamic", cascade="all, delete-orphan"))
+
+    __table_args__ = (
+        db.CheckConstraint("role IN ('editor', 'viewer')", name="ck_child_invites_role"),
+    )
 
     def to_dict(self):
         return {
             "id": self.id,
             "code": self.code,
+            "role": self.role,
             "created_at": self.created_at.isoformat() + "Z",
             "expires_at": self.expires_at.isoformat() + "Z",
             "used": self.used_by is not None,

@@ -120,6 +120,12 @@ const testChild = {
   photo_filename: null,
   birth_weight_kg: 3.2,
   birth_height_cm: 50,
+  // Caregiver Roles & Permissions Phase 1 — SEMUA test existing di file
+  // ini nganggep izin tulis penuh (nambah/edit/hapus lewat quick-log
+  // bar) SEBELUM peran ini ada, jadi fixture default-nya "owner" biar
+  // perilaku LAMA tetap kepakai apa adanya — test KHUSUS role
+  // ada di describe block terpisah di bawah, pakai child object sendiri.
+  role: "owner",
 };
 
 function resetApiMock() {
@@ -735,5 +741,118 @@ describe("offline recovery — restoring pending records from IndexedDB", () => 
 
     expect(apiMock.updateFeeding).not.toHaveBeenCalled();
     expect(apiMock.deleteFeeding).not.toHaveBeenCalled();
+  });
+});
+
+// --------------------------------------------------------------------------
+// Caregiver Roles & Permissions Phase 1 — backend TETAP otoritatif buat
+// SEMUA keputusan izin (lihat backend/docs/ROLES_PERMISSIONS.md); test di
+// sini ngebuktiin frontend nyembunyiin kontrol yang bakal ditolak backend,
+// pakai `child.role` yang sekarang dikembalikan di respons child-scoped.
+// --------------------------------------------------------------------------
+
+const feedingItem = (overrides = {}) => ({
+  id: 42,
+  feed_type: "sufor",
+  volume_ml: 60,
+  duration_minutes: null,
+  breast_side: null,
+  timestamp: new Date().toISOString(),
+  created_by_user_id: 1,
+  ...overrides,
+});
+
+async function renderWithRole(role, itemOverrides) {
+  apiMock.listFeeding.mockResolvedValue([feedingItem(itemOverrides)]);
+  render(<Dashboard child={{ ...testChild, role }} onOpenProfile={() => {}} />);
+  await waitFor(() => expect(screen.queryByText("Memuat...")).not.toBeInTheDocument());
+  await screen.findByText("Sufor");
+}
+
+// "Tidur"/"Popok" muncul DUA kali di layar: sekali sebagai label legenda
+// statis (selalu ada, bukan tombol), sekali sebagai tombol quick-log —
+// helper ini nyari kemunculan yang beneran ada di dalam elemen <button>,
+// biar nggak ambigu ("Susu"/"Lainnya" nggak butuh ini, cuma muncul sekali).
+function quickLogButton(label) {
+  return screen.getAllByText(label).find((el) => el.closest("button"))?.closest("button") || null;
+}
+
+describe("Dashboard — Caregiver Roles & Permissions (Phase 1)", () => {
+  it("viewer sees the record but no quick-log bar and no active mutation controls", async () => {
+    await renderWithRole("viewer");
+
+    expect(screen.getByText("Sufor")).toBeInTheDocument();
+    expect(screen.queryByText("Susu")).not.toBeInTheDocument();
+    expect(quickLogButton("Tidur")).toBeNull();
+    expect(quickLogButton("Popok")).toBeNull();
+    expect(screen.queryByText("Lainnya")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Hapus catatan")).not.toBeInTheDocument();
+    expect(screen.queryByText("Duplikat")).not.toBeInTheDocument();
+
+    // klik item TIDAK membuka form edit buat viewer
+    await act(async () => screen.getByText("Sufor").closest("div").click());
+    expect(screen.queryByTestId("quick-log-sheet")).not.toBeInTheDocument();
+  });
+
+  it("an unknown/missing role defaults to the same read-only behavior as viewer", async () => {
+    apiMock.listFeeding.mockResolvedValue([feedingItem()]);
+    render(<Dashboard child={{ ...testChild, role: undefined }} onOpenProfile={() => {}} />);
+    await waitFor(() => expect(screen.queryByText("Memuat...")).not.toBeInTheDocument());
+    await screen.findByText("Sufor");
+
+    expect(screen.queryByText("Susu")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Hapus catatan")).not.toBeInTheDocument();
+  });
+
+  it("editor sees the quick-log bar (create) and can open the edit sheet on any record", async () => {
+    currentUserIdBox.value = 1;
+    // record dibuat OLEH ORANG LAIN (user 2) — editor tetap boleh UPDATE
+    // record siapa pun, cuma HAPUS yang dibatasi ke punya sendiri
+    await renderWithRole("editor", { created_by_user_id: 2 });
+
+    expect(screen.getByText("Susu")).toBeInTheDocument();
+    expect(quickLogButton("Tidur")).not.toBeNull();
+    expect(quickLogButton("Popok")).not.toBeNull();
+
+    await act(async () => screen.getByText("Sufor").closest("div").click());
+    expect(await screen.findByTestId("quick-log-sheet")).toBeInTheDocument();
+  });
+
+  it("editor sees a delete control only for their own records", async () => {
+    currentUserIdBox.value = 1;
+    await renderWithRole("editor", { created_by_user_id: 1 }); // record buatan sendiri
+
+    expect(screen.getByLabelText("Hapus catatan")).toBeInTheDocument();
+  });
+
+  it("editor does not see a delete control for a record created by someone else", async () => {
+    currentUserIdBox.value = 1;
+    await renderWithRole("editor", { created_by_user_id: 2 }); // record buatan orang lain
+
+    expect(screen.queryByLabelText("Hapus catatan")).not.toBeInTheDocument();
+  });
+
+  it("owner sees a delete control for records created by anyone, including legacy null-creator records", async () => {
+    currentUserIdBox.value = 1;
+    await renderWithRole("owner", { created_by_user_id: null });
+
+    expect(screen.getByLabelText("Hapus catatan")).toBeInTheDocument();
+  });
+
+  it("a backend 403 on a stale/exposed control shows a permission error inline, without crashing or logging the user out", async () => {
+    // `api` di file ini di-mock TOTAL (bukan importOriginal — lihat
+    // vi.mock di atas), jadi cukup Error biasa; Dashboard/QuickLogSheet
+    // cuma pernah baca `err.message`, nggak pernah cek `.kind` (itu CUMA
+    // relevan buat useOfflineSync.js, dites terpisah di file itu sendiri).
+    apiMock.createFeeding.mockRejectedValue(
+      new Error("Peran Anda hanya bisa melihat data, tidak bisa menambah/mengubah catatan."),
+    );
+    await renderWithRole("editor");
+
+    await openFeedingSheet();
+    await act(async () => screen.getByText("submit-sheet").click());
+
+    // modal TETAP kebuka (submit gagal) — bukan logout/redirect/crash
+    expect(await screen.findByTestId("quick-log-sheet")).toBeInTheDocument();
   });
 });

@@ -5,7 +5,7 @@ from flask import Blueprint, request, jsonify, session
 from extensions import db
 from models import Child, DoctorVisitLog, TemperatureLog, IllnessLog, MedicationLog, User
 from utils.telegram import notify_other_caregivers
-from utils.access import get_accessible_child
+from utils.access import get_accessible_child, resolve_role, can_delete_record, WRITE_ROLES
 from utils.auth import get_current_user_id
 from utils.idempotency import idempotent_create, compute_fingerprint
 from utils.timezone_utils import now_wib, today_wib, to_wib_naive
@@ -13,6 +13,9 @@ from utils.temperature_calc import classify_temperature
 from utils.audit import record_audit_event, snapshot_fields, diff_snapshots
 
 health_bp = Blueprint("health", __name__)
+
+NO_WRITE_ROLE_MESSAGE = "Peran Anda hanya bisa melihat data, tidak bisa menambah/mengubah catatan."
+NO_DELETE_PERMISSION_MESSAGE = "Anda tidak punya izin untuk menghapus catatan ini."
 
 
 def _owned_child(child_id):
@@ -47,11 +50,14 @@ def create_doctor_visit(child_id):
     if not child:
         return jsonify({"error": "Anak tidak ditemukan"}), 404
 
+    user_id = get_current_user_id()
+    if resolve_role(child, user_id) not in WRITE_ROLES:
+        return jsonify({"error": NO_WRITE_ROLE_MESSAGE}), 403
+
     data = request.get_json() or {}
     if not data.get("visit_date"):
         return jsonify({"error": "visit_date wajib diisi"}), 400
 
-    user_id = get_current_user_id()
     visit = DoctorVisitLog(
         created_by_user_id=user_id,
         child_id=child_id,
@@ -82,8 +88,11 @@ def update_or_delete_doctor_visit(visit_id):
         return jsonify({"error": "Tidak diizinkan"}), 403
 
     user_id = get_current_user_id()
+    role = resolve_role(child, user_id)
 
     if request.method == "DELETE":
+        if not can_delete_record(role, visit.created_by_user_id, user_id):
+            return jsonify({"error": NO_DELETE_PERMISSION_MESSAGE}), 403
         record_audit_event(
             child_id=visit.child_id, actor_user_id=user_id, action="delete",
             entity_type="doctor_visit", entity_id=visit.id, recorded_at=visit.visit_date,
@@ -91,6 +100,9 @@ def update_or_delete_doctor_visit(visit_id):
         db.session.delete(visit)
         db.session.commit()
         return jsonify({"success": True})
+
+    if role not in WRITE_ROLES:
+        return jsonify({"error": NO_WRITE_ROLE_MESSAGE}), 403
 
     data = request.get_json() or {}
     before = snapshot_fields(visit, "doctor_visit")
@@ -146,6 +158,10 @@ def create_temperature_log(child_id):
     if not child:
         return jsonify({"error": "Anak tidak ditemukan"}), 404
 
+    user_id = get_current_user_id()
+    if resolve_role(child, user_id) not in WRITE_ROLES:
+        return jsonify({"error": NO_WRITE_ROLE_MESSAGE}), 403
+
     data = request.get_json() or {}
     temp = data.get("temperature_celsius")
     if temp is None:
@@ -153,7 +169,6 @@ def create_temperature_log(child_id):
     if not (30 <= float(temp) <= 43):
         return jsonify({"error": "Suhu tidak wajar (30-43°C)"}), 400
 
-    user_id = get_current_user_id()
     log = TemperatureLog(
         created_by_user_id=user_id,
         child_id=child_id,
@@ -184,8 +199,11 @@ def update_or_delete_temperature_log(log_id):
         return jsonify({"error": "Tidak diizinkan"}), 403
 
     user_id = get_current_user_id()
+    role = resolve_role(child, user_id)
 
     if request.method == "DELETE":
+        if not can_delete_record(role, log.created_by_user_id, user_id):
+            return jsonify({"error": NO_DELETE_PERMISSION_MESSAGE}), 403
         record_audit_event(
             child_id=log.child_id, actor_user_id=user_id, action="delete",
             entity_type="temperature_log", entity_id=log.id, recorded_at=log.timestamp,
@@ -193,6 +211,9 @@ def update_or_delete_temperature_log(log_id):
         db.session.delete(log)
         db.session.commit()
         return jsonify({"success": True})
+
+    if role not in WRITE_ROLES:
+        return jsonify({"error": NO_WRITE_ROLE_MESSAGE}), 403
 
     data = request.get_json() or {}
     before = snapshot_fields(log, "temperature_log")
@@ -246,11 +267,14 @@ def create_illness_log(child_id):
     if not child:
         return jsonify({"error": "Anak tidak ditemukan"}), 404
 
+    user_id = get_current_user_id()
+    if resolve_role(child, user_id) not in WRITE_ROLES:
+        return jsonify({"error": NO_WRITE_ROLE_MESSAGE}), 403
+
     data = request.get_json() or {}
     if not data.get("illness_name") or not data.get("start_date"):
         return jsonify({"error": "illness_name dan start_date wajib diisi"}), 400
 
-    user_id = get_current_user_id()
     log = IllnessLog(
         created_by_user_id=user_id,
         child_id=child_id,
@@ -279,8 +303,11 @@ def update_or_delete_illness_log(log_id):
         return jsonify({"error": "Tidak diizinkan"}), 403
 
     user_id = get_current_user_id()
+    role = resolve_role(child, user_id)
 
     if request.method == "DELETE":
+        if not can_delete_record(role, log.created_by_user_id, user_id):
+            return jsonify({"error": NO_DELETE_PERMISSION_MESSAGE}), 403
         record_audit_event(
             child_id=log.child_id, actor_user_id=user_id, action="delete",
             entity_type="illness_log", entity_id=log.id, recorded_at=log.start_date,
@@ -288,6 +315,9 @@ def update_or_delete_illness_log(log_id):
         db.session.delete(log)
         db.session.commit()
         return jsonify({"success": True})
+
+    if role not in WRITE_ROLES:
+        return jsonify({"error": NO_WRITE_ROLE_MESSAGE}), 403
 
     data = request.get_json() or {}
     before = snapshot_fields(log, "illness_log")
@@ -336,6 +366,10 @@ def create_medication_log(child_id):
     if not child:
         return jsonify({"error": "Anak tidak ditemukan"}), 404
 
+    user_id = get_current_user_id()
+    if resolve_role(child, user_id) not in WRITE_ROLES:
+        return jsonify({"error": NO_WRITE_ROLE_MESSAGE}), 403
+
     data = request.get_json() or {}
     if not data.get("medication_name"):
         return jsonify({"error": "medication_name wajib diisi"}), 400
@@ -346,7 +380,6 @@ def create_medication_log(child_id):
         if not illness:
             return jsonify({"error": "illness_id tidak valid"}), 400
 
-    user_id = get_current_user_id()
     client_request_id = request.headers.get("X-Idempotency-Key")
     fingerprint = compute_fingerprint(data)
 
@@ -385,8 +418,11 @@ def update_or_delete_medication_log(log_id):
         return jsonify({"error": "Tidak diizinkan"}), 403
 
     user_id = get_current_user_id()
+    role = resolve_role(child, user_id)
 
     if request.method == "DELETE":
+        if not can_delete_record(role, log.created_by_user_id, user_id):
+            return jsonify({"error": NO_DELETE_PERMISSION_MESSAGE}), 403
         record_audit_event(
             child_id=log.child_id, actor_user_id=user_id, action="delete",
             entity_type="medication_log", entity_id=log.id, recorded_at=log.timestamp,
@@ -394,6 +430,9 @@ def update_or_delete_medication_log(log_id):
         db.session.delete(log)
         db.session.commit()
         return jsonify({"success": True})
+
+    if role not in WRITE_ROLES:
+        return jsonify({"error": NO_WRITE_ROLE_MESSAGE}), 403
 
     data = request.get_json() or {}
     before = snapshot_fields(log, "medication_log")

@@ -62,6 +62,15 @@ const CHILD_FIELDS = [
   "birth_weight_kg",
   "birth_height_cm",
   "photo_filename",
+  // Caregiver Roles & Permissions Phase 1 — peran EFEKTIF user yang
+  // login buat anak ini ("owner" | "editor" | "viewer"), dikirim
+  // backend di respons child-scoped yang sama. Cache LAMA (dari
+  // sebelum field ini ada) nggak bakal punya key ini sama sekali —
+  // utils/roles.js:canWrite()/isOwner() SENGAJA nganggep role yang
+  // undefined/null sebagai read-only, jadi UI otomatis fallback aman
+  // sampai server dikonfirmasi ulang, TIDAK PERNAH diam-diam
+  // mengasumsikan izin penuh.
+  "role",
 ];
 
 function pickChildFields(child) {

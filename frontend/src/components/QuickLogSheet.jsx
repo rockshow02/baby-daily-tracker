@@ -489,7 +489,7 @@ export default function QuickLogSheet({ type, onClose, onSubmit, onDelete, editi
             {submitting ? "Menyimpan..." : isEdit ? "Simpan Perubahan" : "Simpan"}
           </button>
         </div>
-        {isEdit && (
+        {isEdit && onDelete && (
           <button
             type="button"
             onClick={handleDelete}

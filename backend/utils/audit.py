@@ -102,6 +102,33 @@ PRIVATE_CHANGED_FIELDS = {
 # ("entity_type harus salah satu dari: ...") dan buat frontend allowlist.
 ENTITY_TYPES = tuple(SAFE_CHANGED_FIELDS.keys())
 
+# --- Event keamanan membership caregiver (Caregiver Roles & Permissions
+# Phase 1, lihat backend/docs/ROLES_PERMISSIONS.md) ---
+#
+# Entity_type TERPISAH dari 12 tipe record di atas (SENGAJA nggak
+# digabung ke SAFE_CHANGED_FIELDS/ENTITY_TYPES — 2 makna yang beda: "12
+# tipe record medis anak" vs "1 kejadian keamanan soal SIAPA yang boleh
+# akses anak ini", nyampur keduanya bikin allowlist di atas jadi
+# ambigu). Ini perluasan MINIMAL & KOMPATIBEL ke skema yang udah ada:
+# REUSE 3 ACTIONS yang UDAH ADA (nggak nambah action baru sama sekali)
+# — `create` = caregiver diundang, `update` = peran caregiver diubah,
+# `delete` = akses caregiver dicabut. `entity_id` = ChildInvite.id (buat
+# create/"diundang") ATAU ChildCaregiver.id (buat update/delete —
+# "diubah"/"dicabut"), persis pola "id record aslinya" yang sama kayak
+# 12 tipe lain.
+#
+# `changed_fields` SELALU None/kosong buat KETIGANYA — kebijakan Phase 1
+# SENGAJA TIDAK PERNAH nyimpen peran lama/baru di audit trail sama
+# sekali (beda dari 12 tipe record yang minimal nyimpen NAMA field aman
+# yang berubah) — cukup metadata "APA yang kejadian, SIAPA pelakunya
+# (actor_user_id), KAPAN" — TIDAK PERNAH email, token undangan, atau
+# nilai peran apa pun.
+MEMBERSHIP_ENTITY_TYPE = "caregiver_membership"
+
+# Dipakai endpoint baca (routes/audit_routes.py) buat validasi query
+# param `entity_type` — 12 tipe record + 1 tipe event membership ini.
+ALL_ENTITY_TYPES = ENTITY_TYPES + (MEMBERSHIP_ENTITY_TYPE,)
+
 
 def _tracked_fields(entity_type):
     """Union field aman + privat buat 1 entity_type — SEMUA field mutable yang di-snapshot buat deteksi perubahan."""
@@ -144,14 +171,21 @@ def record_audit_event(*, child_id, actor_user_id, action, entity_type, entity_i
     kesalahan di sini artinya ada bug di kode server sendiri (bukan input
     user), dan mending ketauan pas development/test daripada diam-diam
     nyimpen audit event yang salah kategori.
+
+    `entity_type=MEMBERSHIP_ENTITY_TYPE` ("caregiver_membership" — lihat
+    komentar di atas) SENGAJA nggak punya entry di SAFE_CHANGED_FIELDS
+    sama sekali — `changed_fields` buat entity_type ini SELALU dipaksa
+    None, TIDAK PEDULI apa pun yang dikirim pemanggil (bukan cuma
+    "disaring", kebijakan Phase 1 buat kejadian ini emang nggak pernah
+    nyimpen nama field apa pun).
     """
     if action not in ACTIONS:
         raise ValueError(f"action tidak valid: {action!r}")
-    if entity_type not in SAFE_CHANGED_FIELDS:
+    if entity_type not in SAFE_CHANGED_FIELDS and entity_type != MEMBERSHIP_ENTITY_TYPE:
         raise ValueError(f"entity_type tidak valid: {entity_type!r}")
 
     safe_fields = None
-    if changed_fields:
+    if changed_fields and entity_type in SAFE_CHANGED_FIELDS:
         allowed = SAFE_CHANGED_FIELDS[entity_type]
         safe_names = sorted({f for f in changed_fields if f in allowed})
         has_marker = PRIVATE_MARKER in changed_fields

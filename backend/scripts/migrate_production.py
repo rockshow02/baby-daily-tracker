@@ -25,7 +25,7 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 
 from app import create_app
 from extensions import db
-from models import CaregiverAuditEvent, Child, User
+from models import CaregiverAuditEvent, Child, ChildCaregiver, User
 
 # (nama_tabel, nama_kolom, definisi_SQL_kolom) — kolom baru yang mungkin
 # belum ada di database production yang udah lama nggak di-reset
@@ -52,6 +52,12 @@ COLUMNS_TO_ENSURE = [
     # sebelumnya (mis. udah sempat dicoba di staging) sebelum kolom ini ditambahkan,
     # baris ini yang nambahin kolomnya tanpa nyentuh baris yang udah ada.
     ("idempotency_keys", "fingerprint", "VARCHAR(64)"),
+    # Caregiver Roles & Permissions Phase 1 (lihat backend/docs/ROLES_PERMISSIONS.md)
+    # — peran yang DIPILIH pemilik pas bikin undangan. DEFAULT 'editor'
+    # buat baris undangan LAMA yang dibikin SEBELUM kolom ini ada (PERSIS
+    # perilaku lama: caregiver yang gabung lewat undangan lama selalu
+    # bisa create/update/delete, sama kayak editor sekarang).
+    ("child_invites", "role", "VARCHAR(15) NOT NULL DEFAULT 'editor'"),
 ]
 
 
@@ -163,11 +169,115 @@ def _ensure_audit_actor_fk_set_null():
         print(f"  OK: tabel '{TABLE_NAME}' udah dibangun ulang, FK 'actor_user_id' sekarang 'ON DELETE SET NULL', semua baris lama tetap ada.")
 
 
+def _child_caregivers_has_role_check_constraint(engine):
+    """
+    True kalau tabel `child_caregivers` di database ini UDAH punya CHECK
+    constraint `role IN ('editor','viewer')` (skema Phase 1 terbaru — lihat
+    models.py:ChildCaregiver). Dicek lewat `sqlite_master.sql` mentah
+    (bukan `inspector.get_check_constraints()`) — cara paling sederhana &
+    stabil buat SQLite, nggak bergantung versi SQLAlchemy tertentu buat
+    refleksi CHECK constraint.
+    """
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT sql FROM sqlite_master WHERE type='table' AND name='child_caregivers'")
+        ).fetchone()
+    if not row or not row[0]:
+        return False
+    return "CHECK" in row[0].upper()
+
+
+def _migrate_child_caregiver_roles():
+    """
+    Migrasi SQLite KHUSUS Caregiver Roles & Permissions Phase 1 (lihat
+    backend/docs/ROLES_PERMISSIONS.md): skema LAMA nyimpen `role='owner'`
+    (baris redundan buat si pemilik — status pemilik SEKARANG SATU-
+    SATUNYA sumber kebenarannya `Child.user_id`, lihat models.py:
+    ChildCaregiver docstring) dan `role='caregiver'` (caregiver biasa,
+    yang sekarang jadi 'editor'). Migrasi ini:
+
+      1. BUANG baris `role='owner'` (redundan, nggak pernah lagi
+         dipakai/dibaca kode Phase 1 — resolve_role() SELALU cek
+         Child.user_id duluan, nggak pernah nengok baris ini).
+      2. UBAH `role='caregiver'` jadi `'editor'` (PERSIS perilaku lama —
+         caregiver yang diundang SEBELUM fitur peran ini selalu bisa
+         create/update/delete, sama kayak editor sekarang).
+      3. Tegakkan CHECK constraint `role IN ('editor','viewer')` di
+         skema tabel barunya (SQLite nggak bisa ALTER TABLE nambah CHECK
+         ke tabel yang udah ada, jadi tabelnya dibangun ulang — rename +
+         copy DENGAN TRANSFORMASI, bukan drop+create ulang dari nol).
+
+    IDEMPOTEN: kalau tabelnya belum ada sama sekali (db.create_all() di
+    bawah bakal bikin dari skema terbaru, otomatis udah bener), ATAU
+    CHECK constraint-nya UDAH ada (migrasi ini udah pernah jalan), fungsi
+    ini nggak ngapa-ngapain sama sekali.
+    """
+    engine = db.engine
+    inspector = inspect(engine)
+    if "child_caregivers" not in inspector.get_table_names():
+        print("  'child_caregivers' belum ada sama sekali — dilewatin (db.create_all() di bawah bakal bikin dari skema terbaru).")
+        return
+    if _child_caregivers_has_role_check_constraint(engine):
+        print("  'child_caregivers.role' udah punya CHECK constraint (editor/viewer) — dilewatin.")
+        return
+
+    print("  'child_caregivers' masih skema lama (role bisa 'owner'/'caregiver') — bangun ulang tabel (data non-owner TETAP dipertahankan)...")
+
+    temp_metadata = MetaData()
+    Child.__table__.to_metadata(temp_metadata)
+    User.__table__.to_metadata(temp_metadata)
+    new_table = ChildCaregiver.__table__.to_metadata(temp_metadata, name="child_caregivers_new")
+
+    dialect = sqlite_dialect.dialect()
+    create_table_sql = str(CreateTable(new_table).compile(dialect=dialect))
+    final_index_sqls = [str(CreateIndex(ix).compile(dialect=dialect)) for ix in ChildCaregiver.__table__.indexes]
+
+    raw_conn = engine.raw_connection()
+    try:
+        cursor = raw_conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        cursor.execute("BEGIN")
+        cursor.execute(create_table_sql)
+        # Transformasi data pas nyalin: 'owner' DIBUANG (WHERE role !=
+        # 'owner'), 'caregiver' jadi 'editor' (CASE), nilai lain (udah
+        # 'editor'/'viewer', kalau migrasi ini kebetulan dijalankan di
+        # skema yang sebagian udah termigrasi) disalin apa adanya.
+        cursor.execute(
+            "INSERT INTO child_caregivers_new (id, child_id, user_id, role, created_at) "
+            "SELECT id, child_id, user_id, "
+            "CASE WHEN role = 'caregiver' THEN 'editor' ELSE role END, "
+            "created_at "
+            "FROM child_caregivers WHERE role != 'owner'"
+        )
+        cursor.execute("DROP TABLE child_caregivers")
+        cursor.execute("ALTER TABLE child_caregivers_new RENAME TO child_caregivers")
+        for stmt in final_index_sqls:
+            cursor.execute(stmt)
+        raw_conn.commit()
+    except Exception:
+        raw_conn.rollback()
+        raise
+    finally:
+        cursor = raw_conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        integrity_violations = cursor.execute("PRAGMA foreign_key_check").fetchall()
+        cursor.close()
+        raw_conn.close()
+
+    if integrity_violations:
+        print(f"  PERINGATAN: PRAGMA foreign_key_check nemu {len(integrity_violations)} masalah setelah migrasi peran!")
+    else:
+        print("  OK: 'child_caregivers' dibangun ulang — baris 'owner' dibuang, 'caregiver' jadi 'editor', CHECK constraint aktif.")
+
+
 def migrate():
     app = create_app()
     with app.app_context():
         print("=== Migrasi FK 'caregiver_audit_events.actor_user_id' (ON DELETE SET NULL) ===")
         _ensure_audit_actor_fk_set_null()
+
+        print("\n=== Migrasi peran 'child_caregivers.role' (Caregiver Roles & Permissions Phase 1) ===")
+        _migrate_child_caregiver_roles()
 
         inspector = inspect(db.engine)
         existing_tables = inspector.get_table_names()

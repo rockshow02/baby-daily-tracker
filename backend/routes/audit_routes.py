@@ -13,7 +13,7 @@ from flask import Blueprint, request, jsonify
 from models import CaregiverAuditEvent
 from utils.access import get_accessible_child
 from utils.auth import get_current_user_id
-from utils.audit import ACTIONS, ENTITY_TYPES
+from utils.audit import ACTIONS, ALL_ENTITY_TYPES
 
 audit_bp = Blueprint("audit", __name__)
 
@@ -65,8 +65,8 @@ def list_audit_events(child_id):
         return jsonify({"error": f"action harus salah satu dari: {', '.join(ACTIONS)}"}), 400
 
     entity_type = request.args.get("entity_type")
-    if entity_type is not None and entity_type not in ENTITY_TYPES:
-        return jsonify({"error": f"entity_type harus salah satu dari: {', '.join(ENTITY_TYPES)}"}), 400
+    if entity_type is not None and entity_type not in ALL_ENTITY_TYPES:
+        return jsonify({"error": f"entity_type harus salah satu dari: {', '.join(ALL_ENTITY_TYPES)}"}), 400
 
     actor_filter, err = _parse_positive_int(request.args.get("actor_user_id"), "actor_user_id")
     if err:
