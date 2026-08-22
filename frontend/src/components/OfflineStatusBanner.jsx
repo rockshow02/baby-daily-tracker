@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { useOfflineSync } from "../hooks/useOfflineSync";
 import { useAuth } from "../context/AuthContext";
 import QueueReviewPanel from "./QueueReviewPanel";
 
@@ -13,7 +12,15 @@ const STATUS_STYLE = {
   synced: "bg-feed/15 text-feed",
 };
 
-export default function OfflineStatusBanner() {
+/**
+ * `sync`: hasil SATU-SATUNYA panggilan useOfflineSync() yang dipasang di
+ * App.jsx (AuthenticatedAppShell) — komponen ini SENGAJA nggak manggil
+ * hook-nya sendiri lagi, biar nggak ada 2 loop auto-sync yang balapan.
+ * `onOpenDetail`: buka Sync Center yang sama yang bisa dibuka lewat menu
+ * "🔄 Status Sinkronisasi" — state showSyncCenter juga dipegang di level
+ * yang sama (App.jsx), bukan duplikat di sini.
+ */
+export default function OfflineStatusBanner({ sync, onOpenDetail }) {
   const {
     status,
     pendingCount,
@@ -24,7 +31,7 @@ export default function OfflineStatusBanner() {
     discardItem,
     claimLegacyItem,
     retryWithEdits,
-  } = useOfflineSync();
+  } = sync;
   const { logout } = useAuth();
   const [showReview, setShowReview] = useState(false);
 
@@ -75,6 +82,11 @@ export default function OfflineStatusBanner() {
         {status === "needs_review" && (
           <button onClick={() => setShowReview((v) => !v)} className="underline underline-offset-2">
             {showReview ? "Tutup" : "Lihat"}
+          </button>
+        )}
+        {onOpenDetail && (
+          <button onClick={onOpenDetail} className="underline underline-offset-2">
+            Detail
           </button>
         )}
       </div>

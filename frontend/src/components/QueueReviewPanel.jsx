@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { describeQueueItem, REVIEW_REASON } from "../utils/offlineQueue";
 import {
   FIELD_TYPE,
@@ -102,8 +102,19 @@ function SummaryChips({ summary }) {
   );
 }
 
-function DiscardControl({ onConfirm }) {
-  const [confirming, setConfirming] = useState(false);
+// `onConfirmingChange` opsional (dipanggil dengan true/false) — dipakai
+// SyncCenter buat tau kapan ADA konfirmasi buang yang lagi kebuka di mana
+// pun di panel ini, biar Escape/klik-luar nggak nutup seluruh Sync
+// Center sambil user lagi di tengah konfirmasi 2-langkah ini (lihat
+// components/SyncCenter.jsx). Opsional & default no-op — pemakaian lama
+// (OfflineStatusBanner) yang nggak ngasih prop ini tetap jalan sama
+// persis kayak sebelumnya.
+function DiscardControl({ onConfirm, onConfirmingChange }) {
+  const [confirming, setConfirmingRaw] = useState(false);
+  const setConfirming = (value) => {
+    setConfirmingRaw(value);
+    onConfirmingChange?.(value);
+  };
   if (!confirming) {
     return (
       <button onClick={() => setConfirming(true)} className="underline underline-offset-2 text-warn">
@@ -114,7 +125,13 @@ function DiscardControl({ onConfirm }) {
   return (
     <span className="flex items-center gap-2">
       <span className="text-ink-faint">Yakin?</span>
-      <button onClick={onConfirm} className="underline underline-offset-2 text-warn">
+      <button
+        onClick={() => {
+          setConfirming(false);
+          onConfirm();
+        }}
+        className="underline underline-offset-2 text-warn"
+      >
         Buang
       </button>
       <button onClick={() => setConfirming(false)} className="underline underline-offset-2 text-ink-faint">
@@ -124,7 +141,7 @@ function DiscardControl({ onConfirm }) {
   );
 }
 
-function NeedsReviewCard({ item, onDiscard, onRetry }) {
+function NeedsReviewCard({ item, onDiscard, onRetry, onConfirmingChange }) {
   const { typeLabel, summary } = describeQueueItem(item);
   const parsedBody = safeParseBody(item);
   const schema = getEditableSchema(typeLabel);
@@ -204,13 +221,15 @@ function NeedsReviewCard({ item, onDiscard, onRetry }) {
             </button>
           </>
         )}
-        {!editing && <DiscardControl onConfirm={() => onDiscard(item.id)} />}
+        {!editing && (
+          <DiscardControl onConfirm={() => onDiscard(item.id)} onConfirmingChange={onConfirmingChange} />
+        )}
       </div>
     </div>
   );
 }
 
-function LegacyCard({ item, onDiscard, onClaim }) {
+function LegacyCard({ item, onDiscard, onClaim, onConfirmingChange }) {
   // SENGAJA cuma ambil typeLabel — childId/summary (data kesehatan bayi)
   // TIDAK ditampilin sebelum kepemilikan diverifikasi backend. Endpoint
   // mentah dan body request juga nggak pernah dirender di sini.
@@ -246,7 +265,7 @@ function LegacyCard({ item, onDiscard, onClaim }) {
         >
           {claiming ? "Memeriksa..." : "Klaim akun ini"}
         </button>
-        <DiscardControl onConfirm={() => onDiscard(item.id)} />
+        <DiscardControl onConfirm={() => onDiscard(item.id)} onConfirmingChange={onConfirmingChange} />
       </div>
     </div>
   );
@@ -258,16 +277,40 @@ export default function QueueReviewPanel({
   discardItem,
   claimLegacyItem,
   retryWithEdits,
+  onAnyConfirmingChange,
 }) {
+  // Melacak SEMUA card yang lagi nampilin konfirmasi "Yakin?" (bisa lebih
+  // dari 1 kalau user buka konfirmasi di beberapa card sebelum mutusin) —
+  // aggregatnya (ada minimal 1 yang confirming atau nggak sama sekali)
+  // yang diteruskan ke pemanggil, BUKAN detail per-item.
+  const confirmingIdsRef = useRef(new Set());
+  const handleConfirmingChange = (itemId) => (isConfirming) => {
+    if (isConfirming) confirmingIdsRef.current.add(itemId);
+    else confirmingIdsRef.current.delete(itemId);
+    onAnyConfirmingChange?.(confirmingIdsRef.current.size > 0);
+  };
+
   if (needsReviewItems.length === 0 && legacyItems.length === 0) return null;
 
   return (
     <div className="px-4 pb-3 space-y-2 text-xs">
       {legacyItems.map((item) => (
-        <LegacyCard key={item.id} item={item} onDiscard={discardItem} onClaim={claimLegacyItem} />
+        <LegacyCard
+          key={item.id}
+          item={item}
+          onDiscard={discardItem}
+          onClaim={claimLegacyItem}
+          onConfirmingChange={handleConfirmingChange(item.id)}
+        />
       ))}
       {needsReviewItems.map((item) => (
-        <NeedsReviewCard key={item.id} item={item} onDiscard={discardItem} onRetry={retryWithEdits} />
+        <NeedsReviewCard
+          key={item.id}
+          item={item}
+          onDiscard={discardItem}
+          onRetry={retryWithEdits}
+          onConfirmingChange={handleConfirmingChange(item.id)}
+        />
       ))}
     </div>
   );

@@ -10,6 +10,7 @@ import {
   getCurrentUserId,
 } from "../api/client";
 import { cacheUserProfile, getCachedUserProfile, clearUserCache } from "../utils/sessionCache";
+import { clearLastSyncedAt } from "../utils/syncMetadata";
 
 const AuthContext = createContext(null);
 
@@ -48,7 +49,15 @@ export function AuthProvider({ children }) {
     setUser(null);
     clearToken();
     clearCurrentUser();
-    if (uid != null) clearUserCache(uid);
+    if (uid != null) {
+      clearUserCache(uid);
+      // Konsisten sama kebijakan cache per-user lain di atas — lihat
+      // utils/syncMetadata.js buat kenapa ini AMAN (nggak sensitif) tapi
+      // tetap dibersihkan buat konsistensi. Antrian offline ITU SENDIRI
+      // (utils/offlineQueue.js) TIDAK disentuh di sini — logout nggak
+      // pernah menghapus catatan yang masih nunggu disinkron.
+      clearLastSyncedAt(uid);
+    }
     setIsOfflineSession(false);
   }, []);
 

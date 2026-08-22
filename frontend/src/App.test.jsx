@@ -355,3 +355,95 @@ describe("App — logout preserves the queue but isolates it from other accounts
     expect(await getQueueForUser(5)).toHaveLength(1); // tetap ada, cuma nggak keliatan/tersinkron buat user 6
   });
 });
+
+describe("App — Sync Center (single authoritative sync controller)", () => {
+  async function renderAuthenticated() {
+    setToken("tok-5");
+    setCurrentUser(5);
+    apiMock.me.mockResolvedValue(testUser);
+    apiMock.listChildren.mockResolvedValue([testChild]);
+    setOnline(true);
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByText("Dedek").length).toBeGreaterThan(0));
+  }
+
+  it("is reachable from the app menu ('🔄 Status Sinkronisasi') even while sync status is idle (nothing pending)", async () => {
+    await renderAuthenticated();
+    expect(await getQueue()).toHaveLength(0); // status idle — nada pending sama sekali
+
+    fireEvent.click(screen.getByText("☰"));
+    const entry = await screen.findByText("Status Sinkronisasi");
+    fireEvent.click(entry);
+
+    expect(await screen.findByRole("dialog", { name: "Status Sinkronisasi" })).toBeInTheDocument();
+    expect(screen.getByText("Belum pernah tersinkron")).toBeInTheDocument();
+  });
+
+  it("banner's 'Detail' action opens the exact same Sync Center dialog", async () => {
+    await renderAuthenticated();
+    await seedFeedingQueueItem();
+    await waitFor(() => expect(screen.getByText("Detail")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("Detail"));
+
+    expect(await screen.findByRole("dialog", { name: "Status Sinkronisasi" })).toBeInTheDocument();
+  });
+
+  it("Sync Center reflects a newly queued item live, with no need to reopen it — proving a single shared controller (not an isolated second instance)", async () => {
+    await renderAuthenticated();
+
+    fireEvent.click(screen.getByText("☰"));
+    fireEvent.click(await screen.findByText("Status Sinkronisasi"));
+    await screen.findByRole("dialog", { name: "Status Sinkronisasi" });
+    expect(screen.getByText("Tidak ada catatan yang perlu disinkronkan saat ini.")).toBeInTheDocument();
+
+    // item baru di-enqueue LANGSUNG lewat IndexedDB (dispatch
+    // QUEUE_CHANGE_EVENT) — bukan lewat interaksi UI Sync Center itu
+    // sendiri. Kalau AuthenticatedAppShell nge-mount 2 instance
+    // useOfflineSync yang independen (1 buat banner, 1 lagi buat
+    // SyncCenter), dialog yang UDAH KEBUKA ini nggak akan pernah tau ada
+    // perubahan dari luar — cuma instance TERPUSAT yang dengar event global
+    // ini yang bisa bikin dialog yang lagi kebuka update live begini.
+    await act(async () => {
+      await seedFeedingQueueItem();
+    });
+
+    await waitFor(() =>
+      expect(screen.queryByText("Tidak ada catatan yang perlu disinkronkan saat ini.")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("a manual sync triggered from the Sync Center actually syncs the queued item exactly once", async () => {
+    setToken("tok-5");
+    setCurrentUser(5);
+    apiMock.me.mockResolvedValue(testUser);
+    apiMock.listChildren.mockResolvedValue([testChild]);
+    setOnline(true);
+    // fetch mentah sukses SEJAK AWAL (bukan default reject di beforeEach)
+    // — biar item yang di-seed SEBELUM render nggak sempat kena backoff
+    // dari percobaan gagal duluan pas mount, yang bakal bikin klik manual
+    // ini nabrak jadwal retry yang belum waktunya.
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, status: 201, headers: { get: () => null } });
+    await seedFeedingQueueItem();
+
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByText("Dedek").length).toBeGreaterThan(0));
+    // mount auto-sync (online + ada item) kemungkinan udah langsung
+    // nyinkron duluan — tunggu itu beres dulu biar starting point-nya jelas
+    await waitFor(async () => expect(await getQueue()).toHaveLength(0));
+
+    await seedFeedingQueueItem({ clientRequestId: "app-test-key-2" });
+    global.fetch.mockClear();
+
+    fireEvent.click(screen.getByText("☰"));
+    fireEvent.click(await screen.findByText("Status Sinkronisasi"));
+    await screen.findByRole("dialog", { name: "Status Sinkronisasi" });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Sinkronkan sekarang"));
+    });
+
+    await waitFor(async () => expect(await getQueue()).toHaveLength(0));
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+});

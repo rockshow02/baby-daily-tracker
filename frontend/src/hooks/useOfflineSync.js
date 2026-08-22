@@ -9,8 +9,10 @@ import {
   describeQueueItem,
   QUEUE_STATUS,
   REVIEW_REASON,
+  QUEUE_CHANGE_EVENT,
 } from "../utils/offlineQueue";
 import { getToken, getCurrentUserId, generateRequestId, api } from "../api/client";
+import { getLastSyncedAt, setLastSyncedAt } from "../utils/syncMetadata";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
@@ -41,6 +43,31 @@ async function readErrorMessage(res) {
   return `Server menolak request ini (${res.status})`;
 }
 
+// Sama persis format request ID yang divalidasi backend (lihat
+// backend/utils/observability.py:REQUEST_ID_RE) — whitelist ketat, bukan
+// blacklist, biar nggak mungkin ada karakter aneh/kontrol/newline yang
+// nyelip ke tampilan atau ke penyimpanan lewat header ini. Header respons
+// diperlakukan sebagai DATA TIDAK TERPERCAYA sepenuhnya: kalau formatnya
+// nggak persis cocok, dianggap TIDAK ADA (bukan disaring sebagian).
+const SAFE_REQUEST_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * Ambil X-Request-ID dari respons server buat troubleshooting — CUMA
+ * kalau formatnya cocok whitelist di atas. Nggak pernah men-generate ID
+ * palsu kalau headernya nggak ada (mis. kegagalan jaringan murni, yang
+ * memang nggak pernah nyampe ke server sama sekali).
+ */
+function extractSafeRequestId(res) {
+  try {
+    const raw = res?.headers?.get?.("X-Request-ID");
+    if (!raw) return null;
+    const trimmed = String(raw).trim();
+    return SAFE_REQUEST_ID_RE.test(trimmed) ? trimmed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 /**
  * Hook buat pantau status koneksi + auto-sync antrian offline begitu
  * online lagi. Dipasang sekali di level App (cuma pas user login — lihat
@@ -57,8 +84,22 @@ export function useOfflineSync() {
   // 'idle' | 'auth_required' | 'retry_scheduled' | 'synced'
   const [runState, setRunState] = useState("idle");
   const [pendingCount, setPendingCount] = useState(0);
+  // Item pending (BUKAN needs_review) milik user yang lagi login — dipakai
+  // buat "ringkasan catatan nunggu" di Sync Center. `pendingCount` di atas
+  // TETAP dipertahankan terpisah (bukan diturunkan dari .length di tempat
+  // pakai) biar kode lama yang cuma butuh angkanya nggak perlu berubah.
+  const [pendingItems, setPendingItems] = useState([]);
   const [needsReviewItems, setNeedsReviewItems] = useState([]);
   const [legacyItems, setLegacyItems] = useState([]);
+  // ISO string atau null — kapan terakhir SEMUA catatan milik user yang
+  // lagi login berhasil tersinkron penuh (lihat utils/syncMetadata.js).
+  // Dibaca lazy pas mount hook ini — hook ini SENGAJA cuma dipasang 1
+  // instance per SESI LOGIN (lihat App.jsx: dipasang di dalam shell yang
+  // mount/unmount ngikutin ada-tidaknya user login), jadi "user aktif
+  // berubah" (login/logout/ganti akun) SELALU berarti hook ini di-mount
+  // ULANG dari nol — nilai awal yang dibaca di sini otomatis selalu milik
+  // user yang lagi login, nggak pernah kebawa dari sesi sebelumnya.
+  const [lastSyncedAt, setLastSyncedAtState] = useState(() => getLastSyncedAt(getCurrentUserId()));
 
   const syncingRef = useRef(false);
   const retryTimerRef = useRef(null);
@@ -68,7 +109,9 @@ export function useOfflineSync() {
     try {
       const userId = getCurrentUserId();
       const mine = userId != null ? await getQueueForUser(userId) : [];
-      setPendingCount(mine.filter((i) => i.status !== QUEUE_STATUS.NEEDS_REVIEW).length);
+      const pending = mine.filter((i) => i.status !== QUEUE_STATUS.NEEDS_REVIEW);
+      setPendingCount(pending.length);
+      setPendingItems(pending);
       setNeedsReviewItems(mine.filter((i) => i.status === QUEUE_STATUS.NEEDS_REVIEW));
       // item legacy TIDAK difilter per-userId (kepemilikannya belum
       // dipastikan) — tapi tetap harus keliatan biar bisa di-klaim/dibuang,
@@ -144,13 +187,19 @@ export function useOfflineSync() {
             body: item.body,
           });
         } catch (_networkError) {
-          // masih offline / gagal jaringan — retain, backoff, stop run
+          // masih offline / gagal jaringan — retain, backoff, stop run.
+          // Gagal jaringan MURNI nggak pernah nyampe ke server sama
+          // sekali, jadi nggak mungkin ada X-Request-ID beneran —
+          // lastRequestId eksplisit di-null-kan (bukan dibiarin field
+          // lama nyangkut) biar diagnostik yang ditampilin selalu cocok
+          // sama percobaan TERAKHIR, bukan sisa kegagalan tipe lain.
           const attempts = (item.attempts || 0) + 1;
           const delay = computeBackoffMs(attempts - 1);
           await updateQueueItem(item.id, {
             attempts,
             nextRetryAt: new Date(Date.now() + delay).toISOString(),
             lastError: "Gagal terhubung ke server, akan dicoba lagi.",
+            lastRequestId: null,
           });
           retryTimerRef.current = setTimeout(syncQueue, delay);
           setRunState("retry_scheduled");
@@ -179,6 +228,7 @@ export function useOfflineSync() {
             status: QUEUE_STATUS.NEEDS_REVIEW,
             reviewReason: REVIEW_REASON.ACCESS_REVOKED,
             lastError: "Kamu mungkin sudah tidak punya akses ke anak ini.",
+            lastRequestId: extractSafeRequestId(res),
           });
           continue;
         }
@@ -191,6 +241,7 @@ export function useOfflineSync() {
             attempts,
             nextRetryAt: new Date(Date.now() + delay).toISOString(),
             lastError: "Server sedang sibuk, akan dicoba lagi.",
+            lastRequestId: extractSafeRequestId(res),
           });
           retryTimerRef.current = setTimeout(syncQueue, delay);
           setRunState("retry_scheduled");
@@ -204,6 +255,7 @@ export function useOfflineSync() {
             attempts,
             nextRetryAt: new Date(Date.now() + delay).toISOString(),
             lastError: "Server sedang bermasalah, akan dicoba lagi.",
+            lastRequestId: extractSafeRequestId(res),
           });
           retryTimerRef.current = setTimeout(syncQueue, delay);
           setRunState("retry_scheduled");
@@ -227,6 +279,7 @@ export function useOfflineSync() {
             reviewReason: REVIEW_REASON.CONFLICT,
             lastError:
               "Request ini sudah pernah diproses server dengan data yang berbeda — tidak disimpan otomatis lagi.",
+            lastRequestId: extractSafeRequestId(res),
           });
           continue;
         }
@@ -243,6 +296,7 @@ export function useOfflineSync() {
           status: QUEUE_STATUS.NEEDS_REVIEW,
           reviewReason: REVIEW_REASON.VALIDATION,
           lastError: message,
+          lastRequestId: extractSafeRequestId(res),
         });
       }
 
@@ -252,6 +306,24 @@ export function useOfflineSync() {
       setSyncing(false);
       await refreshCounts();
       if (removedAny) {
+        // "Berhasil drain semua" CUMA dicatat kalau larinya ini BENERAN
+        // ngosongin semua catatan normal (pending) DAN nggak nyisain
+        // satupun yang perlu ditinjau punya user yang lagi login — bukan
+        // sekadar "1 item sukses tapi masih ada 3 lagi", dan BUKAN
+        // "kebetulan udah kosong dari awal tanpa larinya ini beneran
+        // ngapa-ngapain" (makanya di dalam `if (removedAny)`, bukan
+        // dicek tanpa syarat).
+        const currentUserId = getCurrentUserId();
+        if (currentUserId != null) {
+          const mine = await getQueueForUser(currentUserId);
+          const stillPending = mine.filter((i) => i.status !== QUEUE_STATUS.NEEDS_REVIEW).length;
+          const stillNeedsReview = mine.length - stillPending;
+          if (stillPending === 0 && stillNeedsReview === 0) {
+            const now = new Date().toISOString();
+            setLastSyncedAt(currentUserId, now);
+            setLastSyncedAtState(now);
+          }
+        }
         clearTimeout(syncedResetTimerRef.current);
         syncedResetTimerRef.current = setTimeout(() => setRunState("idle"), 3000);
       }
@@ -271,12 +343,27 @@ export function useOfflineSync() {
     };
     const handleOffline = () => setIsOnline(false);
 
+    // Reaksi ke PERUBAHAN antrian dari MANA AJA (item baru diantrikan
+    // client.js:queueOfflineRequest, item diupdate/dihapus dari luar
+    // syncQueue ini sendiri, dst) — SENGAJA cuma refreshCounts() (baca
+    // ulang state buat ditampilin), BUKAN syncQueue() — event ini
+    // bukan sinyal "koneksi baru balik", jadi nggak boleh nambah jalur
+    // auto-sync baru di luar yang udah ada (mount + online). syncQueue
+    // sendiri SUDAH motor event ini tiap updateQueueItem/removeFromQueue,
+    // jadi listener ini idempotent terhadap panggilan berulang beruntun —
+    // sama persis pola yang dipakai pages/Dashboard.jsx.
+    const handleQueueChange = () => {
+      refreshCounts();
+    };
+
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
+    window.addEventListener(QUEUE_CHANGE_EVENT, handleQueueChange);
 
     return () => {
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
+      window.removeEventListener(QUEUE_CHANGE_EVENT, handleQueueChange);
       clearRetryTimer();
       clearTimeout(syncedResetTimerRef.current);
     };
@@ -335,6 +422,7 @@ export function useOfflineSync() {
         attempts: 0,
         nextRetryAt: null,
         lastError: null,
+        lastRequestId: null,
       });
       await refreshCounts();
       syncQueue();
@@ -366,6 +454,7 @@ export function useOfflineSync() {
         lastError: null,
         nextRetryAt: null,
         attempts: 0,
+        lastRequestId: null,
       });
       await refreshCounts();
       syncQueue();
@@ -389,9 +478,11 @@ export function useOfflineSync() {
     isOnline,
     syncing,
     pendingCount,
+    pendingItems,
     needsReviewCount,
     needsReviewItems,
     legacyItems,
+    lastSyncedAt,
     syncNow: syncQueue,
     discardItem,
     claimLegacyItem,

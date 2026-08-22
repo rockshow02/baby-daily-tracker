@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { useOfflineSync } from "./useOfflineSync";
 import { enqueueRequest, getQueue, removeFromQueue, updateQueueItem } from "../utils/offlineQueue";
+import { getLastSyncedAt, clearLastSyncedAt } from "../utils/syncMetadata";
 
 let mockUserId = 1;
 let mockToken = "token-user-1";
@@ -56,6 +57,7 @@ beforeEach(async () => {
   await drainQueue();
   global.fetch = vi.fn();
   setOnline(true);
+  localStorage.clear();
 });
 
 afterEach(() => {
@@ -510,6 +512,233 @@ describe("useOfflineSync", () => {
       const [item] = await getQueue();
       expect(item.id).toBe(id);
       expect(item.userId).toBe(1); // tetap punya user 1, TIDAK disync pakai sesi user 2
+    });
+  });
+
+  describe("X-Request-ID troubleshooting metadata", () => {
+    it("stores a valid X-Request-ID from a non-2xx response on the affected item", async () => {
+      await seed();
+      global.fetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        headers: { get: (name) => (name === "X-Request-ID" ? "abc123-def_456" : null) },
+        json: async () => ({}),
+      });
+
+      const { result } = renderHook(() => useOfflineSync());
+      await waitFor(() => expect(result.current.status).toBe("retry_scheduled"));
+
+      const [item] = await getQueue();
+      expect(item.lastRequestId).toBe("abc123-def_456");
+    });
+
+    it("ignores a request ID with an invalid format (never stored, never displayed)", async () => {
+      await seed();
+      global.fetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        headers: { get: (name) => (name === "X-Request-ID" ? "not valid! <script>" : null) },
+        json: async () => ({}),
+      });
+
+      const { result } = renderHook(() => useOfflineSync());
+      await waitFor(() => expect(result.current.status).toBe("retry_scheduled"));
+
+      const [item] = await getQueue();
+      expect(item.lastRequestId).toBeNull();
+    });
+
+    it("ignores an overlong request ID", async () => {
+      await seed();
+      const overlong = "a".repeat(200);
+      global.fetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        headers: { get: (name) => (name === "X-Request-ID" ? overlong : null) },
+        json: async () => ({}),
+      });
+
+      const { result } = renderHook(() => useOfflineSync());
+      await waitFor(() => expect(result.current.status).toBe("retry_scheduled"));
+
+      const [item] = await getQueue();
+      expect(item.lastRequestId).toBeNull();
+    });
+
+    it("stores no request ID for a pure network failure (never reaches the server)", async () => {
+      setOnline(false);
+      const { result } = renderHook(() => useOfflineSync());
+      await settleMount();
+
+      await seed();
+      global.fetch.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+      await act(async () => {
+        await result.current.syncNow();
+      });
+
+      const [item] = await getQueue();
+      expect(item.lastRequestId).toBeNull();
+    });
+
+    it("clears a stale request ID once the item is successfully retried and removed from the queue", async () => {
+      await seed();
+      global.fetch
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 500,
+          headers: { get: (name) => (name === "X-Request-ID" ? "stale-request-id" : null) },
+          json: async () => ({}),
+        })
+        .mockResolvedValueOnce({ ok: true, status: 201, headers: { get: () => null } });
+
+      const { result } = renderHook(() => useOfflineSync());
+      await waitFor(async () => {
+        const [item] = await getQueue();
+        expect(item.lastRequestId).toBe("stale-request-id");
+      });
+
+      const [item] = await getQueue();
+      await updateQueueItem(item.id, { nextRetryAt: null });
+      await act(async () => {
+        await result.current.syncNow();
+      });
+
+      expect(await getQueue()).toHaveLength(0); // item gone — nothing stale left to display
+    });
+
+    it("clears a stale request ID when retryWithEdits resets an item for retry", async () => {
+      const id = await seed({ url: "/children/1/feeding-logs", clientRequestId: "req-1" });
+      await updateQueueItem(id, {
+        status: "needs_review",
+        reviewReason: "validation",
+        lastError: "feed_type wajib diisi",
+        lastRequestId: "stale-request-id",
+      });
+
+      const { result } = renderHook(() => useOfflineSync());
+      await settleMount();
+
+      global.fetch.mockRejectedValueOnce(new TypeError("Failed to fetch")); // stays offline-ish; only checking the reset patch itself
+      await act(async () => {
+        await result.current.retryWithEdits(id, JSON.stringify({ feed_type: "sufor" }));
+      });
+
+      await waitFor(async () => {
+        const [item] = await getQueue();
+        expect(item.lastRequestId).toBeNull();
+      });
+    });
+
+    it("never reuses the X-Request-ID as the X-Idempotency-Key on the next attempt", async () => {
+      await seed({ clientRequestId: "stable-idempotency-key" });
+      global.fetch
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 500,
+          headers: { get: (name) => (name === "X-Request-ID" ? "server-request-id-value" : null) },
+          json: async () => ({}),
+        })
+        .mockResolvedValueOnce({ ok: true, status: 201, headers: { get: () => null } });
+
+      const { result } = renderHook(() => useOfflineSync());
+      await waitFor(async () => {
+        const [item] = await getQueue();
+        expect(item.lastRequestId).toBe("server-request-id-value");
+      });
+
+      const [item] = await getQueue();
+      await updateQueueItem(item.id, { nextRetryAt: null });
+      await act(async () => {
+        await result.current.syncNow();
+      });
+
+      const secondCallHeaders = global.fetch.mock.calls[1][1].headers;
+      expect(secondCallHeaders["X-Idempotency-Key"]).toBe("stable-idempotency-key");
+      expect(secondCallHeaders["X-Idempotency-Key"]).not.toBe("server-request-id-value");
+    });
+  });
+
+  describe("last completed sync timestamp", () => {
+    it("is not set before any sync has ever completed", () => {
+      renderHook(() => useOfflineSync());
+      expect(getLastSyncedAt(1)).toBeNull();
+    });
+
+    it("is recorded once a run fully drains all pending records for the current user", async () => {
+      await seed();
+      global.fetch.mockResolvedValueOnce({ ok: true, status: 201, headers: { get: () => null } });
+
+      const { result } = renderHook(() => useOfflineSync());
+      await waitFor(async () => expect(await getQueue()).toHaveLength(0));
+      await waitFor(() => expect(result.current.lastSyncedAt).toBeTruthy());
+
+      expect(getLastSyncedAt(1)).toBeTruthy();
+    });
+
+    it("is NOT recorded for a partial sync (one item succeeds, another is still pending/scheduled)", async () => {
+      await seed({ url: "/a", clientRequestId: "k1" });
+      await seed({ url: "/b", clientRequestId: "k2" });
+      global.fetch
+        .mockResolvedValueOnce({ ok: true, status: 201, headers: { get: () => null } })
+        .mockResolvedValueOnce({ ok: false, status: 500, headers: { get: () => null }, json: async () => ({}) });
+
+      const { result } = renderHook(() => useOfflineSync());
+      await waitFor(() => expect(result.current.status).toBe("retry_scheduled"));
+
+      expect(getLastSyncedAt(1)).toBeNull();
+    });
+
+    it("is NOT recorded when a run fails entirely (network error)", async () => {
+      setOnline(false);
+      const { result } = renderHook(() => useOfflineSync());
+      await settleMount();
+
+      await seed();
+      global.fetch.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+      await act(async () => {
+        await result.current.syncNow();
+      });
+
+      expect(getLastSyncedAt(1)).toBeNull();
+    });
+
+    it("is NOT recorded when records still need review, even if all normal pending records synced", async () => {
+      await seed({ url: "/a", clientRequestId: "k1" });
+      const reviewId = await seed({ url: "/b", clientRequestId: "k2" });
+      await updateQueueItem(reviewId, { status: "needs_review", reviewReason: "validation", lastError: "invalid" });
+
+      global.fetch.mockResolvedValueOnce({ ok: true, status: 201, headers: { get: () => null } });
+
+      const { result } = renderHook(() => useOfflineSync());
+      await waitFor(async () => {
+        const remaining = await getQueue();
+        expect(remaining.filter((i) => i.status !== "needs_review")).toHaveLength(0);
+      });
+
+      expect(result.current.needsReviewCount).toBe(1);
+      expect(getLastSyncedAt(1)).toBeNull();
+    });
+
+    it("is isolated per user — a different user's session never sees another account's last-sync timestamp", async () => {
+      await seed({ userId: 1 });
+      global.fetch.mockResolvedValueOnce({ ok: true, status: 201, headers: { get: () => null } });
+
+      const { result } = renderHook(() => useOfflineSync());
+      await waitFor(() => expect(result.current.lastSyncedAt).toBeTruthy());
+
+      expect(getLastSyncedAt(2)).toBeNull();
+    });
+
+    it("clearLastSyncedAt removes the timestamp without touching queued records (used on logout)", async () => {
+      await seed();
+      global.fetch.mockResolvedValueOnce({ ok: true, status: 201, headers: { get: () => null } });
+
+      renderHook(() => useOfflineSync());
+      await waitFor(() => expect(getLastSyncedAt(1)).toBeTruthy());
+
+      clearLastSyncedAt(1);
+      expect(getLastSyncedAt(1)).toBeNull();
     });
   });
 });

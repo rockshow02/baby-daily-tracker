@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { api, ApiError, getCurrentUserId } from "./api/client";
 import { getQueueForUser, QUEUE_STATUS } from "./utils/offlineQueue";
+import { useOfflineSync } from "./hooks/useOfflineSync";
 import {
   cacheChildren,
   getCachedChildren,
@@ -19,6 +20,20 @@ import ChildProfileScreen from "./pages/ChildProfileScreen";
 import UserProfileScreen from "./pages/UserProfileScreen";
 import CaregiverModal from "./components/CaregiverModal";
 import OfflineStatusBanner from "./components/OfflineStatusBanner";
+import SyncCenter from "./components/SyncCenter";
+
+const NAV_ITEMS = [
+  { key: "daily", label: "Harian", icon: "🍼" },
+  { key: "growth", label: "Tumbuh Kembang", icon: "📈" },
+  { key: "health", label: "Kesehatan", icon: "🩺" },
+  { key: "moments", label: "Momen", icon: "✨" },
+  { key: "stats", label: "Statistik", icon: "📊" },
+];
+
+const EXTRA_LABELS = {
+  childProfile: "Profil Anak",
+  userProfile: "Profil Saya",
+};
 
 function AppContent() {
   const { user, loading, logout, setUser } = useAuth();
@@ -29,22 +44,6 @@ function AppContent() {
   // "offline_cached" (gagal muat, tapi ada cache offline yang dipakai) |
   // "offline_no_cache" (gagal muat, DAN nggak ada cache sama sekali)
   const [childLoadError, setChildLoadError] = useState(null);
-  const [activeView, setActiveView] = useState("daily");
-  const [showCaregivers, setShowCaregivers] = useState(false);
-  const [showMenu, setShowMenu] = useState(false);
-
-  const NAV_ITEMS = [
-    { key: "daily", label: "Harian", icon: "🍼" },
-    { key: "growth", label: "Tumbuh Kembang", icon: "📈" },
-    { key: "health", label: "Kesehatan", icon: "🩺" },
-    { key: "moments", label: "Momen", icon: "✨" },
-    { key: "stats", label: "Statistik", icon: "📊" },
-  ];
-
-  const EXTRA_LABELS = {
-    childProfile: "Profil Anak",
-    userProfile: "Profil Saya",
-  };
 
   /**
    * Muat daftar anak. Bedain 4 kemungkinan hasil secara eksplisit:
@@ -172,6 +171,39 @@ function AppContent() {
     );
   }
 
+  return (
+    <AuthenticatedAppShell
+      user={user}
+      childrenList={children}
+      setChildren={setChildren}
+      activeChild={activeChild}
+      setActiveChild={setActiveChild}
+      setUser={setUser}
+      logout={logout}
+    />
+  );
+}
+
+/**
+ * Shell aplikasi buat user yang UDAH login DAN udah punya activeChild —
+ * satu-satunya tempat `useOfflineSync()` dipanggil (lihat App.jsx
+ * requirement observability: 1 controller sinkron otoritatif, bukan 1
+ * instance per komponen yang butuh status sinkron). Mount/unmount-nya
+ * ngikutin AppContent nampilin komponen ini atau nggak (login -> mount,
+ * logout -> unmount balik ke AuthScreen) — PERSIS pola mount/unmount
+ * OfflineStatusBanner yang lama, cuma sekarang hook-nya dipanggil DI
+ * SINI (1 kali), lalu state/fungsinya diteruskan sebagai props ke
+ * OfflineStatusBanner DAN SyncCenter — bukan dipanggil ulang sendiri-
+ * sendiri sama masing-masing (yang bisa bikin 2 loop auto-sync balapan).
+ */
+function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, setActiveChild, setUser, logout }) {
+  const [activeView, setActiveView] = useState("daily");
+  const [showCaregivers, setShowCaregivers] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
+  const [showSyncCenter, setShowSyncCenter] = useState(false);
+
+  const sync = useOfflineSync();
+
   const activeLabel = NAV_ITEMS.find((n) => n.key === activeView)?.label || EXTRA_LABELS[activeView] || "";
 
   const handleChildUpdated = (updatedChild) => {
@@ -202,11 +234,11 @@ function AppContent() {
 
   return (
     <div>
-      <OfflineStatusBanner />
+      <OfflineStatusBanner sync={sync} onOpenDetail={() => setShowSyncCenter(true)} />
       <div className="px-6 pt-4 flex items-center justify-between gap-2">
-        {children.length > 1 ? (
+        {childrenList.length > 1 ? (
           <div className="flex gap-2 overflow-x-auto">
-            {children.map((c) => (
+            {childrenList.map((c) => (
               <button
                 key={c.id}
                 onClick={() => {
@@ -308,6 +340,16 @@ function AppContent() {
                 Pengasuh
               </button>
               <button
+                onClick={() => {
+                  setShowMenu(false);
+                  setShowSyncCenter(true);
+                }}
+                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl2 text-sm text-ink text-left"
+              >
+                <span className="text-base">🔄</span>
+                Status Sinkronisasi
+              </button>
+              <button
                 onClick={handleLogout}
                 className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl2 text-sm text-warn text-left"
               >
@@ -326,6 +368,8 @@ function AppContent() {
           onClose={() => setShowCaregivers(false)}
         />
       )}
+
+      {showSyncCenter && <SyncCenter sync={sync} onClose={() => setShowSyncCenter(false)} />}
     </div>
   );
 }
