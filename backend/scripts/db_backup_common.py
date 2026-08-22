@@ -657,6 +657,31 @@ def _revalidate_metadata_deletion_candidate(backup_resolved: Path, backup_dir_re
     return resolved_meta
 
 
+def _reconcile_remaining_after_apply(
+    backup_dir_resolved: Path,
+    active_db_path: Optional[Path],
+    existing_sorted: list,
+    deleted: list,
+) -> list:
+    """
+    Hitung `remaining_after_apply` dari KEADAAN DISK YANG SEBENARNYA (list
+    ulang folder backup), BUKAN cuma dari rencana ("existing minus yang
+    kita CATAT udah dihapus") — supaya kalau ada ketidaksesuaian antara
+    bookkeeping in-memory dan disk (mis. race condition, atau bug di
+    tempat lain), laporan yang keluar tetap jujur terhadap apa yang
+    BENERAN ada di disk, bukan cuma apa yang KITA KIRA terjadi.
+
+    Fallback ke perhitungan berbasis rencana cuma kalau list ulang itu
+    sendiri gagal (mis. folder backup somehow jadi nggak valid lagi di
+    tengah operasi) — biar fungsi pelaporan ini sendiri nggak crash.
+    """
+    try:
+        return list_backups(backup_dir_resolved, active_db_path=active_db_path)
+    except Exception:
+        deleted_paths = {d["path"] for d in deleted}
+        return [e for e in existing_sorted if e["path"] not in deleted_paths]
+
+
 def prune_backups(
     backup_dir: Path,
     keep: int,
@@ -676,15 +701,30 @@ def prune_backups(
     `keep` WAJIB >= MIN_KEEP — ini dicek di sini (fungsi inti), bukan cuma
     di level CLI, biar pemanggil langsung (test/script lain) juga kena.
 
+    `active_db_path` WAJIB dikasih kalau apply=True — prune yang beneran
+    menghapus file TANPA tau di mana database aktif berada nggak bisa
+    mastiin proteksi folder induk/path database aktif; itu penjagaan
+    fail-CLOSED di level fungsi inti ini, bukan cuma di CLI (lihat
+    backup_database.py:resolve_active_db_path_required).
+
     Skema hasil (SELALU dikembalikan, baik dry-run maupun apply):
-    - existing             : semua backup valid yang ADA SEKARANG (sebelum operasi apa pun)
-    - to_delete             : kandidat yang AKAN (dry-run) atau DICOBA (apply) dihapus
-    - deleted               : yang BENERAN berhasil dihapus — kosong kalau dry-run,
-                              subset dari to_delete kalau apply (bisa < to_delete kalau abort di tengah)
-    - remaining_after_apply : proyeksi (dry-run) ATAU sisa AKTUAL (apply) setelah operasi
-    - applied               : True kalau apply BENERAN dijalankan (bukan cuma diminta)
-    - aborted               : True kalau apply dihentikan di tengah jalan karena revalidasi gagal
-    - abort_reason          : pesan penjelasan kalau aborted True, None kalau nggak
+    - existing                : semua backup valid yang ADA SEKARANG (sebelum operasi apa pun)
+    - to_delete                : kandidat yang AKAN (dry-run) atau DICOBA (apply) dihapus
+    - deleted                  : file .db yang BENERAN sudah kehapus dari disk — kosong kalau
+                                 dry-run, subset dari to_delete kalau apply (bisa < to_delete
+                                 kalau abort di tengah). 1 entri masuk sini TEPAT SETELAH
+                                 unlink() file .db-nya BENERAN sukses, SEBELUM nyoba hapus
+                                 metadata-nya — jadi entri ini selalu akurat walau metadata
+                                 gagal dihapus setelahnya.
+    - remaining_after_apply    : proyeksi (dry-run) ATAU hasil list ULANG folder backup yang
+                                 sebenarnya (apply, baik sukses penuh maupun aborted)
+    - applied                  : True kalau apply BENERAN dijalankan (bukan cuma diminta)
+    - aborted                  : True kalau apply dihentikan di tengah jalan
+    - abort_reason             : pesan penjelasan kalau aborted True, None kalau nggak
+    - metadata_delete_failures : list {"backup_filename", "metadata_path", "error"} — kosong
+                                 kecuali ADA kasus file .db berhasil dihapus tapi metadata
+                                 .json-nya gagal dihapus. Cuma path & pesan error, nggak
+                                 pernah isi data/secret.
 
     Kalau apply dihentikan di tengah, backup yang UDAH kehapus TETAP kehapus
     (nggak bisa "dibatalkan mundur") — deleted mencerminkan itu secara jujur,
@@ -692,6 +732,13 @@ def prune_backups(
     """
     if keep < MIN_KEEP:
         raise BackupError(f"--keep harus >= {MIN_KEEP} (minimal 1 backup wajib dipertahankan eksplisit), dapat: {keep}")
+
+    if apply and active_db_path is None:
+        raise BackupError(
+            "prune_backups(apply=True) butuh active_db_path eksplisit — tanpa itu, proteksi folder "
+            "induk/path database aktif nggak bisa dipastikan sebelum beneran menghapus file. Ini "
+            "penjagaan fail-closed di level fungsi inti, bukan cuma di CLI."
+        )
 
     protect = protect or set()
     backup_dir_resolved = validate_backup_directory(str(backup_dir), active_db_path=active_db_path)
@@ -722,6 +769,7 @@ def prune_backups(
         "applied": False,
         "aborted": False,
         "abort_reason": None,
+        "metadata_delete_failures": [],
     }
 
     if not apply:
@@ -739,32 +787,70 @@ def prune_backups(
 
     deleted = []
     for e in final_delete:
-        # revalidasi DAN eksekusi unlink()-nya sendiri SAMA-SAMA di dalam
-        # try/except yang sama — kegagalan beneran pas unlink() (disk
-        # error, permission, file kekunci proses lain, dst) HARUS
-        # dilaporkan sebagai abort yang jujur juga, bukan cuma kegagalan
-        # revalidasi pre-emptive; dua-duanya sama-sama "stop safely, report
-        # clearly", dan yang UDAH kehapus di iterasi-iterasi sebelumnya
-        # TETAP tercatat di `deleted` (nggak bisa "dibatalkan mundur").
+        # revalidasi kandidat DULU — gagal di sini berarti BELUM ada apa pun
+        # yang disentuh buat kandidat ini, jadi abort di titik ini nggak
+        # butuh reconcile disk (deleted-so-far dari iterasi sebelumnya tetap valid apa adanya)
         try:
             revalidated = _revalidate_deletion_candidate(
                 e["path"], backup_dir_resolved, newest_path=newest_path, protect=protect
             )
             meta_target = _revalidate_metadata_deletion_candidate(revalidated, backup_dir_resolved)
-            revalidated.unlink()
-            if meta_target is not None:
-                meta_target.unlink(missing_ok=True)
-        except (BackupError, OSError) as exc:
+        except BackupError as exc:
             result["deleted"] = deleted
-            result["remaining_after_apply"] = [e2 for e2 in existing_sorted if e2["path"] not in {d["path"] for d in deleted}]
+            result["remaining_after_apply"] = _reconcile_remaining_after_apply(
+                backup_dir_resolved, active_db_path, existing_sorted, deleted
+            )
             result["applied"] = True
             result["aborted"] = True
             result["abort_reason"] = str(exc)
             return result
 
+        # tahap 1 — hapus file .db-nya. Kalau ini gagal, TIDAK ADA apa pun
+        # yang berubah buat kandidat ini (deleted-so-far dari iterasi
+        # sebelumnya tetap valid apa adanya).
+        try:
+            revalidated.unlink()
+        except OSError as exc:
+            result["deleted"] = deleted
+            result["remaining_after_apply"] = _reconcile_remaining_after_apply(
+                backup_dir_resolved, active_db_path, existing_sorted, deleted
+            )
+            result["applied"] = True
+            result["aborted"] = True
+            result["abort_reason"] = f"Gagal menghapus file backup '{revalidated.name}': {exc}"
+            return result
+
+        # file .db BENERAN udah hilang dari disk sekarang — catat SEBELUM
+        # mencoba apa pun lagi, biar `deleted` selalu akurat terhadap disk
+        # walau langkah metadata di bawah ini gagal
         deleted.append(e)
 
+        # tahap 2 — hapus metadata .json-nya (kalau ada). Kegagalan DI SINI
+        # BUKAN alasan buat nganggep backup-nya "nggak kehapus" — .db-nya
+        # udah beneran hilang, cuma sampah metadata yatim yang ketinggalan.
+        if meta_target is not None:
+            try:
+                meta_target.unlink()
+            except OSError as exc:
+                result["deleted"] = deleted
+                result["remaining_after_apply"] = _reconcile_remaining_after_apply(
+                    backup_dir_resolved, active_db_path, existing_sorted, deleted
+                )
+                result["applied"] = True
+                result["aborted"] = True
+                result["abort_reason"] = (
+                    f"Backup '{revalidated.name}' BERHASIL dihapus, tapi file metadata-nya gagal "
+                    f"dihapus: {exc}. Metadata yatim ({meta_target}) masih ada di disk — cek manual "
+                    "sebelum menghapusnya sendiri, tapi backup-nya sendiri SUDAH hilang permanen."
+                )
+                result["metadata_delete_failures"].append(
+                    {"backup_filename": revalidated.name, "metadata_path": str(meta_target), "error": str(exc)}
+                )
+                return result
+
     result["deleted"] = deleted
-    result["remaining_after_apply"] = remaining_projected
+    result["remaining_after_apply"] = _reconcile_remaining_after_apply(
+        backup_dir_resolved, active_db_path, existing_sorted, deleted
+    )
     result["applied"] = True
     return result

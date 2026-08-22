@@ -193,6 +193,47 @@ sederhana: cukup jalankan `--list` dari waktu ke waktu dan hapus file `.db` +
 `.json` sepasangnya secara manual lewat `rm` untuk backup lama yang sudah
 tidak diperlukan.
 
+### `--prune --apply` menolak jalan kalau lokasi database aktif nggak bisa dipastikan
+
+`--prune --apply` itu DESTRUKTIF — sebelum menghapus apa pun, script ini
+WAJIB berhasil memuat aplikasi Flask dan me-resolve lokasi database aktif
+(persis kayak yang dilakukan buat backup/restore), soalnya proteksi
+"jangan pernah hapus folder induk/path database aktif" (lihat bagian 1)
+nggak bisa dipastikan tanpa tau di mana database aktif itu berada.
+
+Kalau resolusi ini gagal karena sebab apa pun (`.env` nggak lengkap,
+`DATABASE_URL` salah, venv yang aktif salah, dst), `--prune --apply`
+**menolak jalan sama sekali** — TIDAK ADA backup yang dihapus, dan
+pesannya bilang jelas kalau lokasi database aktif nggak bisa diverifikasi.
+Ini **fail closed** (menolak kalau ragu), bukan fail open (lanjut walau
+nggak yakin).
+
+`--list`, `--verify`, dan `--prune` TANPA `--apply` (dry-run) tetap bisa
+dipakai buat inspeksi walau resolusi database aktif ini gagal — operasi
+baca-doang itu nggak destruktif, jadi nggak perlu proteksi yang sama.
+
+### Kegagalan hapus metadata SETELAH file backup-nya sendiri berhasil dihapus
+
+File `.db` dan file metadata `.json` di sebelahnya dihapus lewat 2 langkah
+terpisah. Kalau file `.db`-nya berhasil dihapus tapi file `.json`-nya
+GAGAL dihapus (mis. permission, disk error) — backup itu **TETAP** dianggap
+"sudah dihapus" (karena memang beneran udah hilang dari disk), pruning
+berhenti di situ (tidak lanjut ke kandidat berikutnya), dan command keluar
+dengan kode non-zero.
+
+Output-nya bakal nyebut path metadata yang ketinggalan (yatim) secara
+eksplisit, dan bilang jelas kalau file `.db`-nya sendiri **sudah terhapus
+permanen** (bukan "mungkin masih ada" atau semacamnya). Kalau ini
+kejadian:
+
+1. Cek dulu path metadata yatim yang disebut di output-nya.
+2. Cari tau kenapa penghapusan itu gagal (permission folder, disk penuh, dst).
+3. **Jangan buru-buru hapus file lain secara manual** sebelum paham
+   penyebabnya — metadata yatim itu sendiri aman diabaikan (isinya cuma
+   metadata struktural, bukan data user), tapi kegagalan hapus filesystem
+   yang tiba-tiba bisa jadi gejala masalah lain yang lebih luas di folder
+   backup itu.
+
 ## 6. Prosedur restore
 
 **Restore itu operasi DESTRUKTIF — menimpa database aktif.** Ikuti urutan

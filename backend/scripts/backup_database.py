@@ -56,21 +56,46 @@ from db_backup_common import (  # noqa: E402
 )
 
 
-def _resolve_active_db_path_best_effort():
+def resolve_active_db_path_best_effort():
     """
-    Dipakai cuma buat validasi TAMBAHAN folder backup (menolak folder induk/
-    path database aktif itu sendiri) di --list/--verify/--prune — operasi
-    ini SENDIRI nggak butuh app Flask buat kerjanya (baca file backup, bukan
-    database aktif), jadi kalau resolusi app/database aktif gagal karena
-    sebab lain, itu JANGAN sampai bikin --list/--verify/--prune ikut gagal
-    total. Validasi folder backup yang lain (root filesystem, home, repo,
-    dst) tetap jalan penuh terlepas dari ini.
+    Dipakai cuma buat operasi yang TIDAK destruktif (--list, --verify,
+    --prune TANPA --apply) — validasi TAMBAHAN folder backup (menolak
+    folder induk/path database aktif itu sendiri) kalau bisa didapat, tapi
+    kalau app Flask/database aktif gagal di-resolve karena sebab lain, itu
+    JANGAN sampai bikin operasi baca-doang ini ikut gagal total. Validasi
+    folder backup yang lain (root filesystem, home, repo, dst) tetap jalan
+    penuh terlepas dari ini.
+
+    JANGAN PERNAH dipakai buat --prune --apply (atau operasi destruktif
+    lain) — lihat resolve_active_db_path_required di bawah buat itu.
     """
     try:
         app = create_app()
         return resolve_active_sqlite_path(app)
     except Exception:
         return None
+
+
+def resolve_active_db_path_required():
+    """
+    Dipakai buat operasi DESTRUKTIF (--prune --apply) — GAGAL KERAS
+    (BackupError) kalau app Flask atau path database aktif nggak bisa
+    di-resolve, BUKAN diam-diam lanjut tanpa proteksi folder induk/database
+    aktif seperti resolve_active_db_path_best_effort di atas. Fail CLOSED:
+    lebih baik prune --apply nolak jalan sama sekali daripada jalan tanpa
+    tau di mana database aktif berada.
+    """
+    try:
+        app = create_app()
+        return resolve_active_sqlite_path(app)
+    except BackupError:
+        raise
+    except Exception as exc:
+        raise BackupError(
+            f"Nggak bisa memuat aplikasi/konfigurasi database aktif ({exc.__class__.__name__}: {exc}) — "
+            "prune --apply DIBATALKAN demi keamanan, karena proteksi folder induk/path database aktif "
+            "nggak bisa dipastikan tanpa itu. Tidak ada backup yang dihapus."
+        ) from exc
 
 
 def run_backup(args) -> int:
@@ -109,7 +134,7 @@ def run_backup(args) -> int:
 
 def run_list(args) -> int:
     try:
-        backup_dir = resolve_backup_dir(args.backup_dir, create=False, active_db_path=_resolve_active_db_path_best_effort())
+        backup_dir = resolve_backup_dir(args.backup_dir, create=False, active_db_path=resolve_active_db_path_best_effort())
         entries = list_backups(backup_dir)
     except BackupError as exc:
         log(f"list GAGAL — {exc}")
@@ -133,7 +158,7 @@ def run_list(args) -> int:
 
 def run_verify(args) -> int:
     try:
-        backup_dir = resolve_backup_dir(args.backup_dir, create=False, active_db_path=_resolve_active_db_path_best_effort())
+        backup_dir = resolve_backup_dir(args.backup_dir, create=False, active_db_path=resolve_active_db_path_best_effort())
         result = verify_backup(args.verify, backup_dir, allow_outside=args.allow_outside_backup_dir)
     except BackupError as exc:
         log(f"verify GAGAL — {exc}")
@@ -165,8 +190,17 @@ def run_prune(args) -> int:
         return 1
 
     try:
-        backup_dir = resolve_backup_dir(args.backup_dir, create=False, active_db_path=_resolve_active_db_path_best_effort())
-        result = prune_backups(backup_dir, args.keep, apply=args.apply)
+        if args.apply:
+            # DESTRUKTIF — WAJIB berhasil resolve app/database aktif dulu.
+            # Fail CLOSED: kalau ini gagal, prune --apply nolak jalan sama
+            # sekali (nggak ada backup yang dihapus), bukan diam-diam
+            # lanjut tanpa proteksi folder induk/database aktif.
+            active_db_path = resolve_active_db_path_required()
+        else:
+            active_db_path = resolve_active_db_path_best_effort()
+
+        backup_dir = resolve_backup_dir(args.backup_dir, create=False, active_db_path=active_db_path)
+        result = prune_backups(backup_dir, args.keep, apply=args.apply, active_db_path=active_db_path)
     except BackupError as exc:
         log(f"prune GAGAL — {exc}")
         print(f"\nPrune GAGAL: {exc}", file=sys.stderr)
@@ -196,6 +230,11 @@ def run_prune(args) -> int:
             f"{len(result['deleted'])} dari {len(result['to_delete'])} kandidat SUDAH terhapus sebelum "
             "penghentian ini — sisanya TIDAK disentuh."
         )
+        if result["metadata_delete_failures"]:
+            print("\nMetadata yatim (file .db-nya SUDAH terhapus permanen, TIDAK bisa dianggap masih ada):")
+            for f in result["metadata_delete_failures"]:
+                print(f"  - {f['backup_filename']} -> metadata tersisa di: {f['metadata_path']} ({f['error']})")
+            print("Cek manual dulu penyebabnya sebelum menghapus file metadata yatim itu sendiri.")
         log(f"prune ABORTED — {result['abort_reason']}")
         return 1
 

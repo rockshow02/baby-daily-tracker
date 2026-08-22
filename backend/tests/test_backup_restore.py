@@ -464,7 +464,7 @@ def test_24_prune_never_deletes_the_newest_valid_backup(source_db_path, backup_d
 
     # keep=MIN_KEEP (1) — kasus paling ekstrem yang masih valid sejak keep
     # sekarang wajib >= 1 (lihat test_prune_keep_below_minimum_is_rejected)
-    result = dbc.prune_backups(backup_dir, keep=dbc.MIN_KEEP, apply=True)
+    result = dbc.prune_backups(backup_dir, keep=dbc.MIN_KEEP, apply=True, active_db_path=source_db_path)
 
     remaining = {e["filename"] for e in dbc.list_backups(backup_dir)}
     assert remaining == {"tracker-staging-20260101-110000.db"}  # TERBARU tetap ada walau keep di batas minimal
@@ -657,7 +657,7 @@ def test_backupdir_20_dry_run_remaining_after_apply_is_projected_correctly(sourc
 def test_backupdir_21_apply_never_deletes_the_newest_backup(source_db_path, backup_dir):
     _seed_backups(source_db_path, backup_dir, ["20260101-090000", "20260101-100000", "20260101-110000"])
 
-    result = dbc.prune_backups(backup_dir, keep=1, apply=True)
+    result = dbc.prune_backups(backup_dir, keep=1, apply=True, active_db_path=source_db_path)
 
     assert result["aborted"] is False
     remaining = {e["filename"] for e in dbc.list_backups(backup_dir)}
@@ -696,7 +696,7 @@ def test_backupdir_22_candidate_replaced_by_symlink_before_deletion_aborts(sourc
 
     monkeypatch.setattr(dbc, "list_backups", fake_list_backups)
 
-    result = dbc.prune_backups(backup_dir, keep=1, apply=True)
+    result = dbc.prune_backups(backup_dir, keep=1, apply=True, active_db_path=source_db_path)
 
     assert result["aborted"] is True
     assert "symlink" in result["abort_reason"]
@@ -722,7 +722,7 @@ def test_backupdir_23_candidate_moved_outside_directory_before_deletion_aborts(s
 
     monkeypatch.setattr(dbc, "list_backups", fake_list_backups)
 
-    result = dbc.prune_backups(backup_dir, keep=1, apply=True)
+    result = dbc.prune_backups(backup_dir, keep=1, apply=True, active_db_path=source_db_path)
 
     assert result["aborted"] is True
     assert r2.path.is_file()  # newest tetap utuh
@@ -735,7 +735,7 @@ def test_backupdir_24_unrelated_json_files_are_never_deleted(source_db_path, bac
     unrelated_json = backup_dir / "unrelated-notes.json"
     unrelated_json.write_text('{"not": "a backup metadata file"}')
 
-    dbc.prune_backups(backup_dir, keep=1, apply=True)
+    dbc.prune_backups(backup_dir, keep=1, apply=True, active_db_path=source_db_path)
 
     assert unrelated_json.is_file()  # nggak ikut kehapus sama sekali
     assert not r1.metadata_path.exists()  # metadata backup yang DIHAPUS ikut kehapus
@@ -750,7 +750,7 @@ def test_backupdir_25_only_exact_adjacent_metadata_is_deleted(source_db_path, ba
     decoy = backup_dir / "tracker-staging-20260101-090000-decoy.db.json"
     decoy.write_text("{}")
 
-    dbc.prune_backups(backup_dir, keep=1, apply=True)
+    dbc.prune_backups(backup_dir, keep=1, apply=True, active_db_path=source_db_path)
 
     assert not r1.metadata_path.exists()
     assert decoy.is_file()  # nama nggak PERSIS cocok -> nggak disentuh
@@ -771,7 +771,7 @@ def test_backupdir_26_partial_deletion_failure_is_reported_accurately(source_db_
 
     monkeypatch.setattr(Path, "unlink", selective_boom)
 
-    result = dbc.prune_backups(backup_dir, keep=1, apply=True)
+    result = dbc.prune_backups(backup_dir, keep=1, apply=True, active_db_path=source_db_path)
 
     assert result["applied"] is True
     assert result["aborted"] is True
@@ -787,3 +787,276 @@ def test_backupdir_28_no_test_touches_the_real_instance_database():
     # tempfile.mkdtemp() lewat fixture workdir/backup_dir/source_db_path,
     # nggak pernah menyentuh REAL_INSTANCE_DB.
     assert REAL_INSTANCE_DB == Path(BACKEND_DIR) / "instance" / "tracker.db"
+
+
+def _raise(exc):
+    """Helper: fungsi yang manggilnya SELALU raise `exc` — dipakai buat monkeypatch create_app()/dst di test."""
+
+    def _inner(*args, **kwargs):
+        raise exc
+
+    return _inner
+
+
+# --------------------------------------------------------------------------
+# Issue 1 — kegagalan hapus metadata SETELAH .db-nya berhasil dihapus harus
+# dilaporkan akurat: backup TETAP tercatat "deleted", TIDAK masuk
+# remaining_after_apply, dan pruning berikutnya berhenti (nggak lanjut
+# nyoba kandidat lain).
+# --------------------------------------------------------------------------
+
+
+def test_metaf_1to10_backup_deleted_but_metadata_cleanup_fails(source_db_path, backup_dir, monkeypatch):
+    r1 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-090000")
+    r2 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-100000")  # newest, dilindungi
+
+    real_unlink = Path.unlink
+
+    def selective_boom(self, *a, **k):
+        # 2. metadata .json PERSIS punya r1 gagal dihapus (OSError) — file
+        # .db-nya sendiri (dan file lain mana pun) tetap dihapus normal
+        if self == r1.metadata_path:
+            raise OSError("simulated metadata deletion failure")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", selective_boom)
+
+    result = dbc.prune_backups(backup_dir, keep=1, apply=True, active_db_path=source_db_path)
+
+    # 3. applied=True
+    assert result["applied"] is True
+    # 4. aborted=True
+    assert result["aborted"] is True
+    # 5. backup (r1) ADA di deleted, walau metadata-nya gagal dihapus
+    assert {e["filename"] for e in result["deleted"]} == {r1.filename}
+    # 6. r1 TIDAK ada di remaining_after_apply
+    remaining_names = {e["filename"] for e in result["remaining_after_apply"]}
+    assert r1.filename not in remaining_names
+    # 7. file .db r1 beneran nggak ada lagi di disk
+    assert not r1.path.exists()
+    # 8. file .db.json r1 MASIH ada (gagal dihapus, jadi yatim di disk)
+    assert r1.metadata_path.exists()
+    # 9. kandidat lain (r2, walau di sini cuma "newest" yang dilindungi) nggak disentuh
+    assert r2.path.is_file()
+    assert r2.metadata_path.exists()
+    # 10. abort_reason menjelaskan JELAS ini kegagalan cleanup metadata (bukan gagal hapus .db)
+    assert "metadata" in result["abort_reason"].lower()
+    assert r1.filename in result["abort_reason"]
+    # metadata_delete_failures — cuma path & pesan, nggak ada isi data
+    assert len(result["metadata_delete_failures"]) == 1
+    failure = result["metadata_delete_failures"][0]
+    assert failure["backup_filename"] == r1.filename
+    assert failure["metadata_path"] == str(r1.metadata_path)
+    assert "error" in failure
+
+
+def test_metaf_9_13_earlier_successful_deletions_remain_accurate_and_later_candidates_untouched(
+    source_db_path, backup_dir, monkeypatch
+):
+    r1 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-090000")
+    r2 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-100000")
+    r3 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-110000")
+    r4 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-120000")  # newest, dilindungi
+
+    real_unlink = Path.unlink
+
+    def selective_boom(self, *a, **k):
+        if self == r2.metadata_path:
+            raise OSError("simulated metadata deletion failure")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", selective_boom)
+
+    # urutan proses (descending timestamp, newest r4 dikecualikan): r3, r2, r1
+    result = dbc.prune_backups(backup_dir, keep=1, apply=True, active_db_path=source_db_path)
+
+    assert result["aborted"] is True
+
+    # r3 diproses DULUAN dan sukses PENUH (.db + metadata) — laporan "deleted" tetap akurat buat dia
+    assert r3.filename in {e["filename"] for e in result["deleted"]}
+    assert not r3.path.exists()
+    assert not r3.metadata_path.exists()
+
+    # r2 = kandidat yang metadata-nya gagal dihapus — .db-nya TETAP hilang, tercatat "deleted"
+    assert r2.filename in {e["filename"] for e in result["deleted"]}
+    assert not r2.path.exists()
+    assert r2.metadata_path.exists()  # metadata yatim
+
+    # r1 = kandidat SETELAHNYA (belum sempat diproses) — TIDAK disentuh sama sekali
+    assert r1.path.is_file()
+    assert r1.metadata_path.exists()
+    assert r1.filename not in {e["filename"] for e in result["deleted"]}
+
+    # r4 = terbaru, dilindungi, nggak pernah disentuh
+    assert r4.path.is_file()
+    assert r4.metadata_path.exists()
+
+
+def test_metaf_11_12_cli_exits_nonzero_and_never_claims_deleted_backup_is_recoverable(
+    source_db_path, backup_dir, monkeypatch, capsys
+):
+    r1 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-090000")
+    dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-100000")  # newest
+
+    real_unlink = Path.unlink
+
+    def selective_boom(self, *a, **k):
+        if self == r1.metadata_path:
+            raise OSError("simulated metadata deletion failure")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", selective_boom)
+
+    fake_app = make_app_for(source_db_path)
+    monkeypatch.setattr(backup_database, "create_app", lambda: fake_app)
+
+    exit_code = backup_database.main(["--prune", "--keep", "1", "--backup-dir", str(backup_dir), "--apply"])
+
+    # 11. CLI keluar dengan kode nol-tidak-nol (non-zero)
+    assert exit_code != 0
+
+    out = capsys.readouterr().out
+    # laporan menyebut lokasi metadata yatim secara eksplisit ("safe operational message")
+    assert str(r1.metadata_path) in out
+    # 12. CLI TIDAK PERNAH mengklaim backup yang sudah dihapus itu masih tersedia/bisa dipulihkan —
+    # sebaliknya, secara eksplisit bilang backup-nya SUDAH terhapus PERMANEN
+    assert "terhapus permanen" in out
+
+
+def test_metaf_14_unrelated_json_files_remain_untouched_during_metadata_failure(source_db_path, backup_dir, monkeypatch):
+    r1 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-090000")
+    dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-100000")  # newest
+
+    unrelated_json = backup_dir / "unrelated-notes.json"
+    unrelated_json.write_text('{"not": "a backup metadata file"}')
+
+    real_unlink = Path.unlink
+
+    def selective_boom(self, *a, **k):
+        if self == r1.metadata_path:
+            raise OSError("simulated metadata deletion failure")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", selective_boom)
+
+    dbc.prune_backups(backup_dir, keep=1, apply=True, active_db_path=source_db_path)
+
+    assert unrelated_json.is_file()  # nggak ikut kesentuh sama sekali
+
+
+# --------------------------------------------------------------------------
+# Issue 2 — --prune --apply (destruktif) harus fail CLOSED kalau resolusi
+# app Flask/database aktif gagal — bukan diam-diam lanjut tanpa proteksi
+# folder induk/path database aktif.
+# --------------------------------------------------------------------------
+
+
+def test_faildb_1_cli_prune_apply_refuses_if_create_app_fails(backup_dir, monkeypatch):
+    monkeypatch.setattr(backup_database, "create_app", _raise(RuntimeError("simulated create_app failure")))
+
+    exit_code = backup_database.main(["--prune", "--keep", "1", "--backup-dir", str(backup_dir), "--apply"])
+
+    assert exit_code != 0
+
+
+def test_faildb_2_cli_prune_apply_refuses_if_active_db_resolution_fails(source_db_path, backup_dir, monkeypatch):
+    fake_app = make_app_for(source_db_path)
+    monkeypatch.setattr(backup_database, "create_app", lambda: fake_app)
+    monkeypatch.setattr(
+        backup_database, "resolve_active_sqlite_path", _raise(dbc.BackupError("simulated resolution failure"))
+    )
+
+    exit_code = backup_database.main(["--prune", "--keep", "1", "--backup-dir", str(backup_dir), "--apply"])
+
+    assert exit_code != 0
+
+
+def test_faildb_3_no_backup_deleted_in_either_failure(source_db_path, backup_dir, monkeypatch):
+    r1 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-090000")
+    r2 = dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-100000")
+
+    monkeypatch.setattr(backup_database, "create_app", _raise(RuntimeError("simulated create_app failure")))
+    backup_database.main(["--prune", "--keep", "1", "--backup-dir", str(backup_dir), "--apply"])
+
+    assert r1.path.is_file()
+    assert r2.path.is_file()
+
+
+def test_faildb_4_error_message_states_active_db_could_not_be_verified(backup_dir, monkeypatch, capsys):
+    monkeypatch.setattr(backup_database, "create_app", _raise(RuntimeError("simulated create_app failure")))
+
+    backup_database.main(["--prune", "--keep", "1", "--backup-dir", str(backup_dir), "--apply"])
+
+    captured = capsys.readouterr()
+    combined = (captured.out + captured.err).lower()
+    assert "database aktif" in combined
+
+
+def test_faildb_5_prune_backups_apply_true_without_active_db_path_raises(backup_dir):
+    with pytest.raises(dbc.BackupError):
+        dbc.prune_backups(backup_dir, keep=1, apply=True, active_db_path=None)
+
+
+def test_faildb_6_prune_backups_apply_false_without_active_db_path_is_safe_dry_run(source_db_path, backup_dir):
+    _seed_backups(source_db_path, backup_dir, ["20260101-090000", "20260101-100000"])
+
+    result = dbc.prune_backups(backup_dir, keep=1, apply=False, active_db_path=None)
+
+    assert result["applied"] is False
+    assert result["deleted"] == []
+    assert len(dbc.list_backups(backup_dir)) == 2
+
+
+def test_faildb_7_successful_apply_passes_active_db_path_through_all_layers(source_db_path, backup_dir, monkeypatch):
+    _seed_backups(source_db_path, backup_dir, ["20260101-090000", "20260101-100000", "20260101-110000"])
+
+    fake_app = make_app_for(source_db_path)
+    monkeypatch.setattr(backup_database, "create_app", lambda: fake_app)
+
+    exit_code = backup_database.main(["--prune", "--keep", "1", "--backup-dir", str(backup_dir), "--apply"])
+
+    assert exit_code == 0
+    remaining = {e["filename"] for e in dbc.list_backups(backup_dir)}
+    assert remaining == {"tracker-staging-20260101-110000.db"}
+
+
+def test_faildb_8_active_database_parent_directory_rejected_during_apply(source_db_path, workdir, monkeypatch):
+    fake_app = make_app_for(source_db_path)
+    monkeypatch.setattr(backup_database, "create_app", lambda: fake_app)
+
+    # --backup-dir nunjuk ke folder INDUK database aktif (workdir langsung, bukan workdir/backups)
+    exit_code = backup_database.main(["--prune", "--keep", "1", "--backup-dir", str(workdir), "--apply"])
+
+    assert exit_code != 0
+
+
+def test_faildb_9_active_database_file_itself_never_considered_backup_dir(source_db_path, monkeypatch):
+    fake_app = make_app_for(source_db_path)
+    monkeypatch.setattr(backup_database, "create_app", lambda: fake_app)
+
+    exit_code = backup_database.main(["--prune", "--keep", "1", "--backup-dir", str(source_db_path), "--apply"])
+
+    assert exit_code != 0
+
+
+def test_faildb_10_list_and_verify_remain_functional_without_active_db_resolution(source_db_path, backup_dir, monkeypatch):
+    dbc.create_backup(source_db_path, backup_dir, "staging", timestamp="20260101-090000")
+
+    monkeypatch.setattr(backup_database, "create_app", _raise(RuntimeError("simulated create_app failure")))
+
+    exit_code_list = backup_database.main(["--list", "--backup-dir", str(backup_dir)])
+    assert exit_code_list == 0
+
+    backup_path = backup_dir / "tracker-staging-20260101-090000.db"
+    exit_code_verify = backup_database.main(["--verify", str(backup_path), "--backup-dir", str(backup_dir)])
+    assert exit_code_verify == 0
+
+
+def test_faildb_11_backup_cli_behavior_unchanged(source_db_path, backup_dir, monkeypatch):
+    fake_app = make_app_for(source_db_path)
+    monkeypatch.setattr(backup_database, "create_app", lambda: fake_app)
+
+    exit_code = backup_database.main(["--environment", "staging", "--backup-dir", str(backup_dir)])
+
+    assert exit_code == 0
+    assert len(dbc.list_backups(backup_dir)) == 1
