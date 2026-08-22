@@ -20,7 +20,7 @@ from sqlalchemy.pool import NullPool
 
 from app import create_app
 from extensions import db
-from tests.conftest import auth_headers, create_child, register
+from tests.conftest import TEST_FRONTEND_ORIGIN, auth_headers, create_child, register
 from utils.observability import (
     REQUEST_ID_RE,
     check_database_ok,
@@ -346,7 +346,7 @@ def test_25_existing_authentication_behavior_unchanged(client):
 
 
 def test_27_cors_headers_remain_present(client, monkeypatch):
-    origin = "http://localhost:5173"
+    origin = TEST_FRONTEND_ORIGIN
     ok_resp = client.get("/api/health", headers={"Origin": origin})
     assert "Access-Control-Allow-Origin" in ok_resp.headers
 
@@ -411,7 +411,12 @@ def test_locked_database_returns_within_strict_upper_bound(tmp_path):
 
     # koneksi sqlite3 MENTAH terpisah, nahan EXCLUSIVE lock di file yang
     # SAMA — mensimulasikan database yang beneran macet/dikunci, tanpa
-    # perlu mock apa pun (locking SQLite asli).
+    # perlu mock apa pun (locking SQLite asli). EXCLUSIVE adalah lock
+    # TERKUAT SQLite (lihat https://sqlite.org/lockingv3.html) — nge-blok
+    # SEMUA koneksi lain yang beneran nyoba baca halaman database (lihat
+    # test_health_check_query_reads_the_actual_database_not_a_constant di
+    # bawah buat kenapa query pengecekannya HARUS beneran baca, bukan
+    # ekspresi konstan, biar lock ini ketauan di platform manapun).
     lock_conn = sqlite3.connect(str(db_path), isolation_level=None)
     lock_conn.execute("BEGIN EXCLUSIVE;")
     try:
@@ -456,6 +461,52 @@ def test_repeated_timeouts_do_not_increase_live_thread_count(tmp_path):
         lock_conn.close()
 
 
+def test_repeated_timeouts_do_not_leak_sqlite_connections(tmp_path, monkeypatch):
+    db_path = tmp_path / "health.db"
+    app = make_file_app(db_path)
+
+    # lock_conn dibikin SEBELUM spy dipasang — spy nge-patch sqlite3.connect
+    # secara GLOBAL (bukan cuma referensi di dalam utils/observability.py),
+    # jadi kalau lock_conn dibikin SESUDAH spy, connect() punya lock_conn
+    # sendiri bakal ikut kehitung juga dan bikin totalnya kelebihan 1.
+    lock_conn = sqlite3.connect(str(db_path), isolation_level=None)
+    lock_conn.execute("BEGIN EXCLUSIVE;")
+
+    _, opened_ids, closed_ids = _spy_on_sqlite_connect(monkeypatch)
+    try:
+        for _ in range(5):
+            ok, category = check_database_ok(app, timeout_seconds=0.2)
+            assert ok is False
+            assert category == "timeout"
+    finally:
+        lock_conn.execute("ROLLBACK;")
+        lock_conn.close()
+
+    # setiap koneksi sqlite3 MENTAH yang dibuka buat pengecekan (biar
+    # timeout kejadian pun) harus tetep ketutup lewat blok finally —
+    # nggak ada file descriptor/koneksi yang bocor walau query-nya gagal.
+    assert len(opened_ids) == 5
+    assert sorted(opened_ids) == sorted(closed_ids)
+
+
+def test_database_becomes_healthy_again_after_lock_is_released(tmp_path):
+    db_path = tmp_path / "health.db"
+    app = make_file_app(db_path)
+
+    lock_conn = sqlite3.connect(str(db_path), isolation_level=None)
+    lock_conn.execute("BEGIN EXCLUSIVE;")
+    ok_while_locked, category_while_locked = check_database_ok(app, timeout_seconds=0.2)
+    lock_conn.execute("ROLLBACK;")
+    lock_conn.close()
+
+    assert ok_while_locked is False
+    assert category_while_locked == "timeout"
+
+    ok_after_release, category_after_release = check_database_ok(app)
+    assert ok_after_release is True
+    assert category_after_release is None
+
+
 def test_health_endpoint_timeout_is_safe_in_response_and_logged_as_category(client, captured_logs, monkeypatch):
     monkeypatch.setattr("app.check_database_ok", lambda app: (False, "timeout"))
 
@@ -476,33 +527,69 @@ def test_health_endpoint_timeout_is_safe_in_response_and_logged_as_category(clie
     assert completion_records[0].db_check_category == "timeout"
 
 
-def test_health_check_never_runs_pragma_integrity_check(tmp_path, monkeypatch):
-    db_path = tmp_path / "health.db"
-    app = make_file_app(db_path)
-
+def _spy_on_sqlite_connect(monkeypatch, target="utils.observability.sqlite3.connect"):
+    """
+    sqlite3.Connection adalah tipe C-extension — nggak bisa nge-timpa
+    atribut instance-nya langsung (mis. `conn.execute = ...`), jadi
+    spy-nya lewat subclass Connection yang di-pass ke `factory=`
+    (mekanisme resmi yang didukung modul sqlite3 buat kasus ini). Dipakai
+    bareng buat nge-track statement yang dieksekusi DAN buat nge-track
+    connect()/close() (lihat test kebocoran koneksi di bawah).
+    """
     executed_statements = []
+    opened_ids = []
+    closed_ids = []
     original_connect = sqlite3.connect
 
-    # sqlite3.Connection adalah tipe C-extension — nggak bisa nge-timpa
-    # atribut instance-nya langsung (mis. `conn.execute = ...`), jadi
-    # spy-nya lewat subclass Connection yang di-pass ke `factory=`
-    # (mekanisme resmi yang didukung modul sqlite3 buat kasus ini).
     class _SpyConnection(sqlite3.Connection):
         def execute(self, sql, *a, **k):
             executed_statements.append(sql)
             return super().execute(sql, *a, **k)
 
+        def close(self):
+            closed_ids.append(id(self))
+            return super().close()
+
     def spy_connect(*args, **kwargs):
         kwargs["factory"] = _SpyConnection
-        return original_connect(*args, **kwargs)
+        conn = original_connect(*args, **kwargs)
+        opened_ids.append(id(conn))
+        return conn
 
-    monkeypatch.setattr("utils.observability.sqlite3.connect", spy_connect)
+    monkeypatch.setattr(target, spy_connect)
+    return executed_statements, opened_ids, closed_ids
+
+
+def test_health_check_query_reads_the_actual_database_not_a_constant(tmp_path, monkeypatch):
+    """
+    Isu 2 (korektif): `SELECT 1` tanpa FROM clause diverifikasi EMPIRIS
+    bisa dieksekusi SQLite TANPA pernah nyoba ambil lock (nggak nyentuh
+    halaman database manapun) — jadi nggak pernah BENERAN membuktikan
+    database-nya kebaca, dan nggak reliably ketauan kalau database-nya
+    lagi dikunci koneksi lain (root cause 2 test gagal di PythonAnywhere
+    Linux, meski lolos di Windows). Query-nya sekarang HARUS baca
+    `sqlite_master` (tabel sistem yang selalu ada, termasuk di database
+    kosong) biar SQLite genuinely acquire SHARED lock.
+    """
+    db_path = tmp_path / "health.db"
+    app = make_file_app(db_path)
+
+    executed_statements, opened_ids, closed_ids = _spy_on_sqlite_connect(monkeypatch)
 
     ok, category = check_database_ok(app)
 
     assert ok is True
-    assert executed_statements == ["SELECT 1;"]
-    assert not any("integrity_check" in s.lower() or "pragma" in s.lower() for s in executed_statements)
+    assert category is None
+    # PRAGMA busy_timeout doang yang boleh nyelip di samping query
+    # baca-nya sendiri — bukan pengecekan integritas apa pun.
+    assert not any("integrity_check" in s.lower() for s in executed_statements)
+    assert not any(s.strip().lower() == "select 1;" for s in executed_statements)
+    read_statements = [s for s in executed_statements if "pragma" not in s.lower()]
+    assert len(read_statements) == 1
+    assert "sqlite_master" in read_statements[0].lower()
+    assert "from" in read_statements[0].lower()
+    # 1 koneksi dibuka, 1 koneksi ditutup — nggak ada yang bocor
+    assert opened_ids == closed_ids
 
 
 # --------------------------------------------------------------------------
@@ -668,9 +755,20 @@ def test_error_logs_use_the_same_normalized_route_logic(client, captured_logs, m
 
 # --------------------------------------------------------------------------
 # Isu 4 — X-Request-ID lengkap di CORS (allow + expose), lintas origin
+#
+# SEMUA test di bagian ini pakai fixture `client` (lewat `app` di
+# conftest.py), yang sekarang tergantung ke fixture `frontend_origin_env`
+# — itu maksa FRONTEND_ORIGIN ke TEST_FRONTEND_ORIGIN (dideklarasikan di
+# conftest.py, di-reuse di sini biar 1 sumber kebenaran doang) SEBELUM
+# create_app() dipanggil, TERLEPAS dari environment host (mis.
+# PythonAnywhere yang FRONTEND_ORIGIN aslinya nunjuk ke origin Vercel
+# staging beneran, bukan localhost — itu akar masalah kenapa 8 test CORS
+# ini gagal di sana sebelumnya, meski lolos di mesin dev Windows yang
+# kebetulan .env-nya nyantumin localhost). monkeypatch.setenv otomatis
+# balikin env var ini ke nilai semula begitu tiap test kelar.
 # --------------------------------------------------------------------------
 
-_FRONTEND_ORIGIN = "http://localhost:5173"
+_FRONTEND_ORIGIN = TEST_FRONTEND_ORIGIN
 
 
 def test_preflight_allows_x_request_id_header(client):
@@ -712,7 +810,7 @@ def test_preflight_response_itself_carries_cors_origin_header(client):
             "Access-Control-Request-Headers": "X-Request-ID",
         },
     )
-    assert resp.headers.get("Access-Control-Allow-Origin") is not None
+    assert resp.headers.get("Access-Control-Allow-Origin") == _FRONTEND_ORIGIN
 
 
 def test_successful_response_exposes_x_request_id_header(client):
@@ -755,3 +853,52 @@ def test_credentials_support_and_no_wildcard_origin_unchanged(client):
     resp = client.get("/api/health", headers={"Origin": _FRONTEND_ORIGIN})
     assert resp.headers.get("Access-Control-Allow-Credentials") == "true"
     assert resp.headers.get("Access-Control-Allow-Origin") != "*"
+    assert resp.headers.get("Access-Control-Allow-Origin") == _FRONTEND_ORIGIN
+
+
+def test_cors_tests_unaffected_by_preexisting_pythonanywhere_style_env_var(monkeypatch):
+    """
+    Regresi eksplisit buat skenario yang bikin 8 test CORS gagal di
+    PythonAnywhere: environment HOST udah punya FRONTEND_ORIGIN ke-set
+    ke origin Vercel staging beneran SEBELUM app dibikin. Fixture
+    terpusat (`frontend_origin_env` di conftest.py) HARUS menang di atas
+    nilai host apa pun — dites langsung di sini (bukan lewat fixture
+    `client`) biar urutan "host env ke-set duluan, baru di-override"-nya
+    eksplisit dan nggak bergantung urutan resolusi fixture pytest.
+    """
+    monkeypatch.setenv("FRONTEND_ORIGIN", "https://baby-tracker-staging.vercel.app")
+    # ...meniru persis apa yang dilakuin fixture frontend_origin_env:
+    # override SEBELUM create_app() dipanggil.
+    monkeypatch.setenv("FRONTEND_ORIGIN", TEST_FRONTEND_ORIGIN)
+
+    app = create_app()
+    client = app.test_client()
+    resp = client.get("/api/health", headers={"Origin": TEST_FRONTEND_ORIGIN})
+
+    assert resp.headers.get("Access-Control-Allow-Origin") == TEST_FRONTEND_ORIGIN
+    assert resp.headers.get("Access-Control-Allow-Credentials") == "true"
+
+
+def test_non_default_configured_origin_is_honored(monkeypatch):
+    """
+    Bukti eksplisit kalau CORS-nya beneran BACA FRONTEND_ORIGIN (bukan
+    hardcode ke localhost di suatu tempat): pakai origin Vercel-style
+    yang BUKAN default/localhost sama sekali, konfigurasi app langsung
+    (bukan fixture `client` yang udah dikunci ke TEST_FRONTEND_ORIGIN),
+    dan buktiin origin itu yang dapet akses CORS — origin default/test
+    yang LAIN justru harus DITOLAK di app yang sama.
+    """
+    custom_origin = "https://baby-tracker-staging.vercel.app"
+    monkeypatch.setenv("FRONTEND_ORIGIN", custom_origin)
+
+    app = create_app()
+    client = app.test_client()
+
+    resp = client.get("/api/health", headers={"Origin": custom_origin})
+    assert resp.headers.get("Access-Control-Allow-Origin") == custom_origin
+    assert resp.headers.get("Access-Control-Allow-Credentials") == "true"
+
+    other_resp = client.get("/api/health", headers={"Origin": TEST_FRONTEND_ORIGIN})
+    acao = other_resp.headers.get("Access-Control-Allow-Origin")
+    assert acao != TEST_FRONTEND_ORIGIN
+    assert acao != "*"

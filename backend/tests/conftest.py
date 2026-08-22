@@ -18,9 +18,35 @@ import pytest
 from app import create_app
 from extensions import db
 
+# Origin frontend yang DETERMINISTIK buat seluruh test suite — app.py baca
+# FRONTEND_ORIGIN dari os.environ tiap create_app() dipanggil (biar production
+# gampang dikonfigurasi ulang tanpa redeploy kode), tapi itu artinya test yang
+# ngirim header `Origin: http://localhost:5173` bisa gagal di mesin mana pun
+# yang kebetulan udah punya FRONTEND_ORIGIN lain ke-set (mis. PythonAnywhere,
+# yang env host-nya nunjuk ke origin Vercel staging beneran, bukan localhost).
+# lihat fixture frontend_origin_env di bawah — dipaksa SEBELUM app dibikin,
+# jadi test CORS nggak pernah bergantung sama apa pun yang ada di environment
+# host.
+TEST_FRONTEND_ORIGIN = "http://localhost:5173"
+
 
 @pytest.fixture
-def app():
+def frontend_origin_env(monkeypatch):
+    """
+    Paksa FRONTEND_ORIGIN ke nilai test yang deterministik SEBELUM
+    create_app() dipanggil — apa pun yang kebetulan udah ke-set di
+    environment host (FRONTEND_ORIGIN, FRONTEND_URL, atau sejenisnya).
+    `monkeypatch` otomatis balikin env var ini ke nilai semula (atau
+    unset) begitu test ini kelar, jadi nggak ada state yang bocor ke test
+    lain — dipusatkan di sini biar test CORS individual nggak perlu
+    ngulang-ngulang manipulasi environment sendiri-sendiri.
+    """
+    monkeypatch.setenv("FRONTEND_ORIGIN", TEST_FRONTEND_ORIGIN)
+    return TEST_FRONTEND_ORIGIN
+
+
+@pytest.fixture
+def app(frontend_origin_env):
     application = create_app()
     with application.app_context():
         yield application

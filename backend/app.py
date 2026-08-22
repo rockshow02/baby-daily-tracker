@@ -112,11 +112,11 @@ def create_app(config_overrides=None):
     def health():
         """
         Endpoint publik, TANPA autentikasi, murah — dipanggil monitoring
-        eksternal ATAU scripts/post_deploy_smoke_test.py. Cuma SELECT 1
-        (bukan PRAGMA integrity_check penuh) dan TIDAK PERNAH membocorkan
-        tipe/path database, nama tabel, jumlah record, hostname, environment
-        variable, atau detail exception mentah — lihat backend/docs/
-        OBSERVABILITY.md buat kontrak lengkapnya.
+        eksternal ATAU scripts/post_deploy_smoke_test.py. Cuma baca 1 baris
+        `sqlite_master` (bukan PRAGMA integrity_check penuh) dan TIDAK
+        PERNAH membocorkan tipe/path database, nama tabel, jumlah record,
+        hostname, environment variable, atau detail exception mentah —
+        lihat backend/docs/OBSERVABILITY.md buat kontrak lengkapnya.
         """
         request_id = getattr(g, "request_id", None) or "unknown"
         ok, category = check_database_ok(app)

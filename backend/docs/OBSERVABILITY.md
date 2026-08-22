@@ -16,9 +16,9 @@ Semua kode intinya ada di [`utils/observability.py`](../utils/observability.py)
 GET /api/health
 ```
 
-Publik, **TANPA autentikasi**, murah — cuma `SELECT 1` (bukan
-`PRAGMA integrity_check` penuh), dibatasi genuine 2 detik (default,
-`DEFAULT_HEALTH_CHECK_TIMEOUT_SECONDS`).
+Publik, **TANPA autentikasi**, murah — cuma baca 1 baris dari
+`sqlite_master` (bukan `PRAGMA integrity_check` penuh), dibatasi genuine
+2 detik (default, `DEFAULT_HEALTH_CHECK_TIMEOUT_SECONDS`).
 
 ### Bound waktu yang GENUINE (bukan thread-per-request)
 
@@ -38,12 +38,28 @@ buat deployment SQLite backend ini (lihat [`config.py`](../config.py) —
 PythonAnywhere, nggak pernah driver lain):
 
 - Buka 1 koneksi `sqlite3` MENTAH, read-only, PENDEK UMURNYA (connect ->
-  `SELECT 1` -> close) — **bukan** lewat connection pool
+  baca `sqlite_master` -> close) — **bukan** lewat connection pool
   Flask-SQLAlchemy, dan **bukan** di thread terpisah.
-- `timeout=` yang di-pass ke `sqlite3.connect()` adalah **busy_timeout
-  SQLite beneran** (mekanisme retry level driver/C) — kalau file lagi
-  dikunci koneksi lain, SQLite sendiri yang retry sampai batas waktu itu,
-  lalu raise `OperationalError`. Bound-nya datang dari driver, BUKAN dari
+- Query-nya BENERAN baca isi database (`SELECT 1 FROM sqlite_master
+  LIMIT 1` — tabel sistem yang SELALU ada, termasuk di database kosong
+  tanpa tabel user sama sekali), **bukan** ekspresi konstan (`SELECT 1`
+  doang, TANPA `FROM`). Ini koreksi dari draft awal, ketahuan lewat
+  eksperimen langsung (bukan asumsi): SQLite di beberapa platform bisa
+  ngevaluasi `SELECT 1` tanpa PERNAH nyoba ambil lock kooperatif sama
+  sekali (nggak nyentuh halaman database), jadi walau koneksi LAIN nahan
+  `EXCLUSIVE` lock, query itu bisa aja tetep "berhasil" instan — nggak
+  BENERAN membuktikan database-nya kebaca. `SELECT ... FROM
+  sqlite_master` ngharuskan SQLite acquire SHARED lock buat baca halaman
+  skema, jadi lock koneksi lain BENERAN ketauan. **Verifikasi empiris**
+  (dijalankan langsung, bukan cuma dibaca dokumentasinya) ada di
+  `test_health_check_query_reads_the_actual_database_not_a_constant` di
+  `test_observability.py`.
+- `timeout=` yang di-pass ke `sqlite3.connect()`, DITAMBAH `PRAGMA
+  busy_timeout` eksplisit yang dijalankan begitu konek (2 lapis, nilainya
+  selaras) — keduanya sama-sama nerjemahin jadi **busy_timeout SQLite
+  beneran** (mekanisme retry level driver/C). Kalau file lagi dikunci
+  koneksi lain, SQLite sendiri yang retry sampai batas waktu itu, lalu
+  raise `OperationalError`. Bound-nya datang dari driver, BUKAN dari
   Python yang nge-cancel/kill thread.
 - Karena nggak ada thread yang dibikin buat pengecekan biasa, **nggak ada
   apa pun yang bisa "nyangkut" di background** walau timeout kejadian —
@@ -63,6 +79,25 @@ PythonAnywhere, nggak pernah driver lain):
   (elapsed >= timeout -> `"timeout"`; lebih cepat -> `"error"`, mis. file
   nggak ada/rusak) — BUKAN lewat parsing pesan exception-nya, biar
   kategorinya sendiri nggak pernah butuh nyimpen teks exception mentah.
+
+**Perbedaan perilaku antar-platform yang ketahuan lewat eksperimen:**
+locking SQLite ("nyoba ambil lock kalau beneran perlu baca file") itu
+LOGIKA level SQLite core, sama persis di semua platform — tapi
+ENFORCEMENT-nya di level OS beda. Di eksperimen dev lokal (Windows),
+bahkan `SELECT 1` doang KADANG udah keblokir (kemungkinan Windows'
+sendiri nerapin locking wajib di level `LockFileEx`/OS buat byte range
+tertentu, independen dari protokol locking kooperatif SQLite) — jadi bug
+awal ini sempet KETUTUPAN di Windows (tampak "jalan"), padahal query-nya
+sendiri nggak pernah beneran nyoba lock. Di Linux (POSIX advisory
+locking via `fcntl`, yang dipakai PythonAnywhere), locking itu KOOPERATIF
+— kalau SQLite nggak pernah manggil mekanisme lock-nya sendiri (karena
+query-nya nggak butuh baca file), OS nggak akan pernah nolak/nge-block
+apa pun, walau ada koneksi lain yang nahan `EXCLUSIVE`. Itu PERSIS akar
+masalah kenapa 2 test locking ini lolos di Windows tapi gagal di
+PythonAnywhere Linux. Query yang beneran baca `sqlite_master` (bagian di
+atas) menutup celah ini di KEDUA platform, karena sekarang SQLite-nya
+sendiri yang genuinely manggil protokol locking-nya — bukan cuma
+kebetulan ketutup sama enforcement OS yang platform-spesifik.
 
 **Batasan yang diketahui:** `timeout=` sqlite3 cuma membatasi retry
 SQLITE_BUSY (lock antar-koneksi) — BUKAN syscall `open()` file itu
@@ -175,6 +210,33 @@ korelasi yang ada sekarang cukup lewat request ID yang di-GENERATE
 BACKEND dan dibaca dari respons). CORS-nya udah siap kalau suatu saat
 dibutuhkan (mis. buat nyambungin log frontend custom ke request ID
 backend), tapi nambahin behavior kirim itu di frontend BELUM dikerjakan.
+
+### Isolasi test dari `FRONTEND_ORIGIN` environment host
+
+`create_app()` baca `FRONTEND_ORIGIN` dari `os.environ` tiap dipanggil —
+itu KEPUTUSAN YANG BENAR buat production (operator bisa ganti origin
+frontend tanpa redeploy kode), tapi artinya test yang ngirim header
+`Origin: http://localhost:5173` bisa gagal di mesin mana pun yang
+kebetulan udah punya `FRONTEND_ORIGIN` LAIN ke-set — persis yang
+kejadian di PythonAnywhere (environment host-nya nunjuk ke origin Vercel
+staging beneran, bukan localhost), sementara di mesin dev Windows lokal
+kebetulan `.env`-nya udah nyantumin `http://localhost:5173` jadi
+"kelihatan jalan". Ini murni cacat ISOLASI TEST, bukan cacat production —
+`create_app()`/CORS-nya sendiri nggak diubah buat fix ini.
+
+Fixture `frontend_origin_env` di
+[`tests/conftest.py`](../tests/conftest.py) maksa `FRONTEND_ORIGIN` ke
+`TEST_FRONTEND_ORIGIN` (`"http://localhost:5173"`) SEBELUM `create_app()`
+dipanggil, lewat `monkeypatch.setenv()` — otomatis balik ke nilai semula
+begitu tiap test kelar (nggak ada state yang bocor antar test). Fixture
+`app` (dipakai fixture `client`, dipakai HAMPIR SEMUA test di seluruh
+suite) sekarang depend ke fixture ini, jadi SATU titik konfigurasi yang
+berlaku ke semua test — bukan tiap test CORS ngulang-ngulang
+`monkeypatch.setenv` sendiri-sendiri. Test yang butuh origin LAIN (mis.
+`test_non_default_configured_origin_is_honored`) bikin app-nya sendiri
+langsung (bukan lewat fixture `client` yang udah dikunci ke
+`TEST_FRONTEND_ORIGIN`), buat ngebuktiin mekanismenya beneran baca
+`FRONTEND_ORIGIN` apa pun, bukan hardcode ke localhost.
 
 ## 3. Logging terstruktur (JSON per baris)
 
@@ -431,10 +493,11 @@ task) — jalanin manual:
 
 | File | Perubahan |
 |---|---|
-| `backend/utils/observability.py` | Inti request ID, logging, error handler, DB health check — DIREVISI: health check dibatasi genuine lewat busy_timeout SQLite (bukan ThreadPoolExecutor), log exception default nggak lagi bawa pesan/traceback mentah (cuma frame lokasi yang disaring), route yang nggak match dicatat sebagai `"<unmatched>"` (bukan `request.path` mentah) |
-| `backend/app.py` | Wiring observability + endpoint `/api/health` — DIREVISI: config `OBSERVABILITY_LOG_RAW_TRACEBACKS` (default False), CORS `allow_headers`/`expose_headers` nyantumin `X-Request-ID`, route health pakai signature `check_database_ok()` yang baru (`(ok, category)`) |
+| `backend/utils/observability.py` | Inti request ID, logging, error handler, DB health check — DIREVISI (ronde 2): query health check sekarang beneran baca `sqlite_master` (bukan ekspresi konstan `SELECT 1`), ditambah `PRAGMA busy_timeout` eksplisit |
+| `backend/app.py` | Wiring observability + endpoint `/api/health` — DIREVISI (ronde 2): docstring endpoint disesuaikan sama query baru; CORS/error-handling logic-nya SENDIRI nggak diubah (bug CORS ternyata di isolasi test, bukan di sini) |
+| `backend/tests/conftest.py` | DIREVISI (ronde 2): fixture terpusat `frontend_origin_env` + konstanta `TEST_FRONTEND_ORIGIN`, dipakai fixture `app`/`client` — maksa `FRONTEND_ORIGIN` deterministik di seluruh suite, terlepas dari environment host |
 | `backend/tests/test_notifications.py` | 1 test disesuaikan (`PROPAGATE_EXCEPTIONS=False`), invariant intinya sama |
-| `backend/tests/test_observability.py` | 45 test — termasuk test korektif buat bound health check, privasi log exception, normalisasi route, dan CORS `X-Request-ID` |
+| `backend/tests/test_observability.py` | 49 test — DIREVISI (ronde 2): 4 test baru + 1 diperkuat buat health-check query/lock/leak, 2 test baru buat isolasi CORS dari environment host |
 | `backend/scripts/production_health_check.py` | Diagnostik manual (nggak diubah di ronde korektif ini) |
 | `backend/tests/test_production_health_check.py` | 16 test |
 | `backend/scripts/post_deploy_smoke_test.py` | Smoke test manual (nggak diubah di ronde korektif ini) |
@@ -442,4 +505,4 @@ task) — jalanin manual:
 | `frontend/src/components/ErrorBoundary.jsx` | Error Boundary React (nggak diubah di ronde korektif ini) |
 | `frontend/src/components/ErrorBoundary.test.jsx` | 9 test |
 | `frontend/src/main.jsx` | Membungkus `<App />` dengan `<ErrorBoundary>` |
-| `backend/docs/OBSERVABILITY.md` | Dokumen ini — direvisi buat 4 perbaikan korektif di atas |
+| `backend/docs/OBSERVABILITY.md` | Dokumen ini — direvisi buat perbaikan korektif ronde 1 & 2 |

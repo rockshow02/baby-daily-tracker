@@ -364,14 +364,13 @@ def register_error_handlers(app, logger):
 
 
 # --------------------------------------------------------------------------
-# Pengecekan kesehatan database — RINGAN (SELECT 1), BUKAN integrity_check
-# penuh (itu cuma buat script diagnostik manual, lihat scripts/
-# production_health_check.py).
+# Pengecekan kesehatan database — RINGAN, BUKAN integrity_check penuh (itu
+# cuma buat script diagnostik manual, lihat scripts/production_health_check.py).
 #
 # DIRANCANG KHUSUS buat deployment SQLite backend ini (lihat config.py —
 # SQLALCHEMY_DATABASE_URI SELALU SQLite file lokal di production/staging
 # PythonAnywhere, nggak pernah driver lain). Bound waktu di sini datang
-# dari `timeout=` SQLite (busy_timeout) LEVEL DRIVER/C, BUKAN dari
+# dari `timeout=`/`PRAGMA busy_timeout` SQLite LEVEL DRIVER/C, BUKAN dari
 # cancel/kill thread Python — sebelumnya implementasi ini pakai
 # ThreadPoolExecutor(max_workers=1).submit(...).result(timeout=...), yang
 # kalau timeout kejadian, `with ThreadPoolExecutor(...)` di baris
@@ -379,13 +378,19 @@ def register_error_handlers(app, logger):
 # worker yang macet itu SAMPAI SELESAI — jadi /api/health tetep bisa
 # nge-hang selama operasi DB-nya macet, persis kebalikan dari tujuan
 # timeout itu sendiri. Versi ini SAMA SEKALI nggak bikin thread baru buat
-# health check biasa: query "SELECT 1" jalan sinkron di thread request
-# yang sama, dibatasi busy_timeout SQLite bawaan — kalau limitnya
-# kelewat, sqlite3 sendiri yang raise OperationalError (bukan Python yang
-# nge-cancel apa pun), jadi TIDAK ADA sisa worker yang nyangkut di
-# background, TIDAK ADA thread yang dibikin per-request (jadi TIDAK ADA
-# cara buat request /api/health yang bertubi-tubi bikin jumlah thread
-# nambah terus) — resource bound-nya otomatis, bukan lewat pool.
+# health check biasa: query jalan sinkron di thread request yang sama,
+# dibatasi busy_timeout SQLite bawaan — kalau limitnya kelewat, sqlite3
+# sendiri yang raise OperationalError (bukan Python yang nge-cancel apa
+# pun), jadi TIDAK ADA sisa worker yang nyangkut di background, TIDAK ADA
+# thread yang dibikin per-request (jadi TIDAK ADA cara buat request
+# /api/health yang bertubi-tubi bikin jumlah thread nambah terus) —
+# resource bound-nya otomatis, bukan lewat pool.
+#
+# QUERY-NYA BENERAN BACA DATABASE (bukan ekspresi konstan): lihat
+# _sqlite_health_read_bounded di bawah buat alasannya (diverifikasi
+# EMPIRIS, bukan asumsi — SELECT 1 tanpa FROM clause nggak pernah nyoba
+# ambil lock SQLite sama sekali di sebagian platform, jadi nggak pernah
+# ketauan kalau database-nya lagi dikunci koneksi lain).
 #
 # Kalau suatu saat aplikasi ini pindah ke database non-SQLite, bound
 # genuine kayak gini butuh dirancang ulang lewat mekanisme driver yang
@@ -435,20 +440,42 @@ def _resolve_sqlite_health_check_path(app):
     return path.resolve()
 
 
-def _sqlite_select_1_bounded(db_path, timeout_seconds):
+def _sqlite_health_read_bounded(db_path, timeout_seconds):
     """
     1 koneksi sqlite3 MENTAH (bukan lewat pool Flask-SQLAlchemy),
-    read-only, PENDEK UMURNYA: connect -> SELECT 1 -> close, nggak lebih.
-    `timeout=` di sini diteruskan jadi busy_timeout SQLite BENERAN (level
-    driver/C) — kalau file lagi dikunci koneksi lain, SQLite RETRY
-    otomatis sampai maksimal `timeout_seconds` baru raise
-    OperationalError. Genuine bound dari driver, BUKAN thread yang
-    di-cancel dari Python.
+    read-only, PENDEK UMURNYA: connect -> baca 1 baris `sqlite_master` ->
+    close, nggak lebih.
+
+    QUERY-NYA SENGAJA BENERAN BACA ISI DATABASE (`sqlite_master`, tabel
+    sistem yang SELALU ada di setiap file SQLite valid — termasuk yang
+    masih kosong tanpa tabel user sama sekali — jadi query ini nggak
+    pernah butuh tabel app tertentu buat sukses), BUKAN ekspresi konstan
+    kayak `SELECT 1` doang. Ini KOREKSI dari implementasi awal yang pakai
+    `SELECT 1` mentah: diverifikasi EMPIRIS (bukan asumsi) kalau `SELECT
+    1` tanpa FROM clause bisa dieksekusi SQLite tanpa pernah nyoba ambil
+    lock kooperatif sama sekali di beberapa platform (nggak nyentuh
+    halaman database manapun) — jadi walau koneksi LAIN nahan lock
+    EXCLUSIVE, `SELECT 1` bisa aja tetep "berhasil" instan tanpa BENERAN
+    membuktikan database-nya kebaca. `SELECT ... FROM sqlite_master`
+    ngharuskan SQLite acquire SHARED lock buat baca halaman skema —
+    tepat mekanisme yang bikin lock EXCLUSIVE koneksi lain KETAUAN (lihat
+    backend/docs/OBSERVABILITY.md buat detail eksperimennya).
+
+    `timeout=` di `sqlite3.connect()` DAN `PRAGMA busy_timeout` eksplisit
+    di bawah (2 lapis, selaras nilainya) sama-sama nerjemahin jadi
+    busy_timeout SQLite BENERAN (level driver/C) — kalau file lagi
+    dikunci koneksi lain, SQLite RETRY otomatis sampai maksimal
+    `timeout_seconds` baru raise OperationalError. Genuine bound dari
+    driver, BUKAN thread yang di-cancel dari Python. `PRAGMA
+    busy_timeout` sendiri CUMA nyetel konfigurasi koneksi lokal — nggak
+    pernah butuh lock/nyentuh isi database, jadi selalu instan.
     """
     uri = f"file:{db_path.as_posix()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, timeout=timeout_seconds)
     try:
-        conn.execute("SELECT 1;")
+        busy_timeout_ms = max(0, int(timeout_seconds * 1000))
+        conn.execute(f"PRAGMA busy_timeout = {busy_timeout_ms};")
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1;")
     finally:
         conn.close()
 
@@ -469,17 +496,20 @@ def check_database_ok(app, timeout_seconds=DEFAULT_HEALTH_CHECK_TIMEOUT_SECONDS)
     try:
         db_path = _resolve_sqlite_health_check_path(app)
         if db_path is not None:
-            _sqlite_select_1_bounded(db_path, timeout_seconds)
+            _sqlite_health_read_bounded(db_path, timeout_seconds)
         else:
             # In-memory SQLite (test suite doang, lihat docstring di
             # atas) -- nggak ada lock antar-koneksi yang mungkin
             # kejadian, jadi query langsung lewat session ORM (nggak
             # butuh wrapper tambahan; nggak ada skenario "macet" yang
             # genuine buat database yang cuma ada di 1 proses memory).
+            # Query-nya tetep baca `sqlite_master` (bukan ekspresi
+            # konstan) biar konsisten "beneran baca database" sama jalur
+            # file-based di atas.
             from extensions import db
 
             with app.app_context():
-                db.session.execute(text("SELECT 1"))
+                db.session.execute(text("SELECT 1 FROM sqlite_master LIMIT 1"))
                 db.session.remove()
         return True, None
     except Exception:
