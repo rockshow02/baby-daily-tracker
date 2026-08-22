@@ -278,6 +278,19 @@ def test_42c_valid_critical_config_value_never_shown(workdir):
     assert "super-secret-pytest-value-xyz" not in by_name["critical_config"].detail
 
 
+def test_42d_dotenv_is_loaded_before_environment_based_config_import():
+    """Cegah regresi: Config membaca SECRET_KEY saat module di-import."""
+    app_source = (Path(BACKEND_DIR) / "app.py").read_text(encoding="utf-8")
+
+    dotenv_call = 'load_dotenv(dotenv_path=Path(__file__).resolve().with_name(".env"))'
+    config_import = "from config import Config, DevConfig, TestConfig"
+
+    assert dotenv_call in app_source
+    assert config_import in app_source
+    assert app_source.index(dotenv_call) < app_source.index(config_import)
+    assert "override=True" not in app_source[: app_source.index(config_import)]
+
+
 # --------------------------------------------------------------------------
 # 43: disk space rendah terdeteksi (lewat mock shutil.disk_usage)
 # --------------------------------------------------------------------------

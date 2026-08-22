@@ -1,6 +1,14 @@
 import os
+from pathlib import Path
+
 from flask import Flask, g, jsonify
 from dotenv import load_dotenv
+
+# Muat file environment backend sebelum config.py dievaluasi. Config menyimpan
+# beberapa nilai sebagai atribut class saat module di-import, jadi pemanggilan
+# load_dotenv setelah import config akan terlambat. Path eksplisit membuat
+# bootstrap tetap benar saat proses dijalankan dari working directory lain.
+load_dotenv(dotenv_path=Path(__file__).resolve().with_name(".env"))
 
 from config import Config, DevConfig, TestConfig
 from extensions import db, cors
@@ -11,8 +19,6 @@ from utils.observability import (
     register_request_hooks,
     resolve_app_version,
 )
-
-load_dotenv()
 
 
 def create_app(config_overrides=None):
