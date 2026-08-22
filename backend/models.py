@@ -660,6 +660,18 @@ class ChildCaregiver(db.Model):
     )
 
     def to_dict(self):
+        """
+        SENGAJA nyertain email apa adanya, TANPA cek siapa yang minta —
+        model nggak boleh (dan nggak bisa) tau konteks otorisasi
+        pemanggilnya. CUMA aman dipanggil dari endpoint yang SUDAH
+        ditegakkan owner-only di layer route (update_caregiver_role,
+        remove_caregiver — lihat routes/children_routes.py). Endpoint
+        BACA yang bisa diakses editor/viewer juga (list_caregivers)
+        SENGAJA TIDAK PERNAH manggil method ini — dia punya serializer
+        eksplisit sendiri (`_caregiver_entry()`) yang cuma nyertain email
+        kalau peminta-nya kebukti owner (Issue 2, lihat
+        backend/docs/ROLES_PERMISSIONS.md).
+        """
         return {
             "id": self.id,
             "user_id": self.user_id,

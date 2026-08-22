@@ -190,7 +190,9 @@ atas) — jangan cuma rollback kode di atas database yang udah termigrasi.
 
 - `GET /children/<id>/caregivers` — daftar caregiver + peran (owner
   disintesis dari `Child.user_id`, digabung sama baris
-  `child_caregivers`). Semua role bisa baca ini (bukan cuma owner).
+  `child_caregivers`). Semua role bisa BACA endpoint ini (bukan cuma
+  owner) — tapi ISI-nya beda tergantung peran peminta, lihat kontrak
+  privasi di bawah.
 - `PUT /children/<id>/caregivers/<user_id>` — ubah peran editor<->viewer.
   Owner-only. Menolak: menetapkan `'owner'`, mengubah non-member,
   membership anak LAIN (IDOR — query difilter `child_id` + `user_id`
@@ -199,11 +201,84 @@ atas) — jangan cuma rollback kode di atas database yang udah termigrasi.
 - `DELETE /children/<id>/caregivers/<user_id>` — cabut akses. Owner-only,
   owner nggak bisa cabut dirinya sendiri.
 
-Respons endpoint di atas **TIDAK PERNAH** menambahkan field baru yang
-bocorin data privat di luar yang sudah ada sebelumnya (`user_id`, nama,
-email, role) — email TETAP ada di respons (fitur existing, dipakai owner
-buat kenalin siapa caregivernya), tapi endpoint BARU (ubah peran/cabut)
-cuma balikin field minimal yang perlu.
+### Kontrak privasi `GET /children/<id>/caregivers`
+
+**Semua role** dapet: `user_id`, `name`, `role`.
+
+**CUMA owner** (peminta-nya, bukan baris yang lagi ditampilin) TAMBAHAN
+dapet: `email`.
+
+Editor/viewer **TIDAK PERNAH** dapet (biarpun mereka boleh baca endpoint
+ini buat keperluan UI baca-saja/filter audit trail per caregiver):
+email, kode undangan, ID Telegram, atau field akun privat lain apa pun.
+
+Ini ditegakkan lewat serializer EKSPLISIT di layer route
+(`routes/children_routes.py:_owner_entry()` / `_caregiver_entry()`),
+BUKAN lewat `ChildCaregiver.to_dict()` model — method model itu SENGAJA
+tetap nyertain email apa adanya (nggak "otomatis aman"), soalnya model
+nggak punya konteks siapa yang nanya; `to_dict()` CUMA aman dipanggil
+dari endpoint yang SUDAH ditegakkan owner-only sendiri di layer route
+(`PUT`/`DELETE` di atas — owner selalu jadi peminta di situ per definisi
+endpoint-nya).
+
+Frontend (`CaregiverModal.jsx`) SUDAH disesuaikan buat nggak
+mengasumsikan `email` selalu ada di tiap baris caregiver (dirender
+kondisional), dan pakai fallback nama generik ("Pengasuh") kalau `name`
+kosong — TIDAK PERNAH nampilin email sebagai pengganti nama.
+
+## Import JSON (`POST /children/import-json`) — kepemilikan & transaksi
+
+`export-json`/`import-json` (`routes/backup_routes.py`) itu fitur
+backup PER-USER (unduh 1 anak jadi file JSON, pulihkan jadi anak BARU di
+akun yang lagi login) — BEDA dari backup admin SQLite level-server
+(`scripts/backup_database.py`, lihat
+[`DATABASE_BACKUP_RESTORE.md`](DATABASE_BACKUP_RESTORE.md)).
+
+**Kepemilikan anak yang diimport SEPENUHNYA dari `Child.user_id =
+<user yang lagi login>`** — SAMA PERSIS pola `create_child`/`OnboardingWizard`.
+Endpoint ini:
+
+- **TIDAK PERNAH** bikin baris `ChildCaregiver` buat pengimpor (bug yang
+  diperbaiki — versi sebelumnya masih nyisipin `ChildCaregiver(role=
+  "owner")`, yang SEKARANG melanggar CHECK constraint `role IN ('editor',
+  'viewer')` dan bikin import gagal 500).
+- **TIDAK PERNAH** membaca/mempercayai `user_id`, `owner_id`,
+  `created_by_user_id`, ATAUPUN `role` dari isi file JSON yang diimport
+  — field-field itu (kalaupun somehow ada di file backup-nya) diabaikan
+  total. `export_json()` sendiri emang nggak pernah menulis field-field
+  itu ke file backup dari awal.
+- Record yang diimport (feeding/sleep/dst) dapet `created_by_user_id =
+  <user yang ngimpor>` — BUKAN `NULL`, BUKAN dari file JSON. Ini pilihan
+  sengaja: pengimpor SECARA NYATA "membuat" baris-baris ini di akun ini
+  SEKARANG (persis kayak create_feeding_log dkk ngisi `created_by_user_id`
+  dari user yang lagi request, bukan dari input klien) — bukan
+  backward-compat lama yang butuh `NULL` (fitur atribusi udah ada jauh
+  sebelum fitur import JSON ini dites ulang, jadi nggak ada kontrak lama
+  yang perlu dipertahankan).
+
+**Transaksi atomik + rollback + bersih-bersih foto**: seluruh proses
+(anak + SEMUA record turunannya) ada di 1 blok `try` yang di-commit
+SEKALI di akhir. Kalau ADA APAPUN yang gagal (field wajib kosong,
+format tanggal/waktu salah, pelanggaran constraint database, dst)
+SEBELUM commit itu:
+
+1. `db.session.rollback()` — anak dan SEMUA record yang sempat
+   ditambahkan ke sesi (belum ter-commit) batal semua, bukan sebagian.
+2. Kalau file foto sempat KETULIS ke disk SEBELUM kegagalan itu
+   (foto ditulis sebelum record-record lain, dan gagalnya belakangan),
+   file itu ikut DIHAPUS di sini — nggak ada file foto yatim yang
+   nyangkut di `uploads/` buat anak yang gagal keimport.
+3. Input yang DIHARAPKAN bisa nggak valid (file backup rusak/lama/diedit
+   manual — `KeyError`/`ValueError`/`TypeError`/`AttributeError` dari
+   parsing, atau `IntegrityError` dari database) balikin `400` dengan
+   pesan yang jelas — **BUKAN** `500` generik. Kegagalan yang BENERAN
+   nggak terduga (disk penuh, DB down) tetap di-rollback+bersihin dulu,
+   TAPI responsnya tetap lewat handler error global yang sudah
+   ter-sanitasi (pola yang sama dipakai semua route lain di app ini).
+
+Respons sukses (`{"success": true, "child": {...}}`) nyertain `role:
+"owner"` eksplisit — SAMA kontraknya kayak respons child-scoped lain
+(`GET /children`, `GET /children/<id>`, dst).
 
 ## Integrasi Audit Trail
 
@@ -313,3 +388,18 @@ diasumsikan `owner`/`editor` cuma karena field-nya nggak ada.
       ditinjau" di Sync Center, BUKAN otomatis tersimpan.
 - [ ] Audit trail nunjukin event "caregiver diundang/diubah/dicabut"
       tanpa nampilin email/kode undangan/nilai peran mentah.
+- [ ] Export JSON 1 anak, lalu Import JSON file itu -> anak baru kebuat,
+      `GET /children` nunjukin anak baru itu dengan `role: "owner"`,
+      DAN muncul di `GET /children/<id>/caregivers` SEBAGAI baris owner
+      sintetis (bukan baris `child_caregivers` yang beneran).
+- [ ] Import file JSON yang field wajibnya kosong/rusak (mis.
+      `birth_date` bukan format tanggal) -> balikin `400` dengan pesan
+      jelas, TIDAK ada anak baru muncul di daftar anak sama sekali.
+- [ ] Import file JSON yang isinya foto -> foto kepulihkan; kalau import
+      SENGAJA digagalin di tengah jalan (mis. lewat log entry yang rusak
+      SETELAH foto), cek `backend/uploads/` — file foto anak yang gagal
+      itu TIDAK nyangkut di sana.
+- [ ] Editor/viewer buka daftar caregiver (kalau ada akses baca-nya) ->
+      TIDAK ada kolom/field email yang keliatan di respons API-nya
+      (cek lewat DevTools Network, bukan cuma UI — UI-nya sendiri emang
+      cuma kebuka buat owner).

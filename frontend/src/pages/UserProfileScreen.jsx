@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { api } from "../api/client";
+import { describeRole, isOwner } from "../utils/roles";
 
 export default function UserProfileScreen({ user, onUserUpdated }) {
   const [name, setName] = useState(user.name);
@@ -25,19 +26,20 @@ export default function UserProfileScreen({ user, onUserUpdated }) {
   const load = useCallback(async () => {
     setLoadingRoles(true);
     try {
-      const children = await api.listChildren();
-      const withRoles = await Promise.all(
-        children.map(async (c) => {
-          const caregivers = await api.listCaregivers(c.id);
-          const me = caregivers.find((cg) => cg.user_id === user.id);
-          return { ...c, role: me?.role || "caregiver" };
-        })
-      );
-      setChildrenRoles(withRoles);
+      // Caregiver Roles & Permissions Phase 1 — api.listChildren() UDAH
+      // nyertain `role` (peran EFEKTIF user yang login) langsung di
+      // respons-nya (lihat backend/docs/ROLES_PERMISSIONS.md). SEBELUMNYA
+      // layar ini nge-derive peran sendiri lewat api.listCaregivers(c.id)
+      // per anak (N+1 request) + nyari user_id di daftar caregiver-nya —
+      // itu asumsi BASI dari sebelum owner selalu ada baris
+      // ChildCaregiver-nya sendiri; sekarang cukup pakai `role` yang
+      // udah dikembalikan langsung, nggak perlu request tambahan sama
+      // sekali.
+      setChildrenRoles(await api.listChildren());
     } finally {
       setLoadingRoles(false);
     }
-  }, [user.id]);
+  }, []);
 
   useEffect(() => {
     load();
@@ -230,10 +232,10 @@ export default function UserProfileScreen({ user, onUserUpdated }) {
                 <p className="text-sm text-ink">{c.nickname || c.name}</p>
                 <span
                   className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
-                    c.role === "owner" ? "bg-feed/15 text-feed" : "bg-sleep/15 text-sleep"
+                    isOwner(c.role) ? "bg-feed/15 text-feed" : "bg-sleep/15 text-sleep"
                   }`}
                 >
-                  {c.role === "owner" ? "Orang Tua / Pemilik" : "Pengasuh"}
+                  {describeRole(c.role)}
                 </span>
               </div>
             ))}

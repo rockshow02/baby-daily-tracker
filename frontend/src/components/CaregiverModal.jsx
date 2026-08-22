@@ -12,7 +12,7 @@ const INVITE_ROLE_OPTIONS = [
  * nampilin pintu masuk ke modal ini buat pemilik — lihat Caregiver
  * Roles & Permissions Phase 1, backend/docs/ROLES_PERMISSIONS.md).
  * Backend TETAP menegakkan ulang SEMUA batasan ini (owner-only invite/
- * ubah peran/cabut) — `myRole === "owner"` di bawah CUMA lapisan kedua
+ * ubah peran/cabut) — `isOwner(myRole)` di bawah CUMA lapisan kedua
  * (jaga-jaga kalau suatu saat komponen ini dipasang dari tempat lain).
  */
 export default function CaregiverModal({ child, currentUserId, onClose }) {
@@ -140,9 +140,15 @@ export default function CaregiverModal({ child, currentUserId, onClose }) {
                   <div className="flex items-center justify-between gap-2">
                     <div>
                       <p className="text-sm text-ink">
-                        {c.name} {isSelf && <span className="text-ink-faint">(kamu)</span>}
+                        {/* Nama kosong (edge case) fallback ke label generik —
+                            TIDAK PERNAH nampilin email sebagai pengganti nama
+                            (Issue 2, backend/docs/ROLES_PERMISSIONS.md). */}
+                        {c.name || "Pengasuh"} {isSelf && <span className="text-ink-faint">(kamu)</span>}
                       </p>
-                      <p className="text-xs text-ink-faint">{c.email}</p>
+                      {/* `email` CUMA ada di respons kalau peminta-nya owner
+                          (list_caregivers privacy-minimal buat editor/viewer)
+                          — dirender kondisional, BUKAN diasumsikan selalu ada. */}
+                      {c.email && <p className="text-xs text-ink-faint">{c.email}</p>}
                     </div>
                     <span
                       className={`text-[10px] px-2 py-0.5 rounded-full font-medium whitespace-nowrap ${
@@ -153,9 +159,9 @@ export default function CaregiverModal({ child, currentUserId, onClose }) {
                     </span>
                   </div>
 
-                  {myRole === "owner" && !isSelf && !isCaregiverOwner && (
+                  {isOwner(myRole) && !isSelf && !isCaregiverOwner && (
                     <div className="flex items-center justify-between gap-2 pt-1 border-t border-void-hairline">
-                      <div className="flex items-center gap-1.5" role="group" aria-label={`Ubah peran ${c.name}`}>
+                      <div className="flex items-center gap-1.5" role="group" aria-label={`Ubah peran ${c.name || "Pengasuh"}`}>
                         {INVITE_ROLE_OPTIONS.map((opt) => (
                           <button
                             key={opt.value}
@@ -210,7 +216,7 @@ export default function CaregiverModal({ child, currentUserId, onClose }) {
           </div>
         )}
 
-        {myRole === "owner" && (
+        {isOwner(myRole) && (
           <div className="border-t border-void-hairline pt-5">
             <p className="text-sm text-ink font-medium mb-2">Undang pengasuh baru</p>
             {!invite ? (

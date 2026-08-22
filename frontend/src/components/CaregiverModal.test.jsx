@@ -149,3 +149,57 @@ describe("CaregiverModal — revoke confirmation flow", () => {
     expect(screen.getByText("Editor Test")).toBeInTheDocument();
   });
 });
+
+// --------------------------------------------------------------------------
+// Issue 2 (review) — GET /children/<id>/caregivers CUMA balikin
+// {user_id, name, role} buat editor/viewer (TANPA email) — komponen ini
+// HARUS tetap render normal, TIDAK PERNAH nganggep `email` selalu ada.
+// --------------------------------------------------------------------------
+
+describe("CaregiverModal — privacy-minimal caregiver data (no email field)", () => {
+  it("renders caregiver management normally when caregiver entries have only user_id/name/role", async () => {
+    // Persis bentuk respons yang sekarang dibalikin backend buat
+    // editor/viewer (lihat backend/docs/ROLES_PERMISSIONS.md) — nggak
+    // ada `email` sama sekali di objeknya.
+    apiMock.listCaregivers.mockResolvedValue([
+      { user_id: 1, name: "Bunda", role: "owner" },
+      { user_id: 2, name: "Editor Test", role: "editor" },
+    ]);
+    render(<CaregiverModal child={testChild} currentUserId={1} onClose={vi.fn()} />);
+
+    expect(await screen.findByText("Editor Test")).toBeInTheDocument();
+    expect(screen.getByText("Bunda")).toBeInTheDocument();
+    // "Editor" muncul beberapa kali (badge peran + pilihan undangan) —
+    // cukup buktikan label terjemahannya ada.
+    expect(screen.getAllByText("Editor").length).toBeGreaterThan(0);
+  });
+
+  it("does not require an email field to render — no stray 'undefined' text", async () => {
+    apiMock.listCaregivers.mockResolvedValue([
+      { user_id: 1, name: "Bunda", role: "owner" },
+      { user_id: 2, name: "Editor Test", role: "editor" },
+    ]);
+    render(<CaregiverModal child={testChild} currentUserId={1} onClose={vi.fn()} />);
+    await screen.findByText("Editor Test");
+
+    expect(screen.queryByText("undefined")).not.toBeInTheDocument();
+    expect(screen.queryByText("null")).not.toBeInTheDocument();
+  });
+
+  it("falls back to a safe generic label when a caregiver's name is missing, never substituting the email", async () => {
+    // Bentuk PALING REALISTIS buat editor/viewer: nggak ada `email` sama
+    // sekali (privacy-minimal), DAN `name` kebetulan kosong (mis. data
+    // lama/edge case) — komponen HARUS fallback ke label generik, bukan
+    // nampilin apa pun yang menyerupai identitas email.
+    apiMock.listCaregivers.mockResolvedValue([
+      { user_id: 1, name: "Bunda", role: "owner" },
+      { user_id: 2, name: null, role: "editor" },
+    ]);
+    render(<CaregiverModal child={testChild} currentUserId={1} onClose={vi.fn()} />);
+
+    // fallback generik ("Pengasuh") muncul buat baris yang name-nya kosong
+    await waitFor(() => expect(screen.getAllByText("Pengasuh").length).toBeGreaterThan(0));
+    // TIDAK ADA email/alamat apa pun yang nyelip jadi pengganti nama
+    expect(screen.queryByText(/@/)).not.toBeInTheDocument();
+  });
+});

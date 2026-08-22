@@ -563,3 +563,112 @@ def test_failed_membership_mutation_produces_no_audit_event(client):
     after = _list_events(client, owner["token"], child["id"]).get_json()["events"]
     after_membership_count = len([e for e in after if e["entity_type"] == "caregiver_membership"])
     assert after_membership_count == before_membership_count
+
+
+# --------------------------------------------------------------------------
+# Issue 2 (review) — GET /children/<id>/caregivers TIDAK PERNAH bocorin
+# email (atau field privat lain) ke editor/viewer. Lihat
+# backend/docs/ROLES_PERMISSIONS.md bagian "Kontrak privasi
+# GET /children/<id>/caregivers".
+# --------------------------------------------------------------------------
+
+
+FORBIDDEN_PRIVATE_TERMS = ["email", "@", "chat_id", "telegram", "password", "invite", "code", "token"]
+
+
+def _list_caregivers(client, token, child_id):
+    return client.get(f"/api/children/{child_id}/caregivers", headers=auth_headers(token))
+
+
+def test_owner_can_list_caregivers(client):
+    owner, editor, child = two_users_with_child(client, role="editor")
+    resp = _list_caregivers(client, owner["token"], child["id"])
+    assert resp.status_code == 200
+    rows = resp.get_json()
+    assert len(rows) == 2
+    editor_row = next(r for r in rows if r["role"] == "editor")
+    assert editor_row["email"] == "caregiver-rp@example.com"  # owner beneran butuh ini
+
+
+def test_editor_can_list_minimal_caregiver_information(client):
+    owner, editor, child = two_users_with_child(client, role="editor")
+    resp = _list_caregivers(client, editor["token"], child["id"])
+    assert resp.status_code == 200
+    for row in resp.get_json():
+        assert set(row.keys()) == {"user_id", "name", "role"}
+
+
+def test_viewer_can_list_the_same_privacy_minimal_information(client):
+    owner, viewer, child = two_users_with_child(client, role="viewer")
+    resp = _list_caregivers(client, viewer["token"], child["id"])
+    assert resp.status_code == 200
+    for row in resp.get_json():
+        assert set(row.keys()) == {"user_id", "name", "role"}
+
+
+@pytest.mark.parametrize("role", ["editor", "viewer"])
+def test_editor_and_viewer_responses_never_contain_an_email_address(client, role):
+    owner, member, child = two_users_with_child(client, role=role)
+    resp = _list_caregivers(client, member["token"], child["id"])
+    payload_text = resp.get_data(as_text=True)
+    assert "@" not in payload_text
+    assert "owner-rp@example.com" not in payload_text
+    assert "caregiver-rp@example.com" not in payload_text
+
+
+@pytest.mark.parametrize("role", ["editor", "viewer"])
+def test_editor_and_viewer_responses_contain_no_unrelated_private_account_fields(client, role):
+    owner, member, child = two_users_with_child(client, role=role)
+    resp = _list_caregivers(client, member["token"], child["id"])
+    payload_text = resp.get_data(as_text=True).lower()
+    for term in FORBIDDEN_PRIVATE_TERMS:
+        assert term not in payload_text, f"{term!r} bocor di respons caregiver-list buat role {role}"
+
+
+def test_only_owner_receives_email_in_the_caregiver_list(client):
+    owner, editor, child = two_users_with_child(client, role="editor")
+
+    owner_rows = _list_caregivers(client, owner["token"], child["id"]).get_json()
+    assert all("email" in r for r in owner_rows)
+
+    editor_rows = _list_caregivers(client, editor["token"], child["id"]).get_json()
+    assert all("email" not in r for r in editor_rows)
+
+
+def test_user_without_child_access_cannot_list_caregivers(client):
+    owner = register(client, name="OwnerC2", email="ownerc2@example.com")
+    child = create_child(client, owner["token"])
+    outsider = register(client, name="Outsider", email="outsider-c2@example.com")
+
+    resp = _list_caregivers(client, outsider["token"], child["id"])
+    assert resp.status_code == 404
+
+
+def test_cross_child_access_is_rejected_without_revealing_private_membership_data(client):
+    owner_a = register(client, name="OA2", email="oa2@example.com")
+    child_a = create_child(client, owner_a["token"], name="Anak A2")
+    owner_b = register(client, name="OB2", email="ob2@example.com")
+    child_b = create_child(client, owner_b["token"], name="Anak B2")
+
+    resp = _list_caregivers(client, owner_a["token"], child_b["id"])
+    assert resp.status_code == 404
+    assert "ob2@example.com" not in resp.get_data(as_text=True)
+
+
+def test_existing_audit_filters_by_caregiver_still_work_with_privacy_minimal_list(client):
+    """
+    utils/roles.js:AuditTrailScreen cuma butuh user_id/name/role buat
+    filter aktor — bukti endpoint list_caregivers yang sekarang
+    privacy-minimal (buat non-owner) TETAP ngasih cukup info buat itu.
+    """
+    owner, editor, child = two_users_with_child(client, role="editor")
+    _create(client, editor["token"], child["id"], "feeding_log", idem_key="k1")
+
+    rows = _list_caregivers(client, editor["token"], child["id"]).get_json()
+    editor_row = next(r for r in rows if r["role"] == "editor")
+    assert editor_row["user_id"] == editor["id"]
+    assert editor_row["name"] == "Pengasuh"
+
+    events = _list_events(client, owner["token"], child["id"], actor_user_id=str(editor_row["user_id"])).get_json()["events"]
+    assert len(events) == 1
+    assert events[0]["actor_user_id"] == editor["id"]

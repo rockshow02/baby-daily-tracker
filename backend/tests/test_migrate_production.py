@@ -607,3 +607,58 @@ def test_role_check_constraint_rejects_invalid_role_values_after_migration(temp_
             )
     finally:
         conn.close()
+
+
+def test_import_json_works_end_to_end_against_a_migrated_database(temp_db_path, monkeypatch):
+    """
+    Issue 1 requirement #12: fresh vs migrated schema harus berperilaku
+    SAMA buat import. Di sini dibuktikan LANGSUNG dengan beneran manggil
+    endpoint POST /children/import-json lewat Flask test client yang
+    nunjuk ke database yang UDAH DIMIGRASI dari skema lama (role
+    'owner'/'caregiver' TANPA CHECK constraint) — bukan cuma ngecek
+    skema kolomnya doang.
+    """
+    _seed_pre_roles_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)  # dispose koneksi lama di akhir, lihat docstring fungsi ini
+
+    # App BARU (terpisah dari yang dipakai migrate() di atas, yang udah
+    # di-dispose) nunjuk ke FILE YANG SAMA — udah termigrasi penuh, jadi
+    # db.create_all() di dalam create_app() di sini nggak ngapa-ngapain
+    # (semua tabel udah ada & benar).
+    app = real_create_app(config_overrides={"SQLALCHEMY_DATABASE_URI": f"sqlite:///{temp_db_path}"})
+    with app.app_context():
+        test_client = app.test_client()
+
+        register_resp = test_client.post(
+            "/api/auth/register",
+            json={"name": "Migrasi Test", "email": "migrasi-import@example.com", "password": "password123"},
+        )
+        assert register_resp.status_code == 201, register_resp.get_json()
+        token = register_resp.get_json()["token"]
+        importer_id = register_resp.get_json()["id"]
+
+        import_resp = test_client.post(
+            "/api/children/import-json",
+            json={
+                "export_version": 1,
+                "child": {"name": "Anak Migrasi", "birth_date": "2026-01-01", "gender": "L"},
+                "feeding_logs": [{"timestamp": "2026-01-10T08:00:00", "feed_type": "asi_langsung"}],
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert import_resp.status_code == 201, import_resp.get_json()
+        assert import_resp.get_json()["child"]["role"] == "owner"
+
+        from models import Child, ChildCaregiver
+
+        child_id = import_resp.get_json()["child"]["id"]
+        row = db.session.get(Child, child_id)
+        assert row.user_id == importer_id
+        assert ChildCaregiver.query.filter_by(child_id=child_id).count() == 0
+
+        # Lepas koneksi sesi INI dulu SEBELUM dispose() pool-nya — biar
+        # nggak ada koneksi yang masih "dipinjam" pas pool-nya dibuang,
+        # yang di Windows bisa nyisain file lock walau dispose() udah
+        # dipanggil (lihat pola yang sama di _run_migrate_against di atas).
+        db.session.remove()
+        db.engine.dispose()

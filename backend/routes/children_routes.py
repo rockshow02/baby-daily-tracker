@@ -432,7 +432,7 @@ def update_child_vaccinations(child_id):
 # Lihat backend/docs/ROLES_PERMISSIONS.md buat matriks izin lengkapnya.
 
 
-def _owner_entry(child):
+def _owner_entry(child, include_private_fields):
     """
     Baris 'owner' sintetis buat respons list_caregivers — pemilik SENGAJA
     TIDAK PERNAH punya baris di child_caregivers (lihat models.py:
@@ -440,18 +440,60 @@ def _owner_entry(child):
     Child.user_id di sini biar OWNER TETAP MUNCUL di daftar caregiver,
     persis kontrak respons lama (sebelum Phase 1, owner munculnya dari
     baris child_caregivers role='owner').
+
+    `include_private_fields` — lihat docstring list_caregivers() di
+    bawah buat kebijakan privasinya (Issue 2).
     """
     owner_user = db.session.get(User, child.user_id)
-    return {
+    entry = {
         "user_id": child.user_id,
         "name": owner_user.name if owner_user else None,
-        "email": owner_user.email if owner_user else None,
         "role": ROLE_OWNER,
     }
+    if include_private_fields:
+        entry["email"] = owner_user.email if owner_user else None
+    return entry
+
+
+def _caregiver_entry(cc, include_private_fields):
+    """
+    Serializer EKSPLISIT di layer route (bukan `ChildCaregiver.to_dict()`
+    langsung) — SENGAJA, biar model-nya nggak perlu tau/mikirin SIAPA
+    yang nanya (`to_dict()` generik kayak gini nggak boleh jadi
+    "otomatis nggak aman" cuma karena dipanggil dari konteks yang beda-
+    beda kepercayaannya — lihat Issue 2, backend/docs/ROLES_PERMISSIONS.md).
+
+    `include_private_fields` — True CUMA kalau requester-nya OWNER (lihat
+    list_caregivers() di bawah): editor/viewer CUMA dapet `user_id`/
+    `name`/`role` — TIDAK PERNAH email, kode undangan, ID Telegram, atau
+    field akun privat lainnya, biarpun `ChildCaregiver.to_dict()` sendiri
+    (dipakai di endpoint OWNER-ONLY lain kayak update_caregiver_role/
+    remove_caregiver, lihat di bawah) tetap nyertain email apa adanya.
+    """
+    entry = {
+        "user_id": cc.user_id,
+        "name": cc.user.name,
+        "role": cc.role,
+    }
+    if include_private_fields:
+        entry["email"] = cc.user.email
+    return entry
 
 
 @children_bp.route("/children/<int:child_id>/caregivers", methods=["GET"])
 def list_caregivers(child_id):
+    """
+    Daftar caregiver (owner + editor/viewer) — SEMUA peran (owner,
+    editor, viewer) boleh baca endpoint ini, tapi ISI respons-nya beda
+    tergantung peran PEMINTA (Caregiver Roles & Permissions Phase 1,
+    Issue 2 — lihat backend/docs/ROLES_PERMISSIONS.md):
+
+    - owner: `user_id`, `name`, `role`, DAN `email` (data yang beneran
+      dibutuhkan buat kelola caregiver — bedain 2 orang nama sama, dst).
+    - editor/viewer: CUMA `user_id`, `name`, `role` — TIDAK PERNAH email
+      ataupun field privat lain, biarpun mereka BOLEH baca daftar ini
+      (relevan buat UI baca-saja/filter audit trail per caregiver).
+    """
     user_id = _require_login()
     if not user_id:
         return jsonify({"error": "Belum login"}), 401
@@ -460,8 +502,13 @@ def list_caregivers(child_id):
     if not child:
         return jsonify({"error": "Anak tidak ditemukan"}), 404
 
+    include_private_fields = resolve_role(child, user_id) == ROLE_OWNER
+
     caregivers = ChildCaregiver.query.filter_by(child_id=child_id).order_by(ChildCaregiver.created_at.asc()).all()
-    return jsonify([_owner_entry(child)] + [c.to_dict() for c in caregivers])
+    return jsonify(
+        [_owner_entry(child, include_private_fields)]
+        + [_caregiver_entry(c, include_private_fields) for c in caregivers]
+    )
 
 
 @children_bp.route("/children/<int:child_id>/caregivers/<int:caregiver_user_id>", methods=["PUT"])
