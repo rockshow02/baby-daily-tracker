@@ -50,6 +50,20 @@ class Child(db.Model):
     vaccinations = db.relationship(
         "ChildVaccination", backref="child", lazy="dynamic", cascade="all, delete-orphan"
     )
+    # `idempotency_keys` SEBELUMNYA nggak punya relationship cascade sama
+    # sekali (beda dari SEMUA tabel child-scoped lain — termasuk
+    # `child_caregivers`, yang cascade-nya UDAH ada dari sisi lain, lihat
+    # `ChildCaregiver.child` -> backref `Child.caregivers` di bawah) —
+    # nggak ketauan selama ini soalnya SQLite nggak nge-enforce FK per
+    # default (lihat extensions.py, yang sekarang MENYALAKAN PRAGMA
+    # foreign_keys=ON permanen buat kebutuhan Issue 2 audit trail). Begitu
+    # FK beneran ditegakkan, hapus 1 Child yang masih py idempotency key
+    # (mis. abis dipakai idempotent_create() buat 1 log-nya) TANPA cascade
+    # ini bakal gagal IntegrityError — ditambahin di sini biar KONSISTEN
+    # sama pola cascade semua tabel child-scoped lain, BUKAN pengecualian.
+    idempotency_keys = db.relationship(
+        "IdempotencyKey", backref="child", lazy="dynamic", cascade="all, delete-orphan"
+    )
 
     def to_dict(self):
         return {
@@ -752,25 +766,52 @@ class CaregiverAuditEvent(db.Model):
     (Caregiver Audit Trail — Phase 1, lihat backend/docs/AUDIT_TRAIL.md).
 
     SENGAJA PRIVACY-MINIMAL — baris di tabel ini TIDAK PERNAH berisi:
-    isi request mentah, nilai sebelum/sesudah, catatan/teks bebas, nama
-    obat/dosis, deskripsi sakit, suhu/berat/tinggi/volume menyusui atau
-    ukuran medis lain, nama anak, email user, token, idempotency key,
-    request ID, teks exception, atau URL endpoint. Cukup metadata minimal
-    biar caregiver yang berwenang paham APA yang kejadian dan SIAPA yang
-    ngelakuin — bukan salinan kedua data medisnya.
+    isi request mentah, nilai field APA PUN (aman maupun privat — lihat
+    di bawah), catatan/teks bebas, nama anak, email user, token,
+    idempotency key, request ID, teks exception, atau URL endpoint.
+    Cukup metadata minimal biar caregiver yang berwenang paham APA yang
+    kejadian dan SIAPA yang ngelakuin — bukan salinan kedua data medisnya.
 
     `changed_fields_json` (khusus event `update`) CUMA berisi NAMA field
-    yang berubah (mis. `["timestamp", "volume_ml"]`), divalidasi lewat
-    whitelist ketat per entity_type di utils/audit.py:SAFE_CHANGED_FIELDS
-    — TIDAK PERNAH nilai lama/barunya, dan TIDAK PERNAH nama field
-    mentah dari request (field yang nggak ada di whitelist otomatis
-    dibuang, bukan lolos apa adanya).
+    yang berubah, dari 2 kemungkinan bentuk (kebijakan lengkapnya di
+    utils/audit.py):
+      - nama field ASLI (mis. `["timestamp", "volume_ml"]`) — CUMA kalau
+        field itu ada di whitelist utils/audit.py:SAFE_CHANGED_FIELDS
+        (field struktural/kategori/angka/waktu yang aman disebut
+        namanya);
+      - marker generik `"private_details"` (utils/audit.py:PRIVATE_MARKER)
+        — kalau field yang berubah ada di
+        utils/audit.py:PRIVATE_CHANGED_FIELDS (teks bebas kayak `notes`,
+        atau field yang NAMANYA AJA udah identitas medis spesifik kayak
+        nama obat/penyakit/diagnosis) — marker ini CUMA muncul SEKALI
+        biar pun beberapa field privat berubah bareng.
+    Nama field mentah dari request yang nggak ada di KEDUA whitelist itu
+    (typo, field baru yang belum dikenal, dst) otomatis dibuang, TIDAK
+    PERNAH lolos apa adanya — dan TIDAK PERNAH ada nilai lama/baru
+    tersimpan di kolom ini, bentuk apa pun field-nya.
 
-    `actor_user_id` SENGAJA nullable + TANPA ondelete cascade — kalau
-    suatu saat akun user yang jadi actor di sini beneran dihapus (belum
-    ada fitur hapus akun sekarang), baris event ini TETAP ada (bukti
-    audit harus tetap ada), CUMA `to_dict()["actor_name"]` balik `None`
-    (lewat relationship yang gagal nemu User-nya) — bukan exception.
+    `actor_user_id` SENGAJA nullable + FK-nya `ondelete="SET NULL"` —
+    kalau suatu saat akun user yang jadi actor di sini beneran dihapus
+    (belum ada fitur hapus akun lewat endpoint publik sekarang), baris
+    event ini TETAP ada (bukti audit harus tetap ada, TIDAK PERNAH ikut
+    kehapus), CUMA `actor_user_id`-nya di-null-kan OTOMATIS sama SQLite
+    sendiri (bukan kode Python yang nyusul nge-update manual), lalu
+    `to_dict()["actor_name"]` balik `None` (lewat relationship yang
+    gagal nemu User-nya) — bukan exception. Field lain di baris event-nya
+    (action/entity_type/entity_id/changed_fields_json/recorded_at/
+    created_at) SAMA SEKALI nggak kesentuh.
+
+    `ondelete="SET NULL"` ini CUMA beneran ditegakkan SQLite kalau
+    `PRAGMA foreign_keys=ON` aktif di koneksinya — makanya
+    extensions.py masang listener `Engine.connect` yang nyalain PRAGMA
+    itu buat SETIAP koneksi SQLite baru, PERMANEN (bukan cuma pas
+    migrasi) — lihat extensions.py buat detailnya. Buat database SQLite
+    yang tabel `caregiver_audit_events`-nya udah kebikin SEBELUM
+    perbaikan ini (FK constraint lama TANPA `ON DELETE SET NULL`),
+    scripts/migrate_production.py punya langkah migrasi tersendiri yang
+    ngebangun ulang tabelnya (rename+copy, BUKAN hapus+bikin ulang) biar
+    FK-nya kekoreksi TANPA kehilangan baris yang udah ada — lihat
+    `_ensure_audit_actor_fk_set_null()` di sana.
 
     `child` pakai backref dengan `cascade="all, delete-orphan"` PERSIS
     pola semua log lain di file ini — begitu 1 Child dihapus permanen,
@@ -782,7 +823,9 @@ class CaregiverAuditEvent(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
-    actor_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
+    actor_user_id = db.Column(
+        db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     action = db.Column(db.String(10), nullable=False)       # 'create' | 'update' | 'delete'
     entity_type = db.Column(db.String(30), nullable=False)  # lihat utils/audit.py:ENTITY_TYPES

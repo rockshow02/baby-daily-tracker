@@ -169,7 +169,7 @@ def update_or_delete_growth_measurement(measurement_id):
         measurement.head_circumference_cm = data["head_circumference_cm"]
     if "notes" in data:
         measurement.notes = data["notes"]
-    changed = diff_snapshots(before, snapshot_fields(measurement, "growth_measurement"))
+    changed = diff_snapshots(before, snapshot_fields(measurement, "growth_measurement"), "growth_measurement")
     if changed:
         record_audit_event(
             child_id=measurement.child_id, actor_user_id=user_id, action="update",

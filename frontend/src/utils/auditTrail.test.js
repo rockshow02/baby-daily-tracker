@@ -40,6 +40,21 @@ describe("describeChangedFields", () => {
     expect(describeChangedFields("feeding_log", undefined)).toEqual([]);
   });
 
+  it("maps the backend's generic private-field marker to a safe Indonesian label, for any entity_type", () => {
+    expect(describeChangedFields("medication_log", ["private_details"])).toEqual(["detail pribadi"]);
+    expect(describeChangedFields("illness_log", ["private_details"])).toEqual(["detail pribadi"]);
+    expect(describeChangedFields("feeding_log", ["private_details"])).toEqual(["detail pribadi"]);
+  });
+
+  it("mixes a safe field label and the private-details label together, without exposing which private field it was", () => {
+    const result = describeChangedFields("doctor_visit", ["next_visit_date", "private_details"]);
+    expect(result).toEqual(["jadwal kontrol", "detail pribadi"]);
+    // marker generik itu sendiri TIDAK PERNAH nama field privat aslinya
+    // (mis. "doctor_name", "diagnosis") — cuma label generik yang tetap
+    expect(result).not.toContain("doctor_name");
+    expect(result).not.toContain("diagnosis");
+  });
+
   it("returns generic fallbacks for every field when entity_type itself is unknown", () => {
     expect(describeChangedFields("some_future_entity", ["x", "y"])).toEqual(["detail", "detail"]);
   });
@@ -91,6 +106,16 @@ describe("describeAuditEvent", () => {
   it("falls back to a generic actor label when actor_name is null (e.g. actor account no longer exists)", () => {
     const event = { action: "create", entity_type: "sleep_log", changed_fields: [], actor_name: null };
     expect(describeAuditEvent(event)).toBe("Pengguna menambahkan catatan tidur");
+  });
+
+  it("builds a sentence for a notes-only (fully private) update using the generic marker's label", () => {
+    const event = {
+      action: "update",
+      entity_type: "medication_log",
+      changed_fields: ["private_details"],
+      actor_name: "Weswew",
+    };
+    expect(describeAuditEvent(event)).toBe("Weswew mengubah detail pribadi catatan obat");
   });
 
   it("falls back to a generic phrase when an update event has no changed_fields at all", () => {

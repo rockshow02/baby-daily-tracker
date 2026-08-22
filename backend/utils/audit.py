@@ -21,17 +21,44 @@ from models import CaregiverAuditEvent
 
 ACTIONS = ("create", "update", "delete")
 
-# Allowlist ketat, 2 lapis:
-#   1. Key dict ini = SATU-SATUNYA entity_type yang boleh masuk audit
-#      trail Phase 1 (lihat backend/docs/AUDIT_TRAIL.md buat daftar
-#      lengkap tipe yang DIKECUALIKAN di Phase 1 — profil anak, membership
-#      caregiver, vaksinasi, profil user, Telegram, backup/restore, login).
-#   2. Value (set) = nama field yang boleh dicatat SEBAGAI NAMA doang
-#      (bukan nilainya) di changed_fields_json pas action='update'. Field
-#      apa pun di luar daftar ini (mis. `notes`, `medication_name`,
-#      `symptoms`, ID relasi kayak `illness_id`) TIDAK PERNAH nyampe ke
-#      audit trail sama sekali — bukan cuma nilainya yang disembunyikan,
-#      NAMANYA pun nggak pernah disebut kalau field itu yang berubah.
+# Marker generik buat "sesuatu yang privat berubah, tapi APANYA nggak
+# disebut" (lihat PRIVATE_CHANGED_FIELDS di bawah) — SATU string tetap
+# yang SAMA di semua entity_type, bukan nama field asli manapun, jadi
+# nggak pernah bentrok sama nama kolom sungguhan.
+PRIVATE_MARKER = "private_details"
+
+# Kebijakan privasi field mutable, 1 SUMBER KEBENARAN per entity_type,
+# dibagi 2 kategori yang SALING LEPAS (union keduanya = SEMUA field
+# mutable yang route-nya benar-benar bisa diubah lewat PUT):
+#
+#   SAFE_CHANGED_FIELDS   -> nama field-nya BOLEH disebut apa adanya di
+#                            changed_fields (TETAP cuma NAMA-nya, nggak
+#                            pernah nilainya) — field struktural/kategori/
+#                            angka/waktu yang nyebut "field ini yang
+#                            diubah" doang nggak membocorkan konten medis
+#                            spesifik anak (mis. timestamp, feed_type,
+#                            volume_ml, weight_kg, method, mood).
+#   PRIVATE_CHANGED_FIELDS -> field mutable yang SENGAJA nggak pernah
+#                            disebut namanya sama sekali — teks bebas
+#                            (`notes`, semua Text/String panjang yang
+#                            diketik user), atau field yang NAMANYA AJA
+#                            udah nunjukin identitas medis spesifik anak
+#                            (nama obat, dosis, nama penyakit, gejala,
+#                            diagnosis, alasan kunjungan, nama dokter/
+#                            klinik). Kalau field di kategori ini yang
+#                            berubah, changed_fields CUMA dapet
+#                            PRIVATE_MARKER ("private_details") — bukan
+#                            nama field aslinya, dan TETAP TIDAK PERNAH
+#                            nilainya.
+#
+# Field di LUAR union kedua dict ini (termasuk key request mentah yang
+# nggak dikenal sama sekali, atau field relasi/FK doang) TIDAK PERNAH
+# nyampe ke audit trail dalam bentuk APA PUN — bukan cuma nilainya, nama
+# ATAUPUN keberadaan perubahannya juga nggak pernah kesebut.
+#
+# (lihat backend/docs/AUDIT_TRAIL.md buat daftar lengkap entity_type yang
+# DIKECUALIKAN total di Phase 1 — profil anak, membership caregiver,
+# vaksinasi, profil user, Telegram, backup/restore, login.)
 SAFE_CHANGED_FIELDS = {
     "feeding_log": {"timestamp", "feed_type", "duration_minutes", "volume_ml", "breast_side"},
     "sleep_log": {"start_time", "end_time", "sleep_type"},
@@ -39,17 +66,46 @@ SAFE_CHANGED_FIELDS = {
     "pumping_log": {"timestamp", "duration_minutes", "volume_ml", "breast_side"},
     "activity_log": {"timestamp", "activity_type", "duration_minutes"},
     "growth_measurement": {"measured_date", "weight_kg", "height_cm", "head_circumference_cm"},
-    "doctor_visit": {"visit_date", "doctor_name", "clinic_name", "reason", "diagnosis", "next_visit_date"},
+    "doctor_visit": {"visit_date", "next_visit_date"},
     "temperature_log": {"timestamp", "temperature_celsius", "method"},
-    "illness_log": {"illness_name", "start_date", "end_date", "symptoms"},
-    "medication_log": {"timestamp", "medication_name", "dosage"},
+    "illness_log": {"start_date", "end_date"},
+    "medication_log": {"timestamp"},
     "mood_log": {"timestamp", "mood"},
-    "milestone_log": {"milestone_type", "custom_label", "achieved_date"},
+    "milestone_log": {"milestone_type", "achieved_date"},
+}
+
+PRIVATE_CHANGED_FIELDS = {
+    "feeding_log": {"notes"},
+    "sleep_log": {"notes"},
+    "diaper_log": {"notes"},
+    "pumping_log": {"notes"},
+    "activity_log": {"notes"},
+    "growth_measurement": {"notes"},
+    # nama dokter/klinik, alasan kunjungan, dan diagnosis SEMUANYA
+    # identitas medis spesifik anak/provider — bukan cuma "diagnosis"
+    # doang yang privat, "reason" (keluhan) dan doctor_name/clinic_name
+    # (siapa/di mana anak diperiksa) sama sensitifnya.
+    "doctor_visit": {"doctor_name", "clinic_name", "reason", "diagnosis", "notes"},
+    "temperature_log": {"notes"},
+    # illness_name = nama penyakit spesifik anak (setara sensitifnya sama
+    # diagnosis di doctor_visit) — CUMA start_date/end_date (kapan mulai/
+    # sembuh) yang cukup "struktural" buat aman disebut namanya.
+    "illness_log": {"illness_name", "symptoms", "notes"},
+    "medication_log": {"medication_name", "dosage", "notes"},
+    "mood_log": {"notes"},
+    # custom_label = teks bebas yang diketik user (analog sama notes),
+    # CUMA relevan kalau milestone_type == 'custom'.
+    "milestone_log": {"custom_label", "notes"},
 }
 
 # Urutan TETAP (bukan set) — dipakai buat pesan error yang deterministik
 # ("entity_type harus salah satu dari: ...") dan buat frontend allowlist.
 ENTITY_TYPES = tuple(SAFE_CHANGED_FIELDS.keys())
+
+
+def _tracked_fields(entity_type):
+    """Union field aman + privat buat 1 entity_type — SEMUA field mutable yang di-snapshot buat deteksi perubahan."""
+    return SAFE_CHANGED_FIELDS.get(entity_type, set()) | PRIVATE_CHANGED_FIELDS.get(entity_type, set())
 
 
 def _to_recorded_at(value):
@@ -74,11 +130,14 @@ def _to_recorded_at(value):
 def record_audit_event(*, child_id, actor_user_id, action, entity_type, entity_id, changed_fields=None, recorded_at=None):
     """
     Tambah 1 CaregiverAuditEvent ke session (BELUM commit — lihat
-    docstring modul). `changed_fields` (iterable nama field mentah, CUMA
-    relevan buat action='update') disaring lewat SAFE_CHANGED_FIELDS
-    SEBELUM disimpan — field yang nggak ada di whitelist entity_type ini
-    otomatis dibuang diam-diam (bukan error), biar pemanggil nggak perlu
-    mikirin whitelist-nya sendiri-sendiri.
+    docstring modul). `changed_fields` (iterable nama field/marker, CUMA
+    relevan buat action='update') disaring SEBELUM disimpan — CUMA nama
+    field yang ada di SAFE_CHANGED_FIELDS[entity_type] ATAU literal
+    PRIVATE_MARKER yang lolos; apa pun di luar itu (termasuk nama field
+    privat aslinya kalau pemanggil kelupaan udah nge-translate ke marker)
+    otomatis dibuang diam-diam (bukan error) — LAPISAN PERTAHANAN TERAKHIR
+    di sini, di SATU tempat, biar nggak pernah bergantung 100% ke
+    pemanggil (diff_snapshots) buat negakin allowlist-nya.
 
     Raise ValueError kalau `action`/`entity_type` di luar allowlist —
     ini SENGAJA nge-crash keras (bukan diam-diam dilewatin), soalnya
@@ -94,8 +153,10 @@ def record_audit_event(*, child_id, actor_user_id, action, entity_type, entity_i
     safe_fields = None
     if changed_fields:
         allowed = SAFE_CHANGED_FIELDS[entity_type]
-        filtered = sorted({f for f in changed_fields if f in allowed})
-        safe_fields = filtered or None
+        safe_names = sorted({f for f in changed_fields if f in allowed})
+        has_marker = PRIVATE_MARKER in changed_fields
+        combined = safe_names + ([PRIVATE_MARKER] if has_marker else [])
+        safe_fields = combined or None
 
     event = CaregiverAuditEvent(
         child_id=child_id,
@@ -112,25 +173,52 @@ def record_audit_event(*, child_id, actor_user_id, action, entity_type, entity_i
 
 def snapshot_fields(entity, entity_type):
     """
-    Balikin dict {nama_field: nilai} buat SEMUA field di whitelist
-    entity_type ini, dibaca LANGSUNG dari attribute model SQLAlchemy
-    (bukan dari request/JSON) — dipanggil 2x oleh route (SEBELUM dan
-    SESUDAH mutasi diterapkan), lalu hasilnya dibandingin lewat
-    diff_snapshots() di bawah.
+    Balikin dict {nama_field: nilai} buat SEMUA field MUTABLE entity_type
+    ini (union SAFE_CHANGED_FIELDS + PRIVATE_CHANGED_FIELDS — TERMASUK
+    field privat kayak `notes`, bukan cuma yang aman disebut namanya),
+    dibaca LANGSUNG dari attribute model SQLAlchemy (bukan dari
+    request/JSON) — dipanggil 2x oleh route (SEBELUM dan SESUDAH mutasi
+    diterapkan), lalu hasilnya dibandingin lewat diff_snapshots() di
+    bawah.
+
+    PENTING: dict yang dibalikin ini BISA berisi nilai privat (isi notes,
+    nama obat, dst) buat KEPERLUAN BANDINGAN DI MEMORI DOANG — nggak
+    pernah di-log, nggak pernah disimpen ke DB, nggak pernah ikut ke
+    response API. diff_snapshots() di bawah cuma pernah balikin NAMA
+    field yang beda (buat field privat malah cuma marker generik, bukan
+    namanya pun) — TIDAK PERNAH nilai dari dict ini sendiri.
 
     Sengaja dibandingin ATTRIBUTE-KE-ATTRIBUTE model (bukan
     "before" dari DB vs "after" dari request mentah) — dua-duanya udah
     ke-normalisasi ke tipe kolom yang SAMA PERSIS (mis. sama-sama
-    `datetime`, bukan bandingin `datetime` vs string ISO mentah dari
-    JSON), jadi nggak ada risiko keliru nganggep "berubah" padahal cuma
-    beda representasi (mis. None vs None tetap keitung sama, bukan
-    ke-anggap "field ini disebut di request jadi otomatis dianggap
-    berubah").
+    `datetime` naive WIB lewat to_wib_naive(), bukan bandingin `datetime`
+    vs string ISO mentah dari JSON), jadi nggak ada risiko keliru
+    nganggep "berubah" padahal cuma beda representasi (mis. int 5 vs
+    float 5.0, atau 2 string ISO beda offset tapi instant yang sama).
     """
-    allowed = SAFE_CHANGED_FIELDS.get(entity_type, set())
-    return {field: getattr(entity, field, None) for field in allowed}
+    tracked = _tracked_fields(entity_type)
+    return {field: getattr(entity, field, None) for field in tracked}
 
 
-def diff_snapshots(before, after):
-    """Nama field (urut alfabet) yang nilainya BENERAN beda antara 2 snapshot dari snapshot_fields()."""
-    return sorted(field for field, value in after.items() if before.get(field) != value)
+def diff_snapshots(before, after, entity_type):
+    """
+    Balikin `changed_fields` siap-simpan dari 2 snapshot snapshot_fields():
+    nama field AMAN yang nilainya BENERAN beda (urut alfabet), diikuti
+    PRIVATE_MARKER kalau ADA (1 atau lebih) field privat yang juga beneran
+    beda — TIDAK PERNAH nama field privat aslinya, TIDAK PERNAH nilainya,
+    dan marker-nya CUMA muncul SEKALI biar pun banyak field privat yang
+    berubah bareng.
+
+    Field yang nggak disebut di `after` (mis. entity_type nggak dikenal)
+    otomatis nggak pernah keitung berubah — balikin [] kalau bener-bener
+    nggak ada apa pun yang berubah (no-op semantik, BUKAN cuma "field ini
+    disebut di request").
+    """
+    changed = {field for field, value in after.items() if before.get(field) != value}
+    safe_allowed = SAFE_CHANGED_FIELDS.get(entity_type, set())
+    private_allowed = PRIVATE_CHANGED_FIELDS.get(entity_type, set())
+
+    result = sorted(f for f in changed if f in safe_allowed)
+    if any(f in private_allowed for f in changed):
+        result.append(PRIVATE_MARKER)
+    return result

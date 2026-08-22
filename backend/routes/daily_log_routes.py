@@ -116,7 +116,7 @@ def update_or_delete_feeding_log(log_id):
             setattr(log, field, data[field])
     if "timestamp" in data:
         log.timestamp = to_wib_naive(data["timestamp"])
-    changed = diff_snapshots(before, snapshot_fields(log, "feeding_log"))
+    changed = diff_snapshots(before, snapshot_fields(log, "feeding_log"), "feeding_log")
     if changed:
         record_audit_event(
             child_id=log.child_id, actor_user_id=user_id, action="update",
@@ -221,7 +221,7 @@ def update_or_delete_sleep_log(log_id):
         log.sleep_type = data["sleep_type"]
     if "notes" in data:
         log.notes = data["notes"]
-    changed = diff_snapshots(before, snapshot_fields(log, "sleep_log"))
+    changed = diff_snapshots(before, snapshot_fields(log, "sleep_log"), "sleep_log")
     if changed:
         record_audit_event(
             child_id=log.child_id, actor_user_id=user_id, action="update",
@@ -322,7 +322,7 @@ def update_or_delete_diaper_log(log_id):
         log.color = data["color"]
     if "notes" in data:
         log.notes = data["notes"]
-    changed = diff_snapshots(before, snapshot_fields(log, "diaper_log"))
+    changed = diff_snapshots(before, snapshot_fields(log, "diaper_log"), "diaper_log")
     if changed:
         record_audit_event(
             child_id=log.child_id, actor_user_id=user_id, action="update",

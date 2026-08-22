@@ -100,7 +100,7 @@ def update_or_delete_mood_log(log_id):
         log.mood = data["mood"]
     if "notes" in data:
         log.notes = data["notes"]
-    changed = diff_snapshots(before, snapshot_fields(log, "mood_log"))
+    changed = diff_snapshots(before, snapshot_fields(log, "mood_log"), "mood_log")
     if changed:
         record_audit_event(
             child_id=log.child_id, actor_user_id=user_id, action="update",
@@ -210,7 +210,7 @@ def update_or_delete_milestone_log(log_id):
         log.achieved_date = datetime.strptime(data["achieved_date"], "%Y-%m-%d").date()
     if "notes" in data:
         log.notes = data["notes"]
-    changed = diff_snapshots(before, snapshot_fields(log, "milestone_log"))
+    changed = diff_snapshots(before, snapshot_fields(log, "milestone_log"), "milestone_log")
     if changed:
         record_audit_event(
             child_id=log.child_id, actor_user_id=user_id, action="update",

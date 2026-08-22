@@ -16,20 +16,34 @@ from sqlalchemy.pool import NullPool
 
 from app import create_app
 from extensions import db
-from models import CaregiverAuditEvent, FeedingLog
+from models import CaregiverAuditEvent, FeedingLog, User
 from tests.conftest import auth_headers, create_child, register
+from utils.audit import PRIVATE_MARKER, record_audit_event
 
 # --------------------------------------------------------------------------
 # Spesifikasi per entity_type — cukup buat nge-drive test create/update/
 # delete generik lewat 1 body test, bukan nulis 12x kode yang sama persis.
 # --------------------------------------------------------------------------
 
+# `meaningful_update` per entity kadang nyampur field AMAN + field PRIVAT
+# sekaligus (doctor_visit/illness_log/medication_log) — SENGAJA, biar
+# parametrized test generik di bawah ini juga otomatis nge-cover skenario
+# "campuran aman+privat" (Issue 1, requirement #6) tanpa perlu test
+# terpisah buat tiap entity yang kena. `expected_update_fields` (BUKAN
+# cuma `set(meaningful_update.keys())` lagi) adalah changed_fields yang
+# BENERAN diharapkan balik dari API — nama field privat di
+# `meaningful_update` (mis. `doctor_name`) TIDAK PERNAH muncul di sini,
+# diganti PRIVATE_MARKER. `one_safe_field_update` = subset AMAN doang
+# dari entity ini (dipakai test lain yang butuh 1 field aman pasti, mis.
+# "safe field + notes sekaligus" — lihat bagian bawah file).
 ENTITY_SPECS = {
     "feeding_log": {
         "create_path": "feeding-logs",
         "item_path": "feeding-logs",
         "create_payload": {"feed_type": "asi_langsung", "duration_minutes": 5},
         "meaningful_update": {"duration_minutes": 15},
+        "expected_update_fields": {"duration_minutes"},
+        "one_safe_field_update": {"duration_minutes": 15},
         "noop_update": {"duration_minutes": 5},
         "idempotent": True,
     },
@@ -38,6 +52,8 @@ ENTITY_SPECS = {
         "item_path": "sleep-logs",
         "create_payload": {"start_time": "2026-01-10T20:00:00", "sleep_type": "siang"},
         "meaningful_update": {"sleep_type": "malam"},
+        "expected_update_fields": {"sleep_type"},
+        "one_safe_field_update": {"sleep_type": "malam"},
         "noop_update": {"sleep_type": "siang"},
         "idempotent": True,
     },
@@ -46,6 +62,8 @@ ENTITY_SPECS = {
         "item_path": "diaper-logs",
         "create_payload": {"diaper_type": "pipis"},
         "meaningful_update": {"diaper_type": "pup"},
+        "expected_update_fields": {"diaper_type"},
+        "one_safe_field_update": {"diaper_type": "pup"},
         "noop_update": {"diaper_type": "pipis"},
         "idempotent": True,
     },
@@ -54,6 +72,8 @@ ENTITY_SPECS = {
         "item_path": "pumping-logs",
         "create_payload": {"duration_minutes": 10, "volume_ml": 50},
         "meaningful_update": {"volume_ml": 80},
+        "expected_update_fields": {"volume_ml"},
+        "one_safe_field_update": {"volume_ml": 80},
         "noop_update": {"volume_ml": 50},
         "idempotent": True,
     },
@@ -62,6 +82,8 @@ ENTITY_SPECS = {
         "item_path": "activity-logs",
         "create_payload": {"activity_type": "stroll", "duration_minutes": 20},
         "meaningful_update": {"duration_minutes": 30},
+        "expected_update_fields": {"duration_minutes"},
+        "one_safe_field_update": {"duration_minutes": 30},
         "noop_update": {"duration_minutes": 20},
         "idempotent": True,
     },
@@ -70,6 +92,8 @@ ENTITY_SPECS = {
         "item_path": "growth-measurements",
         "create_payload": {"measured_date": "2026-01-10", "weight_kg": 5.0},
         "meaningful_update": {"weight_kg": 5.5},
+        "expected_update_fields": {"weight_kg"},
+        "one_safe_field_update": {"weight_kg": 5.5},
         "noop_update": {"weight_kg": 5.0},
         "idempotent": False,
     },
@@ -77,7 +101,11 @@ ENTITY_SPECS = {
         "create_path": "doctor-visits",
         "item_path": "doctor-visits",
         "create_payload": {"visit_date": "2026-01-10", "doctor_name": "Dr. A"},
-        "meaningful_update": {"doctor_name": "Dr. B"},
+        # campuran: 'doctor_name' PRIVAT (lihat utils/audit.py:PRIVATE_CHANGED_FIELDS),
+        # 'next_visit_date' AMAN.
+        "meaningful_update": {"doctor_name": "Dr. B", "next_visit_date": "2026-02-01"},
+        "expected_update_fields": {"next_visit_date", "PRIVATE_MARKER"},
+        "one_safe_field_update": {"next_visit_date": "2026-02-01"},
         "noop_update": {"doctor_name": "Dr. A"},
         "idempotent": False,
     },
@@ -86,6 +114,8 @@ ENTITY_SPECS = {
         "item_path": "temperature-logs",
         "create_payload": {"temperature_celsius": 37.0},
         "meaningful_update": {"temperature_celsius": 38.5},
+        "expected_update_fields": {"temperature_celsius"},
+        "one_safe_field_update": {"temperature_celsius": 38.5},
         "noop_update": {"temperature_celsius": 37.0},
         "idempotent": False,
     },
@@ -93,7 +123,10 @@ ENTITY_SPECS = {
         "create_path": "illness-logs",
         "item_path": "illness-logs",
         "create_payload": {"illness_name": "Flu", "start_date": "2026-01-10"},
-        "meaningful_update": {"illness_name": "Batuk"},
+        # campuran: 'illness_name' PRIVAT, 'end_date' AMAN.
+        "meaningful_update": {"illness_name": "Batuk", "end_date": "2026-01-15"},
+        "expected_update_fields": {"end_date", "PRIVATE_MARKER"},
+        "one_safe_field_update": {"end_date": "2026-01-15"},
         "noop_update": {"illness_name": "Flu"},
         "idempotent": False,
     },
@@ -101,7 +134,11 @@ ENTITY_SPECS = {
         "create_path": "medication-logs",
         "item_path": "medication-logs",
         "create_payload": {"medication_name": "Paracetamol", "dosage": "5ml"},
-        "meaningful_update": {"dosage": "10ml"},
+        # 'timestamp' = SATU-SATUNYA field aman buat medication_log;
+        # 'dosage' PRIVAT.
+        "meaningful_update": {"dosage": "10ml", "timestamp": "2026-01-10T09:00:00"},
+        "expected_update_fields": {"timestamp", "PRIVATE_MARKER"},
+        "one_safe_field_update": {"timestamp": "2026-01-10T09:00:00"},
         "noop_update": {"dosage": "5ml"},
         "idempotent": True,
     },
@@ -110,6 +147,8 @@ ENTITY_SPECS = {
         "item_path": "mood-logs",
         "create_payload": {"mood": "ceria"},
         "meaningful_update": {"mood": "sedih"},
+        "expected_update_fields": {"mood"},
+        "one_safe_field_update": {"mood": "sedih"},
         "noop_update": {"mood": "ceria"},
         "idempotent": False,
     },
@@ -118,12 +157,19 @@ ENTITY_SPECS = {
         "item_path": "milestone-logs",
         "create_payload": {"milestone_type": "bisa_duduk", "achieved_date": "2026-01-10"},
         "meaningful_update": {"achieved_date": "2026-01-11"},
+        "expected_update_fields": {"achieved_date"},
+        "one_safe_field_update": {"achieved_date": "2026-01-11"},
         "noop_update": {"achieved_date": "2026-01-10"},
         "idempotent": False,
     },
 }
 
 ENTITY_TYPES = list(ENTITY_SPECS.keys())
+
+
+def _expected_fields(spec):
+    """`expected_update_fields` udah berisi placeholder string 'PRIVATE_MARKER' (bukan bisa nulis PRIVATE_MARKER langsung di literal dict di atas sebelum kelas ini kebaca) — diganti nilai asli di sini."""
+    return {PRIVATE_MARKER if f == "PRIVATE_MARKER" else f for f in spec["expected_update_fields"]}
 
 
 def _create(client, token, child_id, entity_type, idem_key=None, payload=None):
@@ -198,7 +244,7 @@ def test_meaningful_update_records_an_update_event_with_only_the_changed_field_n
     events = _list_events(client, user["token"], child["id"]).get_json()["events"]
     update_events = [e for e in events if e["action"] == "update"]
     assert len(update_events) == 1
-    assert set(update_events[0]["changed_fields"]) == set(spec["meaningful_update"].keys())
+    assert set(update_events[0]["changed_fields"]) == _expected_fields(spec)
     assert update_events[0]["entity_id"] == created["id"]
 
 
@@ -278,6 +324,225 @@ def test_deleted_entity_leaves_a_minimal_audit_event_without_medical_values(clie
         "id", "action", "entity_type", "entity_id", "changed_fields",
         "recorded_at", "created_at", "actor_user_id", "actor_name",
     }
+
+
+# --------------------------------------------------------------------------
+# Private-field updates (Issue 1) — updates to excluded/private fields
+# (mis. `notes`) must still be audited, but only ever via the generic
+# PRIVATE_MARKER, never by the private field's real name or value.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("entity_type", ENTITY_TYPES)
+def test_notes_only_update_creates_exactly_one_update_event_with_only_the_generic_marker(client, entity_type):
+    user = register(client)
+    child = create_child(client, user["token"])
+    created = _create(client, user["token"], child["id"], entity_type, idem_key="create-key")
+    secret = "rahasia banget jangan sampai bocor ke audit trail"
+    _update(client, user["token"], entity_type, created["id"], {"notes": secret})
+
+    resp = _list_events(client, user["token"], child["id"])
+    events = resp.get_json()["events"]
+    update_events = [e for e in events if e["action"] == "update"]
+    assert len(update_events) == 1
+    assert update_events[0]["changed_fields"] == [PRIVATE_MARKER]
+
+    # nama field 'notes' DAN isinya TIDAK PERNAH nyampe ke respons daftar
+    # audit event (beda dari respons entity-nya sendiri, yang emang wajar
+    # punya field 'notes' — di sini yang dicek CUMA respons audit event-nya)
+    payload_text = str(events)
+    assert "notes" not in payload_text
+    assert secret not in payload_text
+
+
+@pytest.mark.parametrize("entity_type", ENTITY_TYPES)
+def test_safe_field_plus_notes_update_returns_safe_name_and_generic_marker_together(client, entity_type):
+    spec = ENTITY_SPECS[entity_type]
+    user = register(client)
+    child = create_child(client, user["token"])
+    created = _create(client, user["token"], child["id"], entity_type, idem_key="create-key")
+
+    payload = dict(spec["one_safe_field_update"])
+    payload["notes"] = "detail privat lainnya"
+    _update(client, user["token"], entity_type, created["id"], payload)
+
+    events = _list_events(client, user["token"], child["id"]).get_json()["events"]
+    update_events = [e for e in events if e["action"] == "update"]
+    assert len(update_events) == 1
+    expected = set(spec["one_safe_field_update"].keys()) | {PRIVATE_MARKER}
+    assert set(update_events[0]["changed_fields"]) == expected
+
+
+# Entity yang punya LEBIH DARI 1 field privat mutable (bukan cuma
+# `notes`) — dipakai buat mbuktiin banyak field privat berubah BARENGAN
+# tetap CUMA nyisain 1 marker generik, bukan 1 marker per field.
+MULTI_PRIVATE_FIELD_CASES = {
+    "doctor_visit": {"doctor_name": "Dr. C", "clinic_name": "Klinik Baru", "reason": "keluhan baru", "diagnosis": "diagnosis baru"},
+    "illness_log": {"illness_name": "Diare", "symptoms": "gejala baru"},
+    "medication_log": {"medication_name": "Ibuprofen", "dosage": "3ml"},
+}
+
+
+@pytest.mark.parametrize("entity_type", list(MULTI_PRIVATE_FIELD_CASES.keys()))
+def test_multiple_private_fields_changed_at_once_still_produce_only_one_marker(client, entity_type):
+    user = register(client)
+    child = create_child(client, user["token"])
+    created = _create(client, user["token"], child["id"], entity_type, idem_key="create-key")
+    _update(client, user["token"], entity_type, created["id"], MULTI_PRIVATE_FIELD_CASES[entity_type])
+
+    events = _list_events(client, user["token"], child["id"]).get_json()["events"]
+    update_events = [e for e in events if e["action"] == "update"]
+    assert len(update_events) == 1
+    assert update_events[0]["changed_fields"] == [PRIVATE_MARKER]
+
+
+@pytest.mark.parametrize("entity_type", ENTITY_TYPES)
+def test_same_private_field_value_is_a_true_noop(client, entity_type):
+    user = register(client)
+    child = create_child(client, user["token"])
+    payload = {**ENTITY_SPECS[entity_type]["create_payload"], "notes": "catatan awal"}
+    created = _create(client, user["token"], child["id"], entity_type, idem_key="create-key", payload=payload)
+    _update(client, user["token"], entity_type, created["id"], {"notes": "catatan awal"})
+
+    events = _list_events(client, user["token"], child["id"]).get_json()["events"]
+    assert [e["action"] for e in events] == ["create"]  # nggak nambah "update"
+
+
+def test_unknown_request_field_never_leaks_into_audit_output(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    created = _create(client, user["token"], child["id"], "feeding_log", idem_key="k1")
+    _update(
+        client, user["token"], "feeding_log", created["id"],
+        {"duration_minutes": 15, "some_new_unexpected_field": "sneaky value"},
+    )
+
+    events = _list_events(client, user["token"], child["id"]).get_json()["events"]
+    update_events = [e for e in events if e["action"] == "update"]
+    assert len(update_events) == 1
+    # field yang nggak dikenal (bukan safe, bukan privat) sama sekali
+    # nggak boleh keitung sebagai "ada yang berubah" ataupun kesebut di
+    # changed_fields — CUMA field aman yang beneran ada di whitelist yang
+    # boleh muncul.
+    assert update_events[0]["changed_fields"] == ["duration_minutes"]
+    payload_text = str(events)
+    assert "some_new_unexpected_field" not in payload_text
+    assert "sneaky value" not in payload_text
+
+
+def test_sensitive_values_never_occur_anywhere_in_the_serialized_audit_response(client):
+    """
+    Sapuan luas ngelewatin CREATE (dengan payload penuh field sensitif),
+    UPDATE (ganti semua field sensitif ke nilai lain), dan DELETE — buat
+    beberapa entity yang paling banyak field privatnya — lalu mbuktiin
+    TIDAK ADA satu pun nilai sensitif yang nyangkut di mana pun di respons
+    daftar audit event, di titik mana pun sepanjang siklus hidupnya.
+    """
+    user = register(client)
+    child = create_child(client, user["token"])
+
+    illness = _create(
+        client, user["token"], child["id"], "illness_log",
+        payload={"illness_name": "RAHASIA-1", "start_date": "2026-01-10", "symptoms": "RAHASIA-2", "notes": "RAHASIA-3"},
+    )
+    _update(client, user["token"], "illness_log", illness["id"], {
+        "illness_name": "RAHASIA-4", "symptoms": "RAHASIA-5", "notes": "RAHASIA-6", "end_date": "2026-01-20",
+    })
+    _delete(client, user["token"], "illness_log", illness["id"])
+
+    med = _create(
+        client, user["token"], child["id"], "medication_log", idem_key="med-k1",
+        payload={"medication_name": "RAHASIA-7", "dosage": "RAHASIA-8", "notes": "RAHASIA-9"},
+    )
+    _update(client, user["token"], "medication_log", med["id"], {
+        "medication_name": "RAHASIA-10", "dosage": "RAHASIA-11", "notes": "RAHASIA-12",
+    })
+    _delete(client, user["token"], "medication_log", med["id"])
+
+    events = _list_events(client, user["token"], child["id"]).get_json()["events"]
+    payload_text = str(events)
+    for i in range(1, 13):
+        assert f"RAHASIA-{i}" not in payload_text
+
+
+# --------------------------------------------------------------------------
+# Semantic no-ops: representasi berbeda buat nilai yang SAMA (numerik,
+# datetime dengan offset beda) TIDAK PERNAH dianggap "berubah".
+# --------------------------------------------------------------------------
+
+
+def test_numeric_semantic_noop_does_not_create_false_update_event(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    created = _create(
+        client, user["token"], child["id"], "growth_measurement", idem_key="k1",
+        payload={"measured_date": "2026-01-10", "weight_kg": 5.0},
+    )
+    # 5 (int) vs 5.0 (float) tersimpan — SECARA NILAI sama persis
+    _update(client, user["token"], "growth_measurement", created["id"], {"weight_kg": 5})
+
+    events = _list_events(client, user["token"], child["id"]).get_json()["events"]
+    assert [e["action"] for e in events] == ["create"]
+
+
+def test_datetime_semantic_noop_does_not_create_false_update_event(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    created = _create(
+        client, user["token"], child["id"], "feeding_log", idem_key="k1",
+        payload={"feed_type": "asi_langsung", "timestamp": "2026-01-10T08:00:00+07:00"},
+    )
+    # offset timezone BEDA (+07:00 vs +00:00), tapi INSTANT-nya SAMA persis
+    # (08:00 WIB == 01:00 UTC) — to_wib_naive() menormalisasi keduanya ke
+    # naive datetime WIB yang identik SEBELUM dibandingkan.
+    _update(client, user["token"], "feeding_log", created["id"], {"timestamp": "2026-01-10T01:00:00+00:00"})
+
+    events = _list_events(client, user["token"], child["id"]).get_json()["events"]
+    assert [e["action"] for e in events] == ["create"]
+
+
+# --------------------------------------------------------------------------
+# Actor deletion (Issue 2) — FK ON DELETE SET NULL
+# --------------------------------------------------------------------------
+
+
+def test_deleting_actor_user_leaves_audit_row_intact_with_null_actor(client):
+    """
+    Belum ada endpoint publik buat hapus akun user — jadi diuji LANGSUNG
+    lewat database di dalam application context (persis kayak yang
+    disaranin task). Actor yang dihapus di sini CUMA pernah dirujuk lewat
+    caregiver_audit_events.actor_user_id (bukan created_by_user_id di
+    tabel manapun, bukan pula child_caregivers) — biar test ini murni
+    ngebuktiin PERSIS 1 hal: FK `ON DELETE SET NULL`-nya beneran
+    ditegakkan SQLite, bukan ketutupan sama IntegrityError dari FK lain
+    yang nggak ada hubungannya.
+    """
+    owner = register(client, name="Pemilik", email="owner-actor-del@example.com")
+    child = create_child(client, owner["token"])
+    actor = register(client, name="Aktor Dihapus", email="actor-to-delete@example.com")
+
+    event = record_audit_event(
+        child_id=child["id"], actor_user_id=actor["id"], action="update",
+        entity_type="feeding_log", entity_id=999, changed_fields=["duration_minutes"],
+    )
+    db.session.commit()
+    event_id = event.id
+
+    user_row = db.session.get(User, actor["id"])
+    db.session.delete(user_row)
+    db.session.commit()
+
+    refreshed = db.session.get(CaregiverAuditEvent, event_id)
+    assert refreshed is not None  # baris event TETAP ada
+    assert refreshed.actor_user_id is None  # cuma actor_user_id yang di-null-kan
+    assert refreshed.action == "update"
+    assert refreshed.entity_type == "feeding_log"
+    assert refreshed.entity_id == 999
+    assert refreshed.changed_fields_json == ["duration_minutes"]
+
+    serialized = refreshed.to_dict()
+    assert serialized["actor_user_id"] is None
+    assert serialized["actor_name"] is None
 
 
 # --------------------------------------------------------------------------

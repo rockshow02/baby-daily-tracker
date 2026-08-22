@@ -32,7 +32,7 @@ import tempfile
 from datetime import date, datetime
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect as sa_inspect, text
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS_DIR = os.path.join(BACKEND_DIR, "scripts")
@@ -257,3 +257,154 @@ def test_migration_never_touches_the_real_project_database(temp_db_path, monkeyp
     assert os.path.exists(REAL_INSTANCE_DB) == real_db_existed_before
     if real_db_existed_before:
         assert os.path.getmtime(REAL_INSTANCE_DB) == real_mtime_before
+
+
+# --------------------------------------------------------------------------
+# Issue 2 — FK `caregiver_audit_events.actor_user_id` harus `ON DELETE
+# SET NULL`. Fresh db (db.create_all() dari model terbaru) udah otomatis
+# bener (dites di test_migration_creates_expected_columns dkk di atas,
+# via _actor_fk_ondelete di bawah). Bagian ini KHUSUS nguji migrasi
+# tambahan buat database yang tabelnya UDAH ADA dari SEBELUM perbaikan
+# ini (FK versi lama, tanpa ON DELETE SET NULL).
+# --------------------------------------------------------------------------
+
+
+def _actor_fk_ondelete(path):
+    """`ondelete` FK `caregiver_audit_events.actor_user_id -> users.id` di `path` — None kalau nggak ada FK/tabelnya sama sekali."""
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        inspector = sa_inspect(engine)
+        if "caregiver_audit_events" not in inspector.get_table_names():
+            return None
+        for fk in inspector.get_foreign_keys("caregiver_audit_events"):
+            if fk.get("constrained_columns") == ["actor_user_id"]:
+                return (fk.get("options") or {}).get("ondelete")
+        return None
+    finally:
+        engine.dispose()
+
+
+def _seed_schema_with_old_style_audit_fk(path):
+    """
+    Simulasi database yang UDAH PERNAH migrasi tabel caregiver_audit_events
+    SEBELUM Issue 2 diperbaiki — tabelnya udah ada, FK `actor_user_id`-nya
+    TANPA `ON DELETE SET NULL` (skema lama), diisi 1 baris event "asli"
+    buat mbuktiin migrasi FK ini TIDAK PERNAH kehilangan baris yang udah
+    ada.
+    """
+    engine = create_engine(f"sqlite:///{path}")
+    tables_to_create = [t for t in db.metadata.sorted_tables if t.name != "caregiver_audit_events"]
+    db.metadata.create_all(bind=engine, tables=tables_to_create)
+
+    with engine.begin() as conn:
+        conn.execute(text(
+            """
+            CREATE TABLE caregiver_audit_events (
+                id INTEGER NOT NULL PRIMARY KEY,
+                child_id INTEGER NOT NULL,
+                actor_user_id INTEGER,
+                action VARCHAR(10) NOT NULL,
+                entity_type VARCHAR(30) NOT NULL,
+                entity_id INTEGER NOT NULL,
+                changed_fields_json JSON,
+                recorded_at DATETIME,
+                created_at DATETIME NOT NULL,
+                FOREIGN KEY(actor_user_id) REFERENCES users (id),
+                FOREIGN KEY(child_id) REFERENCES children (id)
+            )
+            """
+        ))
+        conn.execute(text("CREATE INDEX ix_caregiver_audit_events_child_id ON caregiver_audit_events (child_id)"))
+        conn.execute(text("CREATE INDEX ix_caregiver_audit_events_actor_user_id ON caregiver_audit_events (actor_user_id)"))
+        conn.execute(text("CREATE INDEX ix_caregiver_audit_events_created_at ON caregiver_audit_events (created_at)"))
+
+        conn.execute(
+            db.metadata.tables["users"].insert(),
+            {
+                "name": "Legacy Actor", "email": "legacy-fk-actor@example.com",
+                "password_hash": "not-a-real-hash", "telegram_chat_id": None,
+                "created_at": datetime(2024, 1, 1),
+            },
+        )
+        conn.execute(
+            db.metadata.tables["children"].insert(),
+            {
+                "user_id": 1, "name": "Legacy FK Child", "nickname": None,
+                "birth_date": date(2024, 1, 1), "gender": "L",
+                "birth_weight_kg": None, "birth_height_cm": None, "photo_filename": None,
+                "created_at": datetime(2024, 1, 1),
+            },
+        )
+        conn.execute(
+            db.metadata.tables["child_caregivers"].insert(),
+            {"child_id": 1, "user_id": 1, "role": "owner", "created_at": datetime(2024, 1, 1)},
+        )
+        conn.execute(text(
+            """
+            INSERT INTO caregiver_audit_events
+                (child_id, actor_user_id, action, entity_type, entity_id, changed_fields_json, recorded_at, created_at)
+            VALUES
+                (1, 1, 'create', 'feeding_log', 1, NULL, '2024-01-02 08:00:00', '2024-01-02 08:00:05')
+            """
+        ))
+    engine.dispose()
+
+
+def test_migration_upgrades_actor_fk_to_on_delete_set_null(temp_db_path, monkeypatch):
+    _seed_schema_with_old_style_audit_fk(temp_db_path)
+    assert _actor_fk_ondelete(temp_db_path) is None  # skema lama, belum ada ON DELETE SET NULL
+
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    assert (_actor_fk_ondelete(temp_db_path) or "").upper() == "SET NULL"
+
+
+def test_fk_migration_preserves_the_existing_audit_row_exactly(temp_db_path, monkeypatch):
+    _seed_schema_with_old_style_audit_fk(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    conn = sqlite3.connect(temp_db_path)
+    try:
+        row = conn.execute(
+            "SELECT child_id, actor_user_id, action, entity_type, entity_id, changed_fields_json, "
+            "recorded_at, created_at FROM caregiver_audit_events;"
+        ).fetchall()
+        assert row == [
+            (1, 1, "create", "feeding_log", 1, None, "2024-01-02 08:00:00", "2024-01-02 08:00:05"),
+        ]
+    finally:
+        conn.close()
+
+
+def test_fk_migration_preserves_expected_indexes(temp_db_path, monkeypatch):
+    _seed_schema_with_old_style_audit_fk(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    indexed = _indexed_columns(temp_db_path, "caregiver_audit_events")
+    assert "child_id" in indexed
+    assert "actor_user_id" in indexed
+    assert "created_at" in indexed
+
+
+def test_rerunning_the_fk_migration_twice_is_safe(temp_db_path, monkeypatch):
+    _seed_schema_with_old_style_audit_fk(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+    _run_migrate_against(temp_db_path, monkeypatch)  # kedua kalinya HARUS no-op, bukan error
+
+    assert (_actor_fk_ondelete(temp_db_path) or "").upper() == "SET NULL"
+    conn = sqlite3.connect(temp_db_path)
+    try:
+        (count,) = conn.execute("SELECT COUNT(*) FROM caregiver_audit_events;").fetchone()
+        assert count == 1  # baris lama TETAP cuma 1 (nggak didobelin, nggak ilang)
+    finally:
+        conn.close()
+
+
+def test_fresh_database_already_has_the_correct_actor_fk_without_any_extra_migration_step(temp_db_path, monkeypatch):
+    """Database yang BELUM PERNAH punya caregiver_audit_events sama sekali (skenario paling umum) langsung dapet FK yang benar dari db.create_all(), tanpa perlu migrasi FK tambahan."""
+    _seed_pre_audit_trail_schema(temp_db_path)
+    assert _actor_fk_ondelete(temp_db_path) is None  # tabelnya belum ada sama sekali
+
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    assert (_actor_fk_ondelete(temp_db_path) or "").upper() == "SET NULL"

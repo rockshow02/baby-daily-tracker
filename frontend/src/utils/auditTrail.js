@@ -116,11 +116,22 @@ const FIELD_LABELS = {
 
 const UNKNOWN_FIELD_LABEL = "detail";
 
+// Marker generik yang dikirim backend (backend/utils/audit.py:PRIVATE_MARKER)
+// buat "ada field privat yang berubah, tapi NAMANYA sengaja nggak
+// disebut" (mis. notes, nama obat, gejala, diagnosis) — SATU label tetap
+// di semua entity_type, BUKAN nama field asli manapun. UI TIDAK PERNAH
+// nampilin nama/isi field privat aslinya, cuma label generik ini.
+const PRIVATE_MARKER = "private_details";
+const PRIVATE_MARKER_LABEL = "detail pribadi";
+
 /** List label manusiawi (bukan nama field mentah) buat 1 event `changed_fields`. */
 export function describeChangedFields(entityType, changedFields) {
   const labels = FIELD_LABELS[entityType] || {};
   const list = Array.isArray(changedFields) ? changedFields : [];
-  return list.map((field) => labels[field] || UNKNOWN_FIELD_LABEL);
+  return list.map((field) => {
+    if (field === PRIVATE_MARKER) return PRIVATE_MARKER_LABEL;
+    return labels[field] || UNKNOWN_FIELD_LABEL;
+  });
 }
 
 function joinIndonesian(words) {

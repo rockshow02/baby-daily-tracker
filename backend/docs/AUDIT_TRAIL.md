@@ -54,11 +54,11 @@ Tabel `caregiver_audit_events` **bukan salinan kedua** dari data
 medis/personal. Baris di tabel ini TIDAK PERNAH berisi:
 
 - isi request mentah / body JSON
-- nilai sebelum/sesudah (before/after values)
+- nilai sebelum/sesudah (before/after values) dari field APA PUN — aman
+  maupun privat
 - catatan/teks bebas (`notes`) apa pun
-- nama obat atau dosis
-- deskripsi/gejala sakit
-- suhu, berat, tinggi, volume menyusui, atau ukuran medis lain
+- nama obat, dosis, nama penyakit, gejala, diagnosis, alasan kunjungan,
+  atau nama dokter/klinik
 - nama anak
 - email user
 - access token
@@ -73,20 +73,46 @@ Yang BENERAN disimpan (lihat `CaregiverAuditEvent` di `models.py`):
 |---|---|
 | `id` | ID event ini sendiri |
 | `child_id` | anak yang bersangkutan (index) |
-| `actor_user_id` | user yang MELAKUKAN aksi ini (index) |
+| `actor_user_id` | user yang MELAKUKAN aksi ini (index, `NULL` kalau akun aktornya sudah dihapus — lihat bagian "Otorisasi" di bawah) |
 | `action` | `"create"` \| `"update"` \| `"delete"` |
 | `entity_type` | salah satu dari 12 tipe di atas (allowlist ketat) |
 | `entity_id` | ID record aslinya (bukan FK — record-nya bisa aja udah kehapus) |
-| `changed_fields_json` | list NAMA field yang berubah (CUMA action=`update`) |
+| `changed_fields_json` | list nama field AMAN dan/atau marker generik yang berubah (CUMA action=`update`) |
 | `recorded_at` | waktu KEJADIAN ASLI record-nya (mis. `FeedingLog.timestamp`) |
 | `created_at` | kapan EVENT AUDIT ini sendiri dicatat (index) |
 
-`changed_fields_json` cuma nama field (mis. `["timestamp", "volume_ml"]`),
-**tidak pernah nilainya** — dan cuma boleh berisi nama dari whitelist
-ketat per `entity_type` (`utils/audit.py:SAFE_CHANGED_FIELDS`), yang
-SENGAJA nggak menyertakan `notes`, nama obat, gejala, atau field ID relasi
-lain. Field di luar whitelist yang kebetulan berubah TIDAK PERNAH muncul
-di sini — namanya pun tidak disebut.
+### Kebijakan `changed_fields_json` — nama field aman vs marker generik
+
+Buat SETIAP `entity_type`, field mutable-nya dibagi 2 kategori yang
+SALING LEPAS, didefinisikan SATU tempat di
+[`utils/audit.py`](../utils/audit.py):
+
+- **`SAFE_CHANGED_FIELDS`** — field struktural/kategori/angka/waktu yang
+  NAMANYA aman disebut apa adanya (mis. `timestamp`, `feed_type`,
+  `volume_ml`, `weight_kg`, `method`, `mood`) — cuma bilang "field ini
+  yang diedit", nggak membocorkan konten medis spesifik anak.
+- **`PRIVATE_CHANGED_FIELDS`** — field mutable yang NAMANYA SENDIRI
+  sudah sensitif: semua `notes` (teks bebas), plus field yang
+  identitasnya = konten medis spesifik anak (`illness_name`, `symptoms`,
+  `medication_name`, `dosage`, `doctor_name`, `clinic_name`, `reason`,
+  `diagnosis`, `custom_label` milestone). Kalau salah satu (atau
+  beberapa sekaligus) field di kategori ini yang berubah,
+  `changed_fields` CUMA dapet **`"private_details"`** (konstanta
+  `utils/audit.py:PRIVATE_MARKER`) — bukan nama field aslinya, dan
+  markernya CUMA muncul **sekali** biarpun beberapa field privat berubah
+  bersamaan.
+
+Kalau update-nya nyampur field aman + field privat, `changed_fields`
+berisi nama field aman + `"private_details"` sekaligus, cth:
+`["next_visit_date", "private_details"]`.
+
+Nama field mentah dari request yang nggak ada di KEDUA whitelist itu
+(typo, field yang belum dikenal, field relasi/FK doang seperti
+`illness_id`) **tidak pernah** nyampe ke `changed_fields` dalam bentuk
+apa pun — bukan cuma nilainya yang disembunyikan, keberadaan
+perubahannya pun tidak disebut sama sekali. Dan di SEMUA kasus — aman
+maupun privat — **nilai lama/barunya sendiri tidak pernah tersimpan**,
+cuma NAMA field-nya (atau marker generik-nya).
 
 ## Model otorisasi
 
@@ -106,10 +132,24 @@ aksesnya — karena `actor_user_id` di baris event nggak pernah dihapus
 cuma gara-gara akses caregiver itu dicabut (beda hal: "siapa yang PERNAH
 ngelakuin sesuatu" vs "siapa yang SEKARANG punya akses ke anak ini").
 
-**Kalau `actor_user_id` mengarah ke User yang sudah tidak ada** (belum
-ada fitur hapus akun di app ini sekarang, tapi didesain buat masa
-depan): baris event TETAP ada (bukti historis tetap harus ada), cuma
+**Kalau User yang jadi `actor_user_id` beneran dihapus** (belum ada
+fitur hapus akun lewat endpoint publik di app ini sekarang, tapi
+didesain buat masa depan): baris event TETAP ada (bukti historis tetap
+harus ada, TIDAK PERNAH ikut kehapus), cuma `actor_user_id`-nya
+otomatis jadi `NULL` — lewat FK constraint `ON DELETE SET NULL` di
+level DATABASE (`CaregiverAuditEvent.actor_user_id`, lihat
+`models.py`), BUKAN kode Python yang nyusul nge-update manual. Field
+lain di baris event-nya (action/entity_type/entity_id/changed_fields_json/
+recorded_at/created_at) sama sekali nggak kesentuh. Konsekuensinya:
 `actor_name` di respons API balik `null` — bukan error/exception.
+
+`ON DELETE SET NULL` ini CUMA beneran ditegakkan SQLite kalau `PRAGMA
+foreign_keys=ON` aktif — `backend/extensions.py` masang listener yang
+nyalain PRAGMA itu buat SETIAP koneksi SQLite baru di seluruh aplikasi,
+**permanen** (bukan cuma pas migrasi doang). Database SQLite yang tabel
+`caregiver_audit_events`-nya udah kebikin SEBELUM perbaikan ini (FK versi
+lama, tanpa `ON DELETE SET NULL`) butuh 1x migrasi tambahan — lihat
+bagian "Migrasi" di bawah.
 
 ## Endpoint baca
 
@@ -135,17 +175,29 @@ GET /api/children/<child_id>/audit-events
   - `entity_type` — harus salah satu dari 12 tipe allowlist, else `400`.
   - `actor_user_id` — harus integer positif, else `400`.
 
-Contoh respons:
+Contoh respons (2 event — 1 update field aman, 1 update yang nyentuh
+field privat):
 
 ```json
 {
   "events": [
     {
-      "id": 42,
+      "id": 43,
       "action": "update",
       "entity_type": "feeding_log",
       "entity_id": 17,
       "changed_fields": ["timestamp", "volume_ml"],
+      "recorded_at": "2026-01-15T09:30:00+07:00",
+      "created_at": "2026-01-15T09:30:05.001Z",
+      "actor_user_id": 3,
+      "actor_name": "Budi"
+    },
+    {
+      "id": 42,
+      "action": "update",
+      "entity_type": "medication_log",
+      "entity_id": 9,
+      "changed_fields": ["private_details"],
       "recorded_at": "2026-01-15T08:00:00+07:00",
       "created_at": "2026-01-15T08:05:12.345Z",
       "actor_user_id": 3,
@@ -155,6 +207,11 @@ Contoh respons:
   "next_cursor": 41
 }
 ```
+
+Event `id: 42` di atas cuma bilang "ada detail privat yang diedit" —
+CUMA nama obat/dosis yang berubah, jadi `changed_fields` cuma dapet
+`"private_details"`, TIDAK PERNAH nama field aslinya (`medication_name`/
+`dosage`) apalagi nilainya.
 
 `next_cursor` adalah `null` kalau ini halaman terakhir. **Nggak pernah**
 ada `child_id` di tiap event (redundan — udah di URL), email, JSON
@@ -209,16 +266,28 @@ offline) — `record_audit_event()` dipanggil langsung setelah
 
 Setiap route update:
 
-1. Ambil snapshot nilai field-field whitelist SEBELUM mutasi
-   (`utils/audit.py:snapshot_fields()`) — dibaca langsung dari attribute
-   model (bukan dari request).
+1. Ambil snapshot nilai SEMUA field mutable — aman DAN privat sekaligus
+   (`utils/audit.py:snapshot_fields()`, union `SAFE_CHANGED_FIELDS` +
+   `PRIVATE_CHANGED_FIELDS`) — SEBELUM mutasi, dibaca langsung dari
+   attribute model (bukan dari request). Ini SENGAJA mencakup field
+   privat kayak `notes` juga, biar perubahan field privat-DOANG (mis.
+   cuma `notes` yang diedit) tetap KETAHUAN berubah — snapshot versi lama
+   (sebelum perbaikan Issue 1) cuma nyimpen field aman, jadi update yang
+   CUMA nyentuh `notes` sama sekali nggak kedeteksi berubah, bikin
+   catatan yang beneran diedit malah nggak punya jejak audit sama sekali
+   (bug yang diperbaiki di sini).
 2. Terapkan mutasi persis seperti sebelumnya (nggak ada logic baru).
 3. Ambil snapshot lagi SESUDAH mutasi, bandingkan
-   (`diff_snapshots()`) — cuma field yang NILAINYA BENERAN beda yang
-   masuk `changed_fields`.
-4. Kalau nggak ada yang berubah (`changed_fields` kosong) → **nggak ada
-   audit event yang dibikin sama sekali** (no-op update nggak nyampah
-   jejak audit).
+   (`diff_snapshots()`) — buat field yang NILAINYA BENERAN beda: kalau
+   field-nya ada di `SAFE_CHANGED_FIELDS`, namanya masuk apa adanya; kalau
+   ada di `PRIVATE_CHANGED_FIELDS`, cukup tambahin marker
+   `"private_details"` (sekali doang, walau beberapa field privat
+   berubah bareng) — TIDAK PERNAH nilai dari snapshot ini sendiri yang
+   ikut tersimpan/ke-return, cuma dipakai buat PERBANDINGAN di memori.
+4. Kalau nggak ada yang berubah sama sekali (`changed_fields` kosong) →
+   **nggak ada audit event yang dibikin sama sekali** (no-op update
+   nggak nyampah jejak audit) — termasuk kalau field privat dikirim ulang
+   dengan nilai yang SAMA PERSIS (bukan cuma field aman).
 
 Dibandingkan ATTRIBUTE MODEL vs ATTRIBUTE MODEL (bukan request JSON
 mentah vs nilai DB) — dua-duanya sudah dalam TIPE KOLOM YANG SAMA (mis.
@@ -261,11 +330,47 @@ bukti eksplisitnya.
 ## Migrasi
 
 `caregiver_audit_events` adalah **tabel baru** (bukan kolom baru di
-tabel lama) — jadi `backend/scripts/migrate_production.py` cukup
-mengandalkan `db.create_all()` yang sudah ada di skrip itu (yang
-otomatis membuat tabel apa pun yang belum ada, TANPA PERNAH menyentuh
-tabel/baris yang sudah ada). Nggak perlu `ALTER TABLE` apa pun untuk
-fitur ini.
+tabel lama) — jadi buat database yang BELUM PERNAH punya tabel ini sama
+sekali, `backend/scripts/migrate_production.py` cukup mengandalkan
+`db.create_all()` yang sudah ada di skrip itu (otomatis membuat tabel
+apa pun yang belum ada — termasuk FK `ON DELETE SET NULL`-nya, karena
+`db.create_all()` selalu memakai definisi model TERBARU — TANPA PERNAH
+menyentuh tabel/baris yang sudah ada).
+
+### Migrasi tambahan: FK `actor_user_id` -> `ON DELETE SET NULL`
+
+Kalau database-nya SUDAH PERNAH menjalankan migrasi tabel ini SEBELUM
+`ondelete="SET NULL"` ditambahkan ke `models.py` (Issue 2), FK
+`actor_user_id`-nya masih versi lama (tanpa `ON DELETE SET NULL`) —
+`db.create_all()` TIDAK PERNAH mengubah tabel yang sudah ada, jadi perlu
+langkah migrasi tersendiri: `migrate_production.py:_ensure_audit_actor_fk_set_null()`,
+dipanggil OTOMATIS di awal `migrate()`, SEBELUM `db.create_all()`.
+
+Cara kerjanya (SQLite tidak mendukung `ALTER TABLE ... ALTER COLUMN` untuk
+mengubah constraint FK, jadi tabelnya dibangun ulang):
+
+1. Cek dulu (`PRAGMA foreign_key_list`) — kalau tabel belum ada sama
+   sekali, ATAU FK-nya udah `ON DELETE SET NULL`, **tidak ngapa-ngapain**
+   (idempoten, aman dijalankan berkali-kali).
+2. Kalau perlu migrasi: matikan `PRAGMA foreign_keys` SEMENTARA (CUMA
+   buat durasi migrasi INI, di 1 koneksi, BUKAN pengaturan permanen
+   aplikasi — lihat `backend/extensions.py` yang justru MENYALAKAN PRAGMA
+   ini permanen buat semua koneksi lain), lalu dalam **1 transaksi**:
+   bikin tabel baru dengan skema TERBARU (di-generate langsung dari
+   `models.py:CaregiverAuditEvent`, bukan SQL yang diketik manual) →
+   **copy SEMUA baris lama apa adanya** (`INSERT ... SELECT`, kolom
+   disebut eksplisit satu-satu) → drop tabel lama → rename tabel baru ke
+   nama aslinya → bikin ulang index-nya. Commit sekali di akhir; kalau
+   ada exception di tengah, seluruh transaksi di-rollback (tabel lama
+   TETAP utuh, bukan setengah-migrasi).
+3. Nyalakan lagi `PRAGMA foreign_keys=ON` di koneksi itu sebelum
+   dikembalikan ke pool, lalu jalankan `PRAGMA foreign_key_check` buat
+   verifikasi nggak ada pelanggaran FK sisa.
+
+**Tidak ada baris yang hilang atau berubah nilainya** — migrasi ini CUMA
+mengubah definisi constraint FK-nya, bukan data. Aman dijalankan berkali-kali
+(no-op kalau sudah termigrasi) dan bisa diverifikasi lewat
+`backend/tests/test_migrate_production.py`.
 
 ### Prosedur di PythonAnywhere (staging DULU, baru production)
 
@@ -281,7 +386,11 @@ python scripts/backup_database.py --verify <nama-file-backup-yang-baru>
 python scripts/migrate_production.py
 
 # 3. verifikasi manual — tabel baru harus muncul di output "Verifikasi akhir"
-#    dan baris "OK: tabel 'caregiver_audit_events' ... ada."
+#    dan baris "OK: tabel 'caregiver_audit_events' ... ada.". Kalau database
+#    ini sebelumnya udah pernah migrasi fitur ini SEBELUM FK actor_user_id
+#    diperbaiki (Issue 2), bakal ada baris tambahan di awal output soal
+#    "bangun ulang tabel" — itu NORMAL, bukan error (lihat bagian "Migrasi
+#    tambahan: FK actor_user_id" di atas).
 
 # 4. smoke test endpoint baca (read-only, aman)
 python scripts/post_deploy_smoke_test.py --base-url https://<staging-domain>/api

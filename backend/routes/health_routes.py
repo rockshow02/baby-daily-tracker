@@ -108,7 +108,7 @@ def update_or_delete_doctor_visit(visit_id):
         visit.next_visit_date = _parse_date(data["next_visit_date"]) if data["next_visit_date"] else None
     if "notes" in data:
         visit.notes = data["notes"]
-    changed = diff_snapshots(before, snapshot_fields(visit, "doctor_visit"))
+    changed = diff_snapshots(before, snapshot_fields(visit, "doctor_visit"), "doctor_visit")
     if changed:
         record_audit_event(
             child_id=visit.child_id, actor_user_id=user_id, action="update",
@@ -207,7 +207,7 @@ def update_or_delete_temperature_log(log_id):
         log.method = data["method"]
     if "notes" in data:
         log.notes = data["notes"]
-    changed = diff_snapshots(before, snapshot_fields(log, "temperature_log"))
+    changed = diff_snapshots(before, snapshot_fields(log, "temperature_log"), "temperature_log")
     if changed:
         record_audit_event(
             child_id=log.child_id, actor_user_id=user_id, action="update",
@@ -302,7 +302,7 @@ def update_or_delete_illness_log(log_id):
         log.symptoms = data["symptoms"]
     if "notes" in data:
         log.notes = data["notes"]
-    changed = diff_snapshots(before, snapshot_fields(log, "illness_log"))
+    changed = diff_snapshots(before, snapshot_fields(log, "illness_log"), "illness_log")
     if changed:
         record_audit_event(
             child_id=log.child_id, actor_user_id=user_id, action="update",
@@ -405,7 +405,7 @@ def update_or_delete_medication_log(log_id):
         log.dosage = data["dosage"]
     if "notes" in data:
         log.notes = data["notes"]
-    changed = diff_snapshots(before, snapshot_fields(log, "medication_log"))
+    changed = diff_snapshots(before, snapshot_fields(log, "medication_log"), "medication_log")
     if changed:
         record_audit_event(
             child_id=log.child_id, actor_user_id=user_id, action="update",

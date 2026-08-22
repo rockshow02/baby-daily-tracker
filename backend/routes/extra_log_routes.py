@@ -117,7 +117,7 @@ def update_or_delete_pumping_log(log_id):
         log.breast_side = data["breast_side"]
     if "notes" in data:
         log.notes = data["notes"]
-    changed = diff_snapshots(before, snapshot_fields(log, "pumping_log"))
+    changed = diff_snapshots(before, snapshot_fields(log, "pumping_log"), "pumping_log")
     if changed:
         record_audit_event(
             child_id=log.child_id, actor_user_id=user_id, action="update",
@@ -219,7 +219,7 @@ def update_or_delete_activity_log(log_id):
         log.duration_minutes = data["duration_minutes"]
     if "notes" in data:
         log.notes = data["notes"]
-    changed = diff_snapshots(before, snapshot_fields(log, "activity_log"))
+    changed = diff_snapshots(before, snapshot_fields(log, "activity_log"), "activity_log")
     if changed:
         record_audit_event(
             child_id=log.child_id, actor_user_id=user_id, action="update",
