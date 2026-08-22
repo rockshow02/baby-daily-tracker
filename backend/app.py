@@ -1,9 +1,16 @@
 import os
-from flask import Flask
+from flask import Flask, g, jsonify
 from dotenv import load_dotenv
 
 from config import Config, DevConfig, TestConfig
 from extensions import db, cors
+from utils.observability import (
+    check_database_ok,
+    configure_logging,
+    register_error_handlers,
+    register_request_hooks,
+    resolve_app_version,
+)
 
 load_dotenv()
 
@@ -29,6 +36,17 @@ def create_app(config_overrides=None):
     if config_overrides:
         app.config.update(config_overrides)
 
+    # Exception yang nggak ketangkep HARUS selalu lewat handler kita sendiri
+    # (respons 500 yang aman, nggak bocorin stack trace) — BUKAN cuma di
+    # production. Flask default-nya nge-propagate exception ke pemanggil
+    # kalau TESTING/DEBUG True (biar debugger interaktif kepanggil pas dev
+    # server jalan beneran), tapi itu bikin test_client() ikut nge-raise
+    # exception mentah alih-alih ngebalikin response — nggak konsisten
+    # sama perilaku production. setdefault (bukan langsung timpa) biar
+    # config_overrides tetep bisa eksplisit override ini kalau ada test
+    # yang sengaja butuh perilaku propagate aslinya.
+    app.config.setdefault("PROPAGATE_EXCEPTIONS", False)
+
     # pastikan folder instance ada (buat SQLite)
     os.makedirs(os.path.join(app.root_path, "instance"), exist_ok=True)
 
@@ -39,6 +57,10 @@ def create_app(config_overrides=None):
         origins=os.environ.get("FRONTEND_ORIGIN", "http://localhost:5173").split(","),
         allow_headers=["Content-Type", "Authorization", "X-Idempotency-Key"],
     )
+
+    logger = configure_logging(app)
+    register_request_hooks(app, logger)
+    register_error_handlers(app, logger)
 
     from routes.auth_routes import auth_bp
     from routes.children_routes import children_bp
@@ -71,7 +93,28 @@ def create_app(config_overrides=None):
 
     @app.route("/api/health")
     def health():
-        return {"status": "ok"}
+        """
+        Endpoint publik, TANPA autentikasi, murah — dipanggil monitoring
+        eksternal ATAU scripts/post_deploy_smoke_test.py. Cuma SELECT 1
+        (bukan PRAGMA integrity_check penuh) dan TIDAK PERNAH membocorkan
+        tipe/path database, nama tabel, jumlah record, hostname, environment
+        variable, atau detail exception mentah — lihat backend/docs/
+        OBSERVABILITY.md buat kontrak lengkapnya.
+        """
+        request_id = getattr(g, "request_id", None) or "unknown"
+        if check_database_ok(app):
+            return jsonify(
+                {
+                    "status": "ok",
+                    "database": "ok",
+                    "version": resolve_app_version(),
+                    "request_id": request_id,
+                }
+            )
+        return (
+            jsonify({"status": "degraded", "database": "unavailable", "request_id": request_id}),
+            503,
+        )
 
     return app
 

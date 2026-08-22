@@ -1,4 +1,3 @@
-import pytest
 from sqlalchemy.orm import Session
 
 from tests.conftest import auth_headers, create_child, register
@@ -52,13 +51,19 @@ def test_failed_commit_sends_no_notification(client, monkeypatch):
 
     monkeypatch.setattr(Session, "commit", raise_commit)
 
-    with pytest.raises(RuntimeError):
-        client.post(
-            f"/api/children/{child['id']}/feeding-logs",
-            json=_feeding_payload(),
-            headers={**auth_headers(user["token"]), "X-Idempotency-Key": "fail-commit-key"},
-        )
+    # PROPAGATE_EXCEPTIONS=False (lihat app.py) — exception nggak lagi
+    # nembus ke pemanggil test_client(), tapi ketangkep global error
+    # handler dan jadi respons 500 yang aman (lihat utils/observability.py
+    # dan tests/test_observability.py buat kontrak lengkapnya). Invariant
+    # yang beneran mau diuji di sini TETAP SAMA: commit gagal -> notifikasi
+    # TIDAK terkirim.
+    resp = client.post(
+        f"/api/children/{child['id']}/feeding-logs",
+        json=_feeding_payload(),
+        headers={**auth_headers(user["token"]), "X-Idempotency-Key": "fail-commit-key"},
+    )
 
+    assert resp.status_code == 500
     assert calls == []
 
 
