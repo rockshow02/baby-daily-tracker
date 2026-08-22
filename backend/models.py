@@ -744,3 +744,75 @@ class IdempotencyKey(db.Model):
     response_body = db.Column(db.JSON, nullable=False)
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+
+class CaregiverAuditEvent(db.Model):
+    """
+    Jejak audit IMUTABLE: siapa yang create/update/delete 1 record anak
+    (Caregiver Audit Trail — Phase 1, lihat backend/docs/AUDIT_TRAIL.md).
+
+    SENGAJA PRIVACY-MINIMAL — baris di tabel ini TIDAK PERNAH berisi:
+    isi request mentah, nilai sebelum/sesudah, catatan/teks bebas, nama
+    obat/dosis, deskripsi sakit, suhu/berat/tinggi/volume menyusui atau
+    ukuran medis lain, nama anak, email user, token, idempotency key,
+    request ID, teks exception, atau URL endpoint. Cukup metadata minimal
+    biar caregiver yang berwenang paham APA yang kejadian dan SIAPA yang
+    ngelakuin — bukan salinan kedua data medisnya.
+
+    `changed_fields_json` (khusus event `update`) CUMA berisi NAMA field
+    yang berubah (mis. `["timestamp", "volume_ml"]`), divalidasi lewat
+    whitelist ketat per entity_type di utils/audit.py:SAFE_CHANGED_FIELDS
+    — TIDAK PERNAH nilai lama/barunya, dan TIDAK PERNAH nama field
+    mentah dari request (field yang nggak ada di whitelist otomatis
+    dibuang, bukan lolos apa adanya).
+
+    `actor_user_id` SENGAJA nullable + TANPA ondelete cascade — kalau
+    suatu saat akun user yang jadi actor di sini beneran dihapus (belum
+    ada fitur hapus akun sekarang), baris event ini TETAP ada (bukti
+    audit harus tetap ada), CUMA `to_dict()["actor_name"]` balik `None`
+    (lewat relationship yang gagal nemu User-nya) — bukan exception.
+
+    `child` pakai backref dengan `cascade="all, delete-orphan"` PERSIS
+    pola semua log lain di file ini — begitu 1 Child dihapus permanen,
+    SEMUA audit event anak itu ikut kehapus otomatis (konsisten sama
+    kebijakan hapus-permanen yang udah ada buat semua log anak lainnya,
+    bukan pengecualian).
+    """
+    __tablename__ = "caregiver_audit_events"
+
+    id = db.Column(db.Integer, primary_key=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
+    actor_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
+
+    action = db.Column(db.String(10), nullable=False)       # 'create' | 'update' | 'delete'
+    entity_type = db.Column(db.String(30), nullable=False)  # lihat utils/audit.py:ENTITY_TYPES
+    entity_id = db.Column(db.Integer, nullable=False)        # id record asli (bukan FK — record-nya bisa aja udah kehapus)
+
+    # List nama field yang berubah (CUMA buat action='update'; null buat create/delete)
+    changed_fields_json = db.Column(db.JSON, nullable=True)
+
+    # Waktu KEJADIAN ASLI record-nya (mis. FeedingLog.timestamp,
+    # GrowthMeasurement.measured_date) — null kalau entity_type-nya nggak
+    # punya field waktu kejadian yang jelas. BEDA dari created_at di bawah
+    # (kapan EVENT AUDIT ini sendiri dicatat).
+    recorded_at = db.Column(db.DateTime, nullable=True)
+
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+    actor = db.relationship("User", foreign_keys=[actor_user_id])
+    child = db.relationship(
+        "Child", backref=db.backref("audit_events", lazy="dynamic", cascade="all, delete-orphan")
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "action": self.action,
+            "entity_type": self.entity_type,
+            "entity_id": self.entity_id,
+            "changed_fields": self.changed_fields_json or [],
+            "recorded_at": (self.recorded_at.isoformat() + "+07:00") if self.recorded_at else None,
+            "created_at": self.created_at.isoformat() + "Z",
+            "actor_user_id": self.actor_user_id,
+            "actor_name": self.actor.name if self.actor else None,
+        }

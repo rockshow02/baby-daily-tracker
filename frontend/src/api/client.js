@@ -500,4 +500,19 @@ export const api = {
   // summary
   dailySummary: (childId, date) =>
     request(`/children/${childId}/daily-summary?date=${date}`),
+
+  // Caregiver Audit Trail (Phase 1) — BACA SAJA, endpoint nggak pernah
+  // nerima create/update/delete. `params` opsional: { cursor, limit,
+  // action, entity_type, actor_user_id } — dibuang kalau null/undefined
+  // biar nggak ngirim query string kosong (mis. "?cursor=undefined").
+  listAuditEvents: (childId, params = {}) => {
+    const search = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== null && value !== undefined && value !== "") {
+        search.set(key, String(value));
+      }
+    }
+    const qs = search.toString();
+    return request(`/children/${childId}/audit-events${qs ? `?${qs}` : ""}`);
+  },
 };

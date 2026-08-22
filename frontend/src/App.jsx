@@ -21,6 +21,7 @@ import UserProfileScreen from "./pages/UserProfileScreen";
 import CaregiverModal from "./components/CaregiverModal";
 import OfflineStatusBanner from "./components/OfflineStatusBanner";
 import SyncCenter from "./components/SyncCenter";
+import AuditTrailScreen from "./components/AuditTrailScreen";
 
 const NAV_ITEMS = [
   { key: "daily", label: "Harian", icon: "🍼" },
@@ -201,6 +202,7 @@ function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, s
   const [showCaregivers, setShowCaregivers] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showSyncCenter, setShowSyncCenter] = useState(false);
+  const [showAuditTrail, setShowAuditTrail] = useState(false);
 
   const sync = useOfflineSync();
 
@@ -350,6 +352,16 @@ function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, s
                 Status Sinkronisasi
               </button>
               <button
+                onClick={() => {
+                  setShowMenu(false);
+                  setShowAuditTrail(true);
+                }}
+                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl2 text-sm text-ink text-left"
+              >
+                <span className="text-base">🕘</span>
+                Aktivitas Pengasuh
+              </button>
+              <button
                 onClick={handleLogout}
                 className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl2 text-sm text-warn text-left"
               >
@@ -370,6 +382,14 @@ function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, s
       )}
 
       {showSyncCenter && <SyncCenter sync={sync} onClose={() => setShowSyncCenter(false)} />}
+
+      {showAuditTrail && (
+        <AuditTrailScreen
+          child={activeChild}
+          currentUserId={user.id}
+          onClose={() => setShowAuditTrail(false)}
+        />
+      )}
     </div>
   );
 }

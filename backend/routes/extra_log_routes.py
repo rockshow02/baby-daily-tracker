@@ -7,6 +7,7 @@ from utils.access import get_accessible_child
 from utils.auth import get_current_user_id
 from utils.idempotency import idempotent_create, compute_fingerprint
 from utils.timezone_utils import now_wib, today_wib, to_wib_naive
+from utils.audit import record_audit_event, snapshot_fields, diff_snapshots
 
 extra_log_bp = Blueprint("extra_log", __name__)
 
@@ -71,6 +72,10 @@ def create_pumping_log(child_id):
         )
         db.session.add(log)
         db.session.flush()
+        record_audit_event(
+            child_id=child_id, actor_user_id=user_id, action="create",
+            entity_type="pumping_log", entity_id=log.id, recorded_at=log.timestamp,
+        )
         return log.to_dict()
 
     def send_notification():
@@ -89,12 +94,19 @@ def update_or_delete_pumping_log(log_id):
     if not child:
         return jsonify({"error": "Tidak diizinkan"}), 403
 
+    user_id = get_current_user_id()
+
     if request.method == "DELETE":
+        record_audit_event(
+            child_id=log.child_id, actor_user_id=user_id, action="delete",
+            entity_type="pumping_log", entity_id=log.id, recorded_at=log.timestamp,
+        )
         db.session.delete(log)
         db.session.commit()
         return jsonify({"success": True})
 
     data = request.get_json() or {}
+    before = snapshot_fields(log, "pumping_log")
     if "timestamp" in data:
         log.timestamp = to_wib_naive(data["timestamp"])
     if "duration_minutes" in data:
@@ -105,6 +117,12 @@ def update_or_delete_pumping_log(log_id):
         log.breast_side = data["breast_side"]
     if "notes" in data:
         log.notes = data["notes"]
+    changed = diff_snapshots(before, snapshot_fields(log, "pumping_log"))
+    if changed:
+        record_audit_event(
+            child_id=log.child_id, actor_user_id=user_id, action="update",
+            entity_type="pumping_log", entity_id=log.id, changed_fields=changed, recorded_at=log.timestamp,
+        )
     db.session.commit()
     return jsonify(log.to_dict())
 
@@ -156,6 +174,10 @@ def create_activity_log(child_id):
         )
         db.session.add(log)
         db.session.flush()
+        record_audit_event(
+            child_id=child_id, actor_user_id=user_id, action="create",
+            entity_type="activity_log", entity_id=log.id, recorded_at=log.timestamp,
+        )
         return log.to_dict()
 
     def send_notification():
@@ -174,12 +196,19 @@ def update_or_delete_activity_log(log_id):
     if not child:
         return jsonify({"error": "Tidak diizinkan"}), 403
 
+    user_id = get_current_user_id()
+
     if request.method == "DELETE":
+        record_audit_event(
+            child_id=log.child_id, actor_user_id=user_id, action="delete",
+            entity_type="activity_log", entity_id=log.id, recorded_at=log.timestamp,
+        )
         db.session.delete(log)
         db.session.commit()
         return jsonify({"success": True})
 
     data = request.get_json() or {}
+    before = snapshot_fields(log, "activity_log")
     if "timestamp" in data:
         log.timestamp = to_wib_naive(data["timestamp"])
     if "activity_type" in data:
@@ -190,5 +219,11 @@ def update_or_delete_activity_log(log_id):
         log.duration_minutes = data["duration_minutes"]
     if "notes" in data:
         log.notes = data["notes"]
+    changed = diff_snapshots(before, snapshot_fields(log, "activity_log"))
+    if changed:
+        record_audit_event(
+            child_id=log.child_id, actor_user_id=user_id, action="update",
+            entity_type="activity_log", entity_id=log.id, changed_fields=changed, recorded_at=log.timestamp,
+        )
     db.session.commit()
     return jsonify(log.to_dict())

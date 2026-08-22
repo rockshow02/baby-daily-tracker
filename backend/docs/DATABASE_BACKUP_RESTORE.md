@@ -108,6 +108,13 @@ berisi nama file, timestamp, environment, jumlah tabel, ukuran, dan checksum
 SHA-256 — **tidak pernah** berisi baris data, username/email user aplikasi,
 password, atau token.
 
+> **Catatan:** setelah migrasi Caregiver Audit Trail (lihat
+> [`AUDIT_TRAIL.md`](AUDIT_TRAIL.md)) dijalankan, "jumlah tabel" di
+> metadata backup akan naik 1 (tabel baru `caregiver_audit_events`,
+> dibuat kosong). Ini **perubahan yang diharapkan**, bukan tanda backup
+> korup — jangan panik kalau angkanya beda dibanding backup SEBELUM
+> migrasi itu dijalankan.
+
 ## 3. List backup
 
 ```bash

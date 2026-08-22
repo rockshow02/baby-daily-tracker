@@ -9,6 +9,7 @@ from utils.access import get_accessible_child
 from utils.auth import get_current_user_id
 from utils.timezone_utils import today_wib
 from utils.growth_calc import evaluate_measurement, get_reference, value_at_zscore
+from utils.audit import record_audit_event, snapshot_fields, diff_snapshots
 
 growth_bp = Blueprint("growth", __name__)
 
@@ -83,8 +84,9 @@ def create_growth_measurement(child_id):
     if head_circumference_cm is not None and not (20 <= float(head_circumference_cm) <= 60):
         return jsonify({"error": "Lingkar kepala tidak wajar (20-60 cm)"}), 400
 
+    user_id = get_current_user_id()
     measurement = GrowthMeasurement(
-        created_by_user_id=get_current_user_id(),
+        created_by_user_id=user_id,
         child_id=child_id,
         measured_date=datetime.strptime(measured_date_str, "%Y-%m-%d").date(),
         weight_kg=weight_kg,
@@ -93,8 +95,13 @@ def create_growth_measurement(child_id):
         notes=data.get("notes"),
     )
     db.session.add(measurement)
+    db.session.flush()
+    record_audit_event(
+        child_id=child_id, actor_user_id=user_id, action="create",
+        entity_type="growth_measurement", entity_id=measurement.id, recorded_at=measurement.measured_date,
+    )
     db.session.commit()
-    notify_other_caregivers(child, get_current_user_id(), f"📈 {User.query.get(get_current_user_id()).name} mencatat data pertumbuhan untuk {child.nickname or child.name}.")
+    notify_other_caregivers(child, user_id, f"📈 {User.query.get(user_id).name} mencatat data pertumbuhan untuk {child.nickname or child.name}.")
     return jsonify(_enrich(measurement, child)), 201
 
 
@@ -133,12 +140,19 @@ def update_or_delete_growth_measurement(measurement_id):
     if not child:
         return jsonify({"error": "Tidak diizinkan"}), 403
 
+    user_id = get_current_user_id()
+
     if request.method == "DELETE":
+        record_audit_event(
+            child_id=measurement.child_id, actor_user_id=user_id, action="delete",
+            entity_type="growth_measurement", entity_id=measurement.id, recorded_at=measurement.measured_date,
+        )
         db.session.delete(measurement)
         db.session.commit()
         return jsonify({"success": True})
 
     data = request.get_json() or {}
+    before = snapshot_fields(measurement, "growth_measurement")
     if "measured_date" in data:
         measurement.measured_date = datetime.strptime(data["measured_date"], "%Y-%m-%d").date()
     if "weight_kg" in data:
@@ -155,6 +169,13 @@ def update_or_delete_growth_measurement(measurement_id):
         measurement.head_circumference_cm = data["head_circumference_cm"]
     if "notes" in data:
         measurement.notes = data["notes"]
+    changed = diff_snapshots(before, snapshot_fields(measurement, "growth_measurement"))
+    if changed:
+        record_audit_event(
+            child_id=measurement.child_id, actor_user_id=user_id, action="update",
+            entity_type="growth_measurement", entity_id=measurement.id, changed_fields=changed,
+            recorded_at=measurement.measured_date,
+        )
     db.session.commit()
     return jsonify(_enrich(measurement, child))
 

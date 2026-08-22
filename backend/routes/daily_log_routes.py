@@ -10,6 +10,7 @@ from utils.access import get_accessible_child
 from utils.auth import get_current_user_id
 from utils.idempotency import idempotent_create, compute_fingerprint
 from utils.summary_engine import build_daily_summary, get_age_in_days
+from utils.audit import record_audit_event, snapshot_fields, diff_snapshots
 
 daily_log_bp = Blueprint("daily_log", __name__)
 
@@ -75,6 +76,10 @@ def create_feeding_log(child_id):
         )
         db.session.add(log)
         db.session.flush()
+        record_audit_event(
+            child_id=child_id, actor_user_id=user_id, action="create",
+            entity_type="feeding_log", entity_id=log.id, recorded_at=log.timestamp,
+        )
         return log.to_dict()
 
     def send_notification():
@@ -93,17 +98,30 @@ def update_or_delete_feeding_log(log_id):
     if not child:
         return jsonify({"error": "Tidak diizinkan"}), 403
 
+    user_id = get_current_user_id()
+
     if request.method == "DELETE":
+        record_audit_event(
+            child_id=log.child_id, actor_user_id=user_id, action="delete",
+            entity_type="feeding_log", entity_id=log.id, recorded_at=log.timestamp,
+        )
         db.session.delete(log)
         db.session.commit()
         return jsonify({"success": True})
 
     data = request.get_json() or {}
+    before = snapshot_fields(log, "feeding_log")
     for field in ["feed_type", "duration_minutes", "volume_ml", "breast_side", "notes"]:
         if field in data:
             setattr(log, field, data[field])
     if "timestamp" in data:
         log.timestamp = to_wib_naive(data["timestamp"])
+    changed = diff_snapshots(before, snapshot_fields(log, "feeding_log"))
+    if changed:
+        record_audit_event(
+            child_id=log.child_id, actor_user_id=user_id, action="update",
+            entity_type="feeding_log", entity_id=log.id, changed_fields=changed, recorded_at=log.timestamp,
+        )
     db.session.commit()
     return jsonify(log.to_dict())
 
@@ -162,6 +180,10 @@ def create_sleep_log(child_id):
         )
         db.session.add(log)
         db.session.flush()
+        record_audit_event(
+            child_id=child_id, actor_user_id=user_id, action="create",
+            entity_type="sleep_log", entity_id=log.id, recorded_at=log.start_time,
+        )
         return log.to_dict()
 
     def send_notification():
@@ -180,18 +202,31 @@ def update_or_delete_sleep_log(log_id):
     if not child:
         return jsonify({"error": "Tidak diizinkan"}), 403
 
+    user_id = get_current_user_id()
+
     if request.method == "DELETE":
+        record_audit_event(
+            child_id=log.child_id, actor_user_id=user_id, action="delete",
+            entity_type="sleep_log", entity_id=log.id, recorded_at=log.start_time,
+        )
         db.session.delete(log)
         db.session.commit()
         return jsonify({"success": True})
 
     data = request.get_json() or {}
+    before = snapshot_fields(log, "sleep_log")
     if "end_time" in data:
         log.end_time = to_wib_naive(data["end_time"]) if data["end_time"] else None
     if "sleep_type" in data:
         log.sleep_type = data["sleep_type"]
     if "notes" in data:
         log.notes = data["notes"]
+    changed = diff_snapshots(before, snapshot_fields(log, "sleep_log"))
+    if changed:
+        record_audit_event(
+            child_id=log.child_id, actor_user_id=user_id, action="update",
+            entity_type="sleep_log", entity_id=log.id, changed_fields=changed, recorded_at=log.start_time,
+        )
     db.session.commit()
     return jsonify(log.to_dict())
 
@@ -242,6 +277,10 @@ def create_diaper_log(child_id):
         )
         db.session.add(log)
         db.session.flush()
+        record_audit_event(
+            child_id=child_id, actor_user_id=user_id, action="create",
+            entity_type="diaper_log", entity_id=log.id, recorded_at=log.timestamp,
+        )
         return log.to_dict()
 
     def send_notification():
@@ -260,12 +299,19 @@ def update_or_delete_diaper_log(log_id):
     if not child:
         return jsonify({"error": "Tidak diizinkan"}), 403
 
+    user_id = get_current_user_id()
+
     if request.method == "DELETE":
+        record_audit_event(
+            child_id=log.child_id, actor_user_id=user_id, action="delete",
+            entity_type="diaper_log", entity_id=log.id, recorded_at=log.timestamp,
+        )
         db.session.delete(log)
         db.session.commit()
         return jsonify({"success": True})
 
     data = request.get_json() or {}
+    before = snapshot_fields(log, "diaper_log")
     if "timestamp" in data:
         log.timestamp = to_wib_naive(data["timestamp"])
     if "diaper_type" in data:
@@ -276,6 +322,12 @@ def update_or_delete_diaper_log(log_id):
         log.color = data["color"]
     if "notes" in data:
         log.notes = data["notes"]
+    changed = diff_snapshots(before, snapshot_fields(log, "diaper_log"))
+    if changed:
+        record_audit_event(
+            child_id=log.child_id, actor_user_id=user_id, action="update",
+            entity_type="diaper_log", entity_id=log.id, changed_fields=changed, recorded_at=log.timestamp,
+        )
     db.session.commit()
     return jsonify(log.to_dict())
 

@@ -38,6 +38,8 @@ const { apiMock } = vi.hoisted(() => ({
     listPumping: vi.fn(),
     listActivity: vi.fn(),
     listMedication: vi.fn(),
+    listCaregivers: vi.fn(),
+    listAuditEvents: vi.fn(),
     getStats: vi.fn(),
     photoUrl: (f) => f,
     exportPdfUrl: () => "",
@@ -97,6 +99,8 @@ function resetApiMock() {
   apiMock.listPumping.mockResolvedValue([]);
   apiMock.listActivity.mockResolvedValue([]);
   apiMock.listMedication.mockResolvedValue([]);
+  apiMock.listCaregivers.mockResolvedValue([]);
+  apiMock.listAuditEvents.mockResolvedValue({ events: [], next_cursor: null });
   apiMock.getStats.mockResolvedValue({ days: [] });
 }
 
@@ -445,5 +449,53 @@ describe("App — Sync Center (single authoritative sync controller)", () => {
 
     await waitFor(async () => expect(await getQueue()).toHaveLength(0));
     expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("App — Aktivitas Pengasuh (Caregiver Audit Trail menu entry)", () => {
+  async function renderAuthenticated() {
+    setToken("tok-5");
+    setCurrentUser(5);
+    apiMock.me.mockResolvedValue(testUser);
+    apiMock.listChildren.mockResolvedValue([testChild]);
+    setOnline(true);
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByText("Dedek").length).toBeGreaterThan(0));
+  }
+
+  it("is reachable from the app menu ('🕘 Aktivitas Pengasuh')", async () => {
+    await renderAuthenticated();
+
+    fireEvent.click(screen.getByText("☰"));
+    const entry = await screen.findByText("Aktivitas Pengasuh");
+    fireEvent.click(entry);
+
+    expect(await screen.findByRole("dialog", { name: "Aktivitas Pengasuh" })).toBeInTheDocument();
+    await waitFor(() => expect(apiMock.listAuditEvents).toHaveBeenCalledWith(testChild.id, expect.any(Object)));
+  });
+
+  it("opening it does not disrupt the Sync Center's live queue updates (proves it reuses the single shared sync controller, not a second useOfflineSync instance)", async () => {
+    await renderAuthenticated();
+
+    // Buka & tutup Aktivitas Pengasuh dulu.
+    fireEvent.click(screen.getByText("☰"));
+    fireEvent.click(await screen.findByText("Aktivitas Pengasuh"));
+    await screen.findByRole("dialog", { name: "Aktivitas Pengasuh" });
+    fireEvent.click(screen.getAllByRole("button", { name: "Tutup" })[0]);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Aktivitas Pengasuh" })).not.toBeInTheDocument());
+
+    // Sync Center masih berfungsi normal sesudahnya — live update tetap jalan.
+    fireEvent.click(screen.getByText("☰"));
+    fireEvent.click(await screen.findByText("Status Sinkronisasi"));
+    await screen.findByRole("dialog", { name: "Status Sinkronisasi" });
+    expect(screen.getByText("Tidak ada catatan yang perlu disinkronkan saat ini.")).toBeInTheDocument();
+
+    await act(async () => {
+      await seedFeedingQueueItem();
+    });
+
+    await waitFor(() =>
+      expect(screen.queryByText("Tidak ada catatan yang perlu disinkronkan saat ini.")).not.toBeInTheDocument(),
+    );
   });
 });
