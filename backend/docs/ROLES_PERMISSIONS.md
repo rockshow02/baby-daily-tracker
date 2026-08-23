@@ -276,6 +276,60 @@ SEBELUM commit itu:
    TAPI responsnya tetap lewat handler error global yang sudah
    ter-sanitasi (pola yang sama dipakai semua route lain di app ini).
 
+**Validasi foto (`photo_base64`/`photo_ext`) — kebijakan lengkap**: foto di
+file backup NGGAK PERNAH dipercaya begitu saja sebelum ditulis ke disk.
+Urutan validasinya (semua di `_restore_photo_from_base64()` dan
+helper-helper kecil di baliknya, `routes/backup_routes.py`):
+
+1. **Ekstensi** divalidasi lewat allowlist yang SAMA dipakai endpoint
+   upload foto biasa (`POST /children/<id>/photo`) —
+   `children_routes.ALLOWED_PHOTO_EXT = {"png", "jpg", "jpeg", "webp"}`,
+   di-reuse langsung (bukan didefinisikan ulang), biar nggak ada dua
+   kebijakan ekstensi yang beda-beda. `photo_ext` dari file backup HARUS
+   cocok regex `[a-z0-9]+` (case-insensitive, di-lowercase-kan dulu) —
+   ini otomatis nolak path traversal (`../..`), path absolut (`/tmp/x`,
+   `C:\x`), separator direktori, ekstensi ganda (`jpg.exe`), string kosong,
+   dan format yang nggak didukung (`svg`, `html`, `exe`, dst) SEKALIGUS,
+   sebelum nilainya pernah dipakai bikin path apa pun.
+2. **Base64 didecode SUPER ketat** pakai `base64.b64decode(..., validate=
+   True)` — nolak karakter ilegal apa pun (termasuk whitespace/newline)
+   DAN padding yang salah sebagai error tunggal, dalam memory, sebelum
+   ada file yang kebuat. Prefix data-URL (`data:image/png;base64,...`)
+   **TIDAK didukung** — karakter `:`/`;`/`,` di prefix itu otomatis bikin
+   decode ketolak (bukan alfabet base64), jadi literal prefix-nya
+   TIDAK PERNAH ketulis ke file; ini sengaja diperlakukan sebagai "foto
+   gagal divalidasi", bukan di-strip diam-diam, karena `export_json()`
+   TIDAK PERNAH ngasilin prefix ini.
+3. **Ukuran maksimal** SAMA kayak endpoint upload foto biasa —
+   `MAX_PHOTO_SIZE_MB = 5` (`children_routes.py`, di-reuse juga). String
+   base64 yang KEGEDEAN ditolak SEBELUM decode penuh (batas panjang
+   string dihitung dari rasio ekspansi base64 ~4/3), biar payload
+   raksasa nggak perlu didecode penuh ke memory dulu baru ketauan
+   kegedean; ukuran bytes hasil decode juga dicek ulang sebagai
+   pengaman kedua. Hasil decode kosong (0 byte) ditolak juga.
+4. **Baru setelah SEMUA validasi di atas lolos**, file ditulis — ke path
+   yang SEPENUHNYA server-generated (`child<id>_<random-hex>.<ext>`,
+   NGGAK PERNAH dari nama/path yang dikasih file backup), pakai mode
+   *exclusive creation* (`"xb"`) biar file yang sudah ada di `uploads/`
+   TIDAK PERNAH ketimpa.
+
+**Kalau validasi foto gagal di langkah mana pun** (ekstensi nggak
+didukung, base64 rusak/kosong, atau kegedean): foto DILEWATI DENGAN AMAN
+— `child.photo_filename` TETAP `null`, TIDAK ADA file yang ketulis ke
+disk sama sekali, DAN **import data yang lain (anak + semua log) TETAP
+lanjut & sukses** — kegagalan foto BUKAN alasan gagalin seluruh import
+(kebijakan lama tetap dipertahankan, cuma sekarang nggak lagi bisa
+nyisain file yatim). Kalau file SEMPAT ketulis lengkap tapi TRANSAKSI
+DATABASE-nya sendiri belakangan gagal (lihat "Transaksi atomik" di atas),
+foto yang sudah ketulis itu tetap DIHAPUS lewat jalur rollback yang sama
+— jadi tetap konsisten "gagal = gagal total, nggak ada yang nyangkut
+sebagian", baik untuk baris database maupun file di disk. Kegagalan
+saat MENGHAPUS (baik file yatim/parsial maupun rollback foto) SENGAJA
+ditelan (`_safe_remove()`) dan TIDAK PERNAH menggantikan/menutupi respons
+error asli yang lagi dikembalikan. Cleanup di sini juga TIDAK PERNAH pakai
+glob atau hapus direktori — cuma menghapus SATU path yang persis diketahui
+server sendiri.
+
 Respons sukses (`{"success": true, "child": {...}}`) nyertain `role:
 "owner"` eksplisit — SAMA kontraknya kayak respons child-scoped lain
 (`GET /children`, `GET /children/<id>`, dst).
