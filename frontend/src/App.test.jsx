@@ -35,6 +35,15 @@ vi.mock("./pages/InsightsScreen", () => ({
     </div>
   ),
 }));
+// ReminderScreen (Care Reminders & Schedules Phase 1) di-stub SAMA
+// alasannya — sudah dites penuh di src/pages/ReminderScreen.test.jsx.
+vi.mock("./pages/ReminderScreen", () => ({
+  default: ({ child, currentUserId }) => (
+    <div data-testid="reminders-screen-stub">
+      reminders for child {child.id} / user {currentUserId}
+    </div>
+  ),
+}));
 
 const { apiMock } = vi.hoisted(() => ({
   apiMock: {
@@ -53,6 +62,7 @@ const { apiMock } = vi.hoisted(() => ({
     listCaregivers: vi.fn(),
     listAuditEvents: vi.fn(),
     getStats: vi.fn(),
+    listReminders: vi.fn(),
     photoUrl: (f) => f,
     exportPdfUrl: () => "",
     exportJsonUrl: () => "",
@@ -118,6 +128,10 @@ function resetApiMock() {
   apiMock.listCaregivers.mockResolvedValue([]);
   apiMock.listAuditEvents.mockResolvedValue({ events: [], next_cursor: null });
   apiMock.getStats.mockResolvedValue({ days: [] });
+  apiMock.listReminders.mockResolvedValue({
+    child_id: 10, timezone: "Asia/Jakarta", server_time: new Date().toISOString(),
+    reminders: [], summary: { due_count: 0, overdue_count: 0, next_upcoming_at: null },
+  });
 }
 
 async function drainRealQueue() {
@@ -604,6 +618,111 @@ describe("App — revoked child access removes cached insight snapshots on reval
       schemaVersion: 1, userId: testUser.id, childId: 999, cachedAt: new Date().toISOString(), data: {},
     });
     localStorage.setItem(revokedKey, snapshot);
+    localStorage.setItem(
+      stillAccessibleKey,
+      JSON.stringify({ schemaVersion: 1, userId: testUser.id, childId: testChild.id, cachedAt: new Date().toISOString(), data: {} }),
+    );
+
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByText("Dedek").length).toBeGreaterThan(0));
+
+    await waitFor(() => expect(localStorage.getItem(revokedKey)).toBeNull());
+    expect(localStorage.getItem(stillAccessibleKey)).not.toBeNull();
+  });
+});
+
+describe("App — '🔔 Pengingat' nav entry (Care Reminders & Schedules Phase 1)", () => {
+  async function renderAuthenticatedWithRole(role) {
+    setToken("tok-5");
+    setCurrentUser(5);
+    apiMock.me.mockResolvedValue(testUser);
+    apiMock.listChildren.mockResolvedValue([{ ...testChild, role }]);
+    setOnline(true);
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByText("Dedek").length).toBeGreaterThan(0));
+  }
+
+  it("shows the 'Pengingat' entry to the owner", async () => {
+    await renderAuthenticatedWithRole("owner");
+    fireEvent.click(screen.getByText("☰"));
+    expect(await screen.findByText("Pengingat")).toBeInTheDocument();
+  });
+
+  it("shows the 'Pengingat' entry to an editor", async () => {
+    await renderAuthenticatedWithRole("editor");
+    fireEvent.click(screen.getByText("☰"));
+    expect(await screen.findByText("Pengingat")).toBeInTheDocument();
+  });
+
+  it("shows the 'Pengingat' entry to a viewer (view-only is never hidden)", async () => {
+    await renderAuthenticatedWithRole("viewer");
+    fireEvent.click(screen.getByText("☰"));
+    expect(await screen.findByText("Pengingat")).toBeInTheDocument();
+  });
+
+  it("navigates to the Reminder screen with the correct child and user when clicked", async () => {
+    await renderAuthenticatedWithRole("owner");
+    fireEvent.click(screen.getByText("☰"));
+    fireEvent.click(await screen.findByText("Pengingat"));
+    expect(await screen.findByTestId("reminders-screen-stub")).toHaveTextContent(
+      `reminders for child ${testChild.id} / user ${testUser.id}`,
+    );
+  });
+});
+
+describe("App — Dashboard reminder summary widget", () => {
+  it("shows the compact due/overdue summary on the Dashboard and links to the Reminder screen", async () => {
+    setToken("tok-5");
+    setCurrentUser(5);
+    apiMock.me.mockResolvedValue(testUser);
+    apiMock.listChildren.mockResolvedValue([testChild]);
+    apiMock.listReminders.mockResolvedValue({
+      child_id: 10, timezone: "Asia/Jakarta", server_time: new Date().toISOString(),
+      reminders: [], summary: { due_count: 2, overdue_count: 1, next_upcoming_at: null },
+    });
+    setOnline(true);
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByText("Dedek").length).toBeGreaterThan(0));
+
+    expect(await screen.findByText("1 terlambat")).toBeInTheDocument();
+    expect(screen.getByText("2 jatuh tempo")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("1 terlambat").closest("button"));
+    expect(await screen.findByTestId("reminders-screen-stub")).toBeInTheDocument();
+  });
+
+  it("shows nothing on the Dashboard when there is nothing due/overdue/upcoming", async () => {
+    setToken("tok-5");
+    setCurrentUser(5);
+    apiMock.me.mockResolvedValue(testUser);
+    apiMock.listChildren.mockResolvedValue([testChild]);
+    apiMock.listReminders.mockResolvedValue({
+      child_id: 10, timezone: "Asia/Jakarta", server_time: new Date().toISOString(),
+      reminders: [], summary: { due_count: 0, overdue_count: 0, next_upcoming_at: null },
+    });
+    setOnline(true);
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByText("Dedek").length).toBeGreaterThan(0));
+
+    expect(screen.queryByText(/jatuh tempo/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/terlambat/)).not.toBeInTheDocument();
+  });
+});
+
+describe("App — revoked child access removes cached reminder snapshots on revalidation", () => {
+  it("prunes reminder cache entries for children no longer in the accessible list after a successful online revalidation", async () => {
+    setToken("tok-5");
+    setCurrentUser(5);
+    apiMock.me.mockResolvedValue(testUser);
+    apiMock.listChildren.mockResolvedValue([testChild]);
+    setOnline(true);
+
+    const revokedKey = `babytracker_reminder_cache_v1:${testUser.id}:999`;
+    const stillAccessibleKey = `babytracker_reminder_cache_v1:${testUser.id}:${testChild.id}`;
+    localStorage.setItem(
+      revokedKey,
+      JSON.stringify({ schemaVersion: 1, userId: testUser.id, childId: 999, cachedAt: new Date().toISOString(), data: {} }),
+    );
     localStorage.setItem(
       stillAccessibleKey,
       JSON.stringify({ schemaVersion: 1, userId: testUser.id, childId: testChild.id, cachedAt: new Date().toISOString(), data: {} }),

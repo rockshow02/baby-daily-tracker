@@ -17,7 +17,7 @@ whitelist), [`backend/routes/audit_routes.py`](../routes/audit_routes.py)
 
 ## Yang diaudit (Phase 1) vs yang TIDAK
 
-**Diaudit** — 12 tipe log anak yang sudah ada:
+**Diaudit** — 13 tipe log/definisi anak (12 tipe log yang sudah ada + `reminder`):
 
 1. Catatan menyusui (`feeding_log`)
 2. Catatan tidur (`sleep_log`)
@@ -39,6 +39,22 @@ kejadian keamanan membership caregiver (`entity_type =
 dicabut. TERPISAH dari 12 tipe record di atas, TIDAK PERNAH menyimpan
 kode undangan, email, atau nilai peran lama/baru — cukup metadata "apa
 yang kejadian, siapa pelakunya".
+
+13. Definisi pengingat (`reminder`) — Care Reminders & Schedules Phase 1,
+    lihat [`REMINDERS.md`](REMINDERS.md). `title` ada di
+    `PRIVATE_CHANGED_FIELDS` (bisa berisi nama obat), field jadwal/
+    kategori (`reminder_type`/`scheduled_at`/`recurrence`/`is_active`)
+    aman disebut namanya.
+
+**Juga diaudit** (perluasan lain — Care Reminders & Schedules Phase 1):
+menyelesaikan/melewati 1 okurensi pengingat, masing-masing lewat
+`entity_type` KHUSUS-nya sendiri (`reminder_occurrence_completed` /
+`reminder_occurrence_skipped`) — TERPISAH dari `"reminder"` di atas
+(itu buat mutasi DEFINISI jadwalnya, ini buat AKSI atas 1 okurensinya).
+`action` selalu `"create"` (1 baris `ReminderAction` baru), `entity_id`
+= id baris itu, `changed_fields` selalu `None` (nama entity_type ITU
+SENDIRI sudah membedakan selesai vs lewati — lihat
+[`REMINDERS.md`](REMINDERS.md) buat alasan desainnya).
 
 **SENGAJA DIKECUALIKAN di Phase 1** (kandidat Phase 2, belum dikerjakan):
 
@@ -82,7 +98,7 @@ Yang BENERAN disimpan (lihat `CaregiverAuditEvent` di `models.py`):
 | `child_id` | anak yang bersangkutan (index) |
 | `actor_user_id` | user yang MELAKUKAN aksi ini (index, `NULL` kalau akun aktornya sudah dihapus — lihat bagian "Otorisasi" di bawah) |
 | `action` | `"create"` \| `"update"` \| `"delete"` |
-| `entity_type` | salah satu dari 12 tipe record di atas, ATAU `"caregiver_membership"` (allowlist ketat) |
+| `entity_type` | salah satu dari 13 tipe record di atas, ATAU `"caregiver_membership"`/`"reminder_occurrence_completed"`/`"reminder_occurrence_skipped"` (allowlist ketat) |
 | `entity_id` | ID record aslinya (bukan FK — record-nya bisa aja udah kehapus) |
 | `changed_fields_json` | list nama field AMAN dan/atau marker generik yang berubah (CUMA action=`update`) |
 | `recorded_at` | waktu KEJADIAN ASLI record-nya (mis. `FeedingLog.timestamp`) |
@@ -179,7 +195,7 @@ GET /api/children/<child_id>/audit-events
 - Filter opsional (SEMUA lewat SQLAlchemy query builder — TIDAK PERNAH
   nyusun SQL mentah dari input):
   - `action` — harus salah satu dari `create`/`update`/`delete`, else `400`.
-  - `entity_type` — harus salah satu dari 12 tipe record ATAU `"caregiver_membership"`, else `400`.
+  - `entity_type` — harus salah satu dari 13 tipe record ATAU `"caregiver_membership"`/`"reminder_occurrence_completed"`/`"reminder_occurrence_skipped"`, else `400`.
   - `actor_user_id` — harus integer positif, else `400`.
 
 Contoh respons (2 event — 1 update field aman, 1 update yang nyentuh

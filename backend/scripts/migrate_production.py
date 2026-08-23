@@ -299,16 +299,19 @@ def migrate():
                 conn.commit()
             print(f"    OK")
 
-        print("\n=== Bikin tabel yang belum ada (kayak 'articles', 'caregiver_audit_events') ===")
+        print("\n=== Bikin tabel yang belum ada (kayak 'articles', 'caregiver_audit_events', 'reminders') ===")
         print("  Data di tabel yang UDAH ADA nggak akan disentuh sama sekali.")
         # 'caregiver_audit_events' (Caregiver Audit Trail Phase 1 — lihat
-        # backend/docs/AUDIT_TRAIL.md) SENGAJA nggak perlu masuk daftar
-        # COLUMNS_TO_ENSURE di atas: itu tabel BARU (bukan kolom baru di
-        # tabel lama), jadi db.create_all() di bawah ini SUDAH CUKUP buat
-        # bikinnya — nggak ada ALTER TABLE yang perlu ditulis manual, dan
-        # nggak ada baris lama yang ke-touch (tabel ini emang belum ada
-        # baris apa pun sebelum migrasi ini). db.create_all() TIDAK PERNAH
-        # nge-drop/re-create tabel yang UDAH ada, cuma nambah yang belum ada.
+        # backend/docs/AUDIT_TRAIL.md) DAN 'reminders'/'reminder_actions'
+        # (Care Reminders & Schedules Phase 1 — lihat
+        # backend/docs/REMINDERS.md) SENGAJA nggak perlu masuk daftar
+        # COLUMNS_TO_ENSURE di atas: semuanya tabel BARU (bukan kolom baru
+        # di tabel lama), jadi db.create_all() di bawah ini SUDAH CUKUP
+        # buat bikinnya — nggak ada ALTER TABLE yang perlu ditulis manual,
+        # dan nggak ada baris lama yang ke-touch (tabel-tabel ini emang
+        # belum ada baris apa pun sebelum migrasi ini). db.create_all()
+        # TIDAK PERNAH nge-drop/re-create tabel yang UDAH ada, cuma
+        # nambah yang belum ada.
         db.create_all()
         print("  Selesai.")
 
@@ -323,6 +326,16 @@ def migrate():
             print("\n  OK: tabel 'caregiver_audit_events' (Caregiver Audit Trail Phase 1) ada.")
         else:
             print("\n  PERINGATAN: tabel 'caregiver_audit_events' TIDAK ditemukan setelah migrasi!")
+
+        # Care Reminders & Schedules Phase 1 (lihat backend/docs/REMINDERS.md)
+        # — 'reminders'/'reminder_actions' SAMA PERSIS pola
+        # 'caregiver_audit_events' di atas: tabel BARU (bukan kolom baru
+        # di tabel lama), db.create_all() di atas SUDAH CUKUP bikinnya,
+        # nggak ada baris lama yang perlu ditransformasi/ditulis manual.
+        if "reminders" in final_tables and "reminder_actions" in final_tables:
+            print("  OK: tabel 'reminders' dan 'reminder_actions' (Care Reminders & Schedules Phase 1) ada.")
+        else:
+            print("  PERINGATAN: tabel 'reminders'/'reminder_actions' TIDAK ditemukan setelah migrasi!")
 
 
 if __name__ == "__main__":

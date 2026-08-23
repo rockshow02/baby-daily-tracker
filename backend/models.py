@@ -916,3 +916,142 @@ class CaregiverAuditEvent(db.Model):
             "actor_user_id": self.actor_user_id,
             "actor_name": self.actor.name if self.actor else None,
         }
+
+
+class Reminder(db.Model):
+    """
+    Definisi 1 pengingat perawatan (Care Reminders & Schedules — Phase 1,
+    lihat backend/docs/REMINDERS.md). SENGAJA CUMA nyimpen JADWAL +
+    METADATA, TIDAK PERNAH status "sudah lewat"/"jatuh tempo" — status
+    itu SELALU dihitung ULANG saat diminta (lihat
+    utils/reminder_engine.py) karena PythonAnywhere Free nggak punya
+    scheduler background yang bisa nge-update status di latar belakang
+    pada waktu yang tepat.
+
+    `title` SENGAJA diperlakukan sebagai teks POTENSIAL SENSITIF (bisa
+    aja diisi caregiver dengan nama obat/rincian medis, mis. "Kasih
+    Paracetamol 5ml") — TIDAK PERNAH dikirim ke notifikasi
+    browser/log/audit trail apa adanya, cuma teks generik per
+    `reminder_type` yang dipakai di sana (lihat routes/reminder_routes.py).
+    """
+    __tablename__ = "reminders"
+    __table_args__ = (
+        db.CheckConstraint(
+            "reminder_type IN ('medication','doctor_visit','vaccination','pumping','general')",
+            name="ck_reminders_type",
+        ),
+        # 'weekly'/'custom' SENGAJA belum masuk allowlist Phase 1 (lihat
+        # backend/docs/REMINDERS.md#scope) — kolom `recurrence` string
+        # bebas (bukan enum SQLite native) biar allowlist ini gampang
+        # diperluas nanti TANPA migrasi skema kolom, cuma ganti CHECK
+        # constraint-nya.
+        db.CheckConstraint("recurrence IN ('none','daily')", name="ck_reminders_recurrence"),
+        db.Index("ix_reminders_child_active", "child_id", "is_active"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+
+    reminder_type = db.Column(db.String(20), nullable=False)
+    title = db.Column(db.String(150), nullable=False)
+
+    # Wall-clock WIB naive (KONSISTEN sama semua kolom timestamp domain
+    # lain di app ini, lihat utils/timezone_utils.py) — buat pengingat
+    # 'daily', kolom ini jadi JANGKAR (tanggal awal + jam-menit tiap
+    # hari); okurensi hari-hari berikutnya dihitung dari jam:menit-nya,
+    # BUKAN disimpan baris terpisah per hari (lihat
+    # utils/reminder_engine.py).
+    scheduled_at = db.Column(db.DateTime, nullable=False, index=True)
+    recurrence = db.Column(db.String(10), nullable=False, default="none")
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
+    child = db.relationship(
+        "Child", backref=db.backref("reminders", lazy="dynamic", cascade="all, delete-orphan")
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "child_id": self.child_id,
+            "created_by_user_id": self.created_by_user_id,
+            "reminder_type": self.reminder_type,
+            "title": self.title,
+            "scheduled_at": self.scheduled_at.isoformat() + "+07:00",
+            "recurrence": self.recurrence,
+            "is_active": self.is_active,
+            "created_at": self.created_at.isoformat() + "Z",
+            "updated_at": self.updated_at.isoformat() + "Z",
+        }
+
+
+class ReminderAction(db.Model):
+    """
+    SATU aksi caregiver (selesai/lewati) atas SATU okurensi 1 Reminder.
+    Baris di sini SENGAJA CUMA dibikin buat okurensi yang BENERAN
+    di-selesaikan/dilewati caregiver — okurensi yang masih "pending"
+    TIDAK PERNAH punya baris (statusnya dihitung IMPLISIT: nggak ada
+    baris = pending), biar reminder harian yang udah aktif lama nggak
+    numpuk baris kosong nggak terbatas (lihat requirement "avoid
+    materializing unlimited future occurrences").
+
+    `occurrence_at` = jam kejadian okurensi spesifik itu (tanggal +
+    jam:menit dari `Reminder.scheduled_at`, WIB naive) — SATU-SATUNYA
+    kunci yang nentuin "okurensi yang MANA" (lihat UniqueConstraint di
+    bawah: 1 Reminder cuma boleh punya SATU baris aksi per
+    `occurrence_at`, apa pun statusnya — occurrence yang UDAH punya aksi
+    TIDAK PERNAH bisa dapet aksi ke-2 lewat jalur normal, lihat
+    routes/reminder_routes.py buat penanganan konflik 409-nya).
+
+    TIDAK ADA status 'pending' literal di sini (beda dari daftar status
+    okurensi yang "kelihatan" di API) — CHECK constraint di bawah SENGAJA
+    cuma izinin 'completed'/'skipped'.
+    """
+    __tablename__ = "reminder_actions"
+    __table_args__ = (
+        db.UniqueConstraint("reminder_id", "occurrence_at", name="uq_reminder_action_occurrence"),
+        db.CheckConstraint("status IN ('completed','skipped')", name="ck_reminder_actions_status"),
+        db.CheckConstraint(
+            "linked_log_type IS NULL OR linked_log_type IN ('medication_log','pumping_log','doctor_visit')",
+            name="ck_reminder_actions_linked_log_type",
+        ),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    reminder_id = db.Column(db.Integer, db.ForeignKey("reminders.id"), nullable=False, index=True)
+
+    occurrence_at = db.Column(db.DateTime, nullable=False, index=True)
+    status = db.Column(db.String(10), nullable=False)
+
+    acted_at = db.Column(db.DateTime, nullable=False)
+    acted_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+
+    # Diisi CUMA kalau aksi ini lahir dari alur "Catat sekarang" yang
+    # berhasil nyimpen 1 catatan perawatan (lihat routes/reminder_routes.py)
+    # — TIDAK PERNAH diisi otomatis tanpa konfirmasi eksplisit caregiver
+    # (requirement: jangan otomatis catat pemberian obat/vaksinasi cuma
+    # gara-gara pengingatnya jatuh tempo).
+    linked_log_type = db.Column(db.String(20), nullable=True)
+    linked_log_id = db.Column(db.Integer, nullable=True)
+
+    reminder = db.relationship(
+        "Reminder", backref=db.backref("actions", lazy="dynamic", cascade="all, delete-orphan")
+    )
+    actor = db.relationship("User", foreign_keys=[acted_by_user_id])
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "reminder_id": self.reminder_id,
+            "occurrence_at": self.occurrence_at.isoformat() + "+07:00",
+            "status": self.status,
+            "acted_at": self.acted_at.isoformat() + "+07:00",
+            "acted_by_user_id": self.acted_by_user_id,
+            "acted_by_name": self.actor.name if self.actor else None,
+            "linked_log_type": self.linked_log_type,
+            "linked_log_id": self.linked_log_id,
+        }

@@ -12,6 +12,8 @@ import {
 import { cacheUserProfile, getCachedUserProfile, clearUserCache } from "../utils/sessionCache";
 import { clearLastSyncedAt } from "../utils/syncMetadata";
 import { clearAllInsightSnapshotsForUser } from "../utils/insightCache";
+import { clearAllReminderSnapshotsForUser } from "../utils/reminderCache";
+import { clearNotificationStateForUser } from "../utils/reminderNotifications";
 
 const AuthContext = createContext(null);
 
@@ -64,6 +66,13 @@ export function AuthProvider({ children }) {
       // yang login di device yang sama nggak pernah kebetulan lihat
       // snapshot akun sebelumnya.
       clearAllInsightSnapshotsForUser(uid);
+      // Snapshot reminder (utils/reminderCache.js) + jejak deduplikasi
+      // notifikasi/preferensi opt-in (utils/reminderNotifications.js) —
+      // SAMA alasannya: akun lain yang login di device yang sama TIDAK
+      // PERNAH boleh kebetulan lihat/dapet notifikasi dari data akun
+      // sebelumnya.
+      clearAllReminderSnapshotsForUser(uid);
+      clearNotificationStateForUser(uid);
     }
     setIsOfflineSession(false);
   }, []);

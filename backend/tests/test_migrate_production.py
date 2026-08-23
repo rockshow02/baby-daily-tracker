@@ -662,3 +662,159 @@ def test_import_json_works_end_to_end_against_a_migrated_database(temp_db_path, 
         # dipanggil (lihat pola yang sama di _run_migrate_against di atas).
         db.session.remove()
         db.engine.dispose()
+
+
+# ============================================================================
+# Care Reminders & Schedules Phase 1 — tabel 'reminders'/'reminder_actions'
+# BARU (bukan kolom baru di tabel lama), jadi PERSIS pola
+# 'caregiver_audit_events' di atas: db.create_all() di migrate() SUDAH
+# CUKUP buat bikinnya, nggak ada ALTER TABLE manual yang perlu ditulis.
+# Lihat backend/docs/REMINDERS.md.
+# ============================================================================
+
+
+def _seed_pre_reminders_schema(path):
+    """Simulasi database production SEBELUM fitur reminders ini di-deploy — semua tabel KECUALI reminders/reminder_actions, diisi data 'lama'."""
+    engine = create_engine(f"sqlite:///{path}")
+    tables_to_create = [
+        t for t in db.metadata.sorted_tables if t.name not in ("reminders", "reminder_actions")
+    ]
+    db.metadata.create_all(bind=engine, tables=tables_to_create)
+
+    with engine.begin() as conn:
+        conn.execute(
+            db.metadata.tables["users"].insert(),
+            {
+                "name": "Legacy User", "email": "legacy-reminders@example.com",
+                "password_hash": "not-a-real-hash", "telegram_chat_id": None,
+                "created_at": datetime(2024, 1, 1),
+            },
+        )
+        conn.execute(
+            db.metadata.tables["children"].insert(),
+            {
+                "user_id": 1, "name": "Legacy Child", "nickname": None,
+                "birth_date": date(2024, 1, 1), "gender": "L",
+                "birth_weight_kg": None, "birth_height_cm": None, "photo_filename": None,
+                "created_at": datetime(2024, 1, 1),
+            },
+        )
+    engine.dispose()
+
+
+def test_reminders_migration_creates_both_new_tables(temp_db_path, monkeypatch):
+    _seed_pre_reminders_schema(temp_db_path)
+    assert "reminders" not in _table_names(temp_db_path)
+    assert "reminder_actions" not in _table_names(temp_db_path)
+
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    assert "reminders" in _table_names(temp_db_path)
+    assert "reminder_actions" in _table_names(temp_db_path)
+
+
+def test_reminders_migration_creates_expected_columns(temp_db_path, monkeypatch):
+    _seed_pre_reminders_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    reminder_columns = _column_names(temp_db_path, "reminders")
+    assert {
+        "id", "child_id", "created_by_user_id", "reminder_type", "title",
+        "scheduled_at", "recurrence", "is_active", "created_at", "updated_at",
+    }.issubset(reminder_columns)
+
+    action_columns = _column_names(temp_db_path, "reminder_actions")
+    assert {
+        "id", "reminder_id", "occurrence_at", "status", "acted_at",
+        "acted_by_user_id", "linked_log_type", "linked_log_id",
+    }.issubset(action_columns)
+
+
+def test_reminders_migration_creates_expected_indexes(temp_db_path, monkeypatch):
+    _seed_pre_reminders_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    reminder_indexed = _indexed_columns(temp_db_path, "reminders")
+    assert "child_id" in reminder_indexed
+    assert "scheduled_at" in reminder_indexed
+
+    action_indexed = _indexed_columns(temp_db_path, "reminder_actions")
+    assert "reminder_id" in action_indexed
+    assert "occurrence_at" in action_indexed
+
+
+def test_reminders_migration_creates_unique_occurrence_constraint(temp_db_path, monkeypatch):
+    """Requirement idempotensi okurensi: (reminder_id, occurrence_at) HARUS punya index UNIK, bukan cuma index biasa."""
+    _seed_pre_reminders_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    conn = sqlite3.connect(temp_db_path)
+    try:
+        indexes = conn.execute("PRAGMA index_list(reminder_actions);").fetchall()
+        unique_indexes = [idx for idx in indexes if idx[2] == 1]  # kolom ke-3 PRAGMA index_list = "unique"
+        found = False
+        for idx in unique_indexes:
+            cols = {row[2] for row in conn.execute(f"PRAGMA index_info({idx[1]});").fetchall()}
+            if cols == {"reminder_id", "occurrence_at"}:
+                found = True
+        assert found, f"nggak ketemu unique index (reminder_id, occurrence_at) — index unik yang ada: {unique_indexes}"
+    finally:
+        conn.close()
+
+
+def test_reminders_migration_rerun_is_safe(temp_db_path, monkeypatch):
+    _seed_pre_reminders_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+    _run_migrate_against(temp_db_path, monkeypatch)  # kedua kalinya HARUS nggak error/nggak nambah apa-apa
+
+    assert "reminders" in _table_names(temp_db_path)
+    conn = sqlite3.connect(temp_db_path)
+    try:
+        (count,) = conn.execute("SELECT COUNT(*) FROM reminders;").fetchone()
+        assert count == 0
+    finally:
+        conn.close()
+
+
+def test_reminders_migration_preserves_existing_data_in_other_tables(temp_db_path, monkeypatch):
+    _seed_pre_reminders_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    conn = sqlite3.connect(temp_db_path)
+    try:
+        user_row = conn.execute("SELECT name, email FROM users WHERE id = 1;").fetchone()
+        assert user_row == ("Legacy User", "legacy-reminders@example.com")
+        child_row = conn.execute("SELECT name, birth_date FROM children WHERE id = 1;").fetchone()
+        assert child_row == ("Legacy Child", "2024-01-01")
+    finally:
+        conn.close()
+
+
+def test_reminders_migration_never_touches_the_real_project_database(temp_db_path, monkeypatch):
+    real_db_existed_before = os.path.exists(REAL_INSTANCE_DB)
+    real_mtime_before = os.path.getmtime(REAL_INSTANCE_DB) if real_db_existed_before else None
+
+    _seed_pre_reminders_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    assert os.path.exists(REAL_INSTANCE_DB) == real_db_existed_before
+    if real_db_existed_before:
+        assert os.path.getmtime(REAL_INSTANCE_DB) == real_mtime_before
+
+
+def test_reminders_check_constraints_reject_invalid_values_after_migration(temp_db_path, monkeypatch):
+    _seed_pre_reminders_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    engine = create_engine(f"sqlite:///{temp_db_path}")
+    try:
+        with engine.begin() as conn:
+            with pytest.raises(Exception):
+                conn.execute(text(
+                    "INSERT INTO reminders (child_id, created_by_user_id, reminder_type, title, "
+                    "scheduled_at, recurrence, is_active, created_at, updated_at) VALUES "
+                    "(1, 1, 'not_a_real_type', 'x', '2026-01-01 08:00:00', 'none', 1, "
+                    "'2026-01-01 00:00:00', '2026-01-01 00:00:00')"
+                ))
+    finally:
+        engine.dispose()

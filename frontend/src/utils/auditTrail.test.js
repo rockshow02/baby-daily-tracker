@@ -152,3 +152,26 @@ describe("filter option lists", () => {
     expect(values).toEqual(["", "create", "update", "delete"]);
   });
 });
+
+describe("Care Reminders & Schedules Phase 1 — audit entity types", () => {
+  it("describes reminder definition create/update/delete like other record types", () => {
+    expect(describeAuditEvent({ action: "create", entity_type: "reminder", actor_name: "Bunda" }))
+      .toBe("Bunda menambahkan catatan pengingat");
+    expect(describeAuditEvent({ action: "delete", entity_type: "reminder", actor_name: "Bunda" }))
+      .toBe("Bunda menghapus catatan pengingat");
+  });
+
+  it("describes an update to reminder with a private title change as a generic marker, never the value", () => {
+    const sentence = describeAuditEvent({
+      action: "update", entity_type: "reminder", changed_fields: ["private_details"], actor_name: "Bunda",
+    });
+    expect(sentence).toContain("detail pribadi");
+  });
+
+  it("describes completed/skipped occurrence events with a dedicated sentence, not the generic 'catatan' pattern", () => {
+    expect(describeAuditEvent({ action: "create", entity_type: "reminder_occurrence_completed", actor_name: "Bunda" }))
+      .toBe("Bunda menandai pengingat selesai");
+    expect(describeAuditEvent({ action: "create", entity_type: "reminder_occurrence_skipped", actor_name: "Bunda" }))
+      .toBe("Bunda melewati pengingat");
+  });
+});

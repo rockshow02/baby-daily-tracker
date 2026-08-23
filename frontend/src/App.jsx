@@ -11,6 +11,8 @@ import {
   setCachedActiveChildId,
 } from "./utils/sessionCache";
 import { pruneInsightCacheToAccessibleChildren } from "./utils/insightCache";
+import { pruneReminderCacheToAccessibleChildren } from "./utils/reminderCache";
+import { useReminderMonitor } from "./hooks/useReminderMonitor";
 import AuthScreen from "./pages/AuthScreen";
 import OnboardingWizard from "./pages/OnboardingWizard";
 import Dashboard from "./pages/Dashboard";
@@ -19,6 +21,7 @@ import HealthScreen from "./pages/HealthScreen";
 import MomentsScreen from "./pages/MomentsScreen";
 import StatsScreen from "./pages/StatsScreen";
 import InsightsScreen from "./pages/InsightsScreen";
+import ReminderScreen from "./pages/ReminderScreen";
 import ChildProfileScreen from "./pages/ChildProfileScreen";
 import UserProfileScreen from "./pages/UserProfileScreen";
 import CaregiverModal from "./components/CaregiverModal";
@@ -33,6 +36,7 @@ const NAV_ITEMS = [
   { key: "moments", label: "Momen", icon: "✨" },
   { key: "stats", label: "Statistik", icon: "📊" },
   { key: "insights", label: "Insight", icon: "✨" },
+  { key: "reminders", label: "Pengingat", icon: "🔔" },
 ];
 
 const EXTRA_LABELS = {
@@ -79,6 +83,7 @@ function AppContent() {
       // ngeluarin kita, atau anaknya dihapus) — snapshot lama nggak boleh
       // nyangkut jadi "hantu" yang masih keliatan pas offline nanti.
       pruneInsightCacheToAccessibleChildren(user.id, list.map((c) => c.id));
+      pruneReminderCacheToAccessibleChildren(user.id, list.map((c) => c.id));
       const cachedActiveId = getCachedActiveChildId(user.id);
       const next = list.find((c) => c.id === cachedActiveId) || list[0] || null;
       setActiveChild(next);
@@ -215,6 +220,18 @@ function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, s
 
   const sync = useOfflineSync();
 
+  // Care Reminders & Schedules Phase 1 — SATU instance dipasang di sini
+  // (persis pola useOfflineSync di atas), dipakai bareng buat ringkasan
+  // Dashboard DAN notifikasi browser best-effort (lihat
+  // hooks/useReminderMonitor.js) — bukan 2 polling terpisah yang bisa
+  // balapan.
+  const reminderMonitor = useReminderMonitor({
+    child: activeChild,
+    currentUserId: user.id,
+    isOnline: sync.isOnline,
+    onNavigateToReminders: () => setActiveView("reminders"),
+  });
+
   const activeLabel = NAV_ITEMS.find((n) => n.key === activeView)?.label || EXTRA_LABELS[activeView] || "";
 
   const handleChildUpdated = (updatedChild) => {
@@ -280,13 +297,30 @@ function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, s
       </div>
 
       {activeView === "daily" && (
-        <Dashboard child={activeChild} onOpenProfile={() => setActiveView("childProfile")} />
+        <Dashboard
+          child={activeChild}
+          onOpenProfile={() => setActiveView("childProfile")}
+          reminderMonitor={reminderMonitor}
+          onOpenReminders={() => setActiveView("reminders")}
+        />
       )}
       {activeView === "growth" && <GrowthScreen child={activeChild} />}
       {activeView === "health" && <HealthScreen child={activeChild} />}
       {activeView === "moments" && <MomentsScreen child={activeChild} />}
       {activeView === "stats" && <StatsScreen child={activeChild} />}
       {activeView === "insights" && <InsightsScreen child={activeChild} currentUserId={user.id} />}
+      {activeView === "reminders" && (
+        <ReminderScreen
+          child={activeChild}
+          currentUserId={user.id}
+          onRecordNow={(reminder) => {
+            // Phase 1: navigasi ke layar catatan yang SUDAH ADA (bukan
+            // auto-isi form/auto-taut catatan — lihat backend/docs/REMINDERS.md
+            // bagian "Catat sekarang" buat batasan Phase 1 ini secara eksplisit).
+            setActiveView(reminder.reminder_type === "doctor_visit" ? "health" : "daily");
+          }}
+        />
+      )}
       {activeView === "childProfile" && (
         <ChildProfileScreen child={activeChild} currentUserId={user.id} onUpdated={handleChildUpdated} />
       )}

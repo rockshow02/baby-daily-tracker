@@ -85,6 +85,14 @@ const OFFLINE_QUEUEABLE_PATHS = [
   /\/children\/\d+\/pumping-logs$/,
   /\/children\/\d+\/activity-logs$/,
   /\/children\/\d+\/medication-logs$/,
+  // Care Reminders & Schedules Phase 1 — CUMA aksi selesai/lewati
+  // occurrence yang boleh diantrikan offline (requirement eksplisit).
+  // Membuat/mengubah/menghapus DEFINISI reminder sengaja TIDAK masuk
+  // sini — nunggu online (tombolnya nonaktif offline, lihat
+  // ReminderScreen.jsx) biar nggak perlu nanganin kasus edge form
+  // penuh + validasi server offline buat versi pertama fitur ini.
+  /\/children\/\d+\/reminders\/\d+\/occurrences\/[^/]+\/complete$/,
+  /\/children\/\d+\/reminders\/\d+\/occurrences\/[^/]+\/skip$/,
 ];
 
 function isOfflineQueueable(path, method) {
@@ -400,6 +408,26 @@ export const api = {
   // cuma "7d" | "30d" (server menolak nilai lain dengan 400).
   getInsights: (childId, period = "7d") =>
     request(`/children/${childId}/insights?period=${period}`),
+
+  // Care Reminders & Schedules (Phase 1) — lihat backend/docs/REMINDERS.md.
+  listReminders: (childId) => request(`/children/${childId}/reminders`),
+  createReminder: (childId, payload) =>
+    request(`/children/${childId}/reminders`, { method: "POST", body: JSON.stringify(payload) }),
+  updateReminder: (childId, reminderId, payload) =>
+    request(`/children/${childId}/reminders/${reminderId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteReminder: (childId, reminderId) =>
+    request(`/children/${childId}/reminders/${reminderId}`, { method: "DELETE" }),
+  // `payload` opsional: { linked_log_type, linked_log_id } buat alur
+  // "Catat sekarang" — dua-duanya BOLEH diantrikan offline (lihat
+  // OFFLINE_QUEUEABLE_PATHS di atas).
+  completeReminderOccurrence: (childId, reminderId, occurrenceKey, payload) =>
+    request(`/children/${childId}/reminders/${reminderId}/occurrences/${occurrenceKey}/complete`, {
+      method: "POST", body: JSON.stringify(payload || {}),
+    }),
+  skipReminderOccurrence: (childId, reminderId, occurrenceKey, payload) =>
+    request(`/children/${childId}/reminders/${reminderId}/occurrences/${occurrenceKey}/skip`, {
+      method: "POST", body: JSON.stringify(payload || {}),
+    }),
 
   // multi-caregiver (Caregiver Roles & Permissions Phase 1 — lihat
   // backend/docs/ROLES_PERMISSIONS.md)

@@ -20,6 +20,8 @@ export const ENTITY_TYPE_LABELS = {
   medication_log: "obat",
   mood_log: "mood",
   milestone_log: "milestone",
+  // Care Reminders & Schedules Phase 1 (lihat backend/docs/REMINDERS.md)
+  reminder: "pengingat",
 };
 
 const UNKNOWN_ENTITY_LABEL = "catatan";
@@ -112,6 +114,12 @@ const FIELD_LABELS = {
     custom_label: "label",
     achieved_date: "tanggal tercapai",
   },
+  reminder: {
+    reminder_type: "jenis pengingat",
+    scheduled_at: "waktu jadwal",
+    recurrence: "pengulangan",
+    is_active: "status aktif",
+  },
 };
 
 const UNKNOWN_FIELD_LABEL = "detail";
@@ -162,8 +170,22 @@ const UNKNOWN_ACTOR_LABEL = "Pengguna";
  * SEMUA teksnya lewat allowlist di atas — TIDAK PERNAH nampilin
  * entity_type/nama field/nilai mentah dari respons API langsung.
  */
+// Care Reminders & Schedules Phase 1 — 2 entity_type KHUSUS (bukan salah
+// satu dari 12+1 tipe "catatan" di atas) buat aksi selesai/lewati 1
+// okurensi pengingat. Kalimatnya beda dari pola "menambahkan/mengubah/
+// menghapus catatan X" generik di bawah, biar lebih jelas ("menandai
+// pengingat selesai", bukan "menambahkan catatan pengingat selesai").
+const OCCURRENCE_ACTION_SENTENCES = {
+  reminder_occurrence_completed: (actor) => `${actor} menandai pengingat selesai`,
+  reminder_occurrence_skipped: (actor) => `${actor} melewati pengingat`,
+};
+
 export function describeAuditEvent(event) {
   const actor = event.actor_name || UNKNOWN_ACTOR_LABEL;
+
+  const occurrenceSentence = OCCURRENCE_ACTION_SENTENCES[event.entity_type];
+  if (occurrenceSentence) return occurrenceSentence(actor);
+
   const entityLabel = describeEntityType(event.entity_type);
 
   if (event.action === "update") {

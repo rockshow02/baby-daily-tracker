@@ -72,6 +72,11 @@ SAFE_CHANGED_FIELDS = {
     "medication_log": {"timestamp"},
     "mood_log": {"timestamp", "mood"},
     "milestone_log": {"milestone_type", "achieved_date"},
+    # Care Reminders & Schedules Phase 1 (lihat backend/docs/REMINDERS.md)
+    # — field JADWAL/kategori aman disebut namanya; `title` (bisa aja
+    # diisi caregiver dengan nama obat/rincian medis, mis. "Kasih
+    # Paracetamol") ada di PRIVATE_CHANGED_FIELDS di bawah.
+    "reminder": {"reminder_type", "scheduled_at", "recurrence", "is_active"},
 }
 
 PRIVATE_CHANGED_FIELDS = {
@@ -96,6 +101,10 @@ PRIVATE_CHANGED_FIELDS = {
     # custom_label = teks bebas yang diketik user (analog sama notes),
     # CUMA relevan kalau milestone_type == 'custom'.
     "milestone_log": {"custom_label", "notes"},
+    # title pengingat = teks bebas yang diketik caregiver, BISA aja
+    # berisi nama obat/rincian medis spesifik — sama sensitifnya kayak
+    # notes di tipe record lain.
+    "reminder": {"title"},
 }
 
 # Urutan TETAP (bukan set) — dipakai buat pesan error yang deterministik
@@ -125,9 +134,41 @@ ENTITY_TYPES = tuple(SAFE_CHANGED_FIELDS.keys())
 # nilai peran apa pun.
 MEMBERSHIP_ENTITY_TYPE = "caregiver_membership"
 
+# --- Aksi okurensi pengingat (Care Reminders & Schedules Phase 1, lihat
+# backend/docs/REMINDERS.md) ---
+#
+# 2 entity_type TERPISAH (BUKAN 1 entity_type + changed_fields=["status"])
+# SENGAJA dipilih buat ngebedain selesai vs lewati — nama entity_type
+# ITU SENDIRI adalah metadata "jenis kejadian apa ini" (persis kayak
+# "mood_log" vs "feeding_log" beda entity_type, BUKAN "value leak"),
+# sementara changed_fields di SELURUH modul ini tetap kebijakan KETAT
+# "nama field doang, TIDAK PERNAH nilai" — nge-taro status
+# completed/skipped literal di dalam changed_fields bakal ngelanggar
+# invarian itu. `action` SELALU 'create' buat keduanya (1 baris
+# ReminderAction BARU beneran dibikin — konsisten sama makna 'create' di
+# 12 tipe record lain), `entity_id` = ReminderAction.id ("id record
+# aslinya", pola yang sama), `recorded_at` = occurrence_at (kapan
+# JADWAL okurensinya, bukan kapan aksinya dicatat) — dari entity_id ini
+# baris `reminder_actions` aslinya (permanen, nggak sensitif) bisa
+# ditelusuri balik kalau perlu detail lengkap (reminder_id, occurrence_at,
+# acted_by_user_id).
+REMINDER_OCCURRENCE_COMPLETED_ENTITY_TYPE = "reminder_occurrence_completed"
+REMINDER_OCCURRENCE_SKIPPED_ENTITY_TYPE = "reminder_occurrence_skipped"
+
+# Entity_type yang SENGAJA nggak punya entry SAFE_CHANGED_FIELDS sama
+# sekali — `changed_fields` buat SEMUANYA SELALU dipaksa None (lihat
+# record_audit_event di bawah), TIDAK PEDULI apa pun yang dikirim
+# pemanggil.
+NO_FIELD_DIFF_ENTITY_TYPES = (
+    MEMBERSHIP_ENTITY_TYPE,
+    REMINDER_OCCURRENCE_COMPLETED_ENTITY_TYPE,
+    REMINDER_OCCURRENCE_SKIPPED_ENTITY_TYPE,
+)
+
 # Dipakai endpoint baca (routes/audit_routes.py) buat validasi query
-# param `entity_type` — 12 tipe record + 1 tipe event membership ini.
-ALL_ENTITY_TYPES = ENTITY_TYPES + (MEMBERSHIP_ENTITY_TYPE,)
+# param `entity_type` — 13 tipe record (termasuk "reminder") + 3 tipe
+# event tanpa field-diff di atas.
+ALL_ENTITY_TYPES = ENTITY_TYPES + NO_FIELD_DIFF_ENTITY_TYPES
 
 
 def _tracked_fields(entity_type):
@@ -172,16 +213,17 @@ def record_audit_event(*, child_id, actor_user_id, action, entity_type, entity_i
     user), dan mending ketauan pas development/test daripada diam-diam
     nyimpen audit event yang salah kategori.
 
-    `entity_type=MEMBERSHIP_ENTITY_TYPE` ("caregiver_membership" — lihat
-    komentar di atas) SENGAJA nggak punya entry di SAFE_CHANGED_FIELDS
-    sama sekali — `changed_fields` buat entity_type ini SELALU dipaksa
+    `entity_type` di `NO_FIELD_DIFF_ENTITY_TYPES` (`caregiver_membership`,
+    `reminder_occurrence_completed`, `reminder_occurrence_skipped`)
+    SENGAJA nggak punya entry di SAFE_CHANGED_FIELDS sama sekali —
+    `changed_fields` buat entity_type-entity_type ini SELALU dipaksa
     None, TIDAK PEDULI apa pun yang dikirim pemanggil (bukan cuma
-    "disaring", kebijakan Phase 1 buat kejadian ini emang nggak pernah
-    nyimpen nama field apa pun).
+    "disaring", kebijakan Phase 1 buat kejadian-kejadian ini emang nggak
+    pernah nyimpen nama field apa pun).
     """
     if action not in ACTIONS:
         raise ValueError(f"action tidak valid: {action!r}")
-    if entity_type not in SAFE_CHANGED_FIELDS and entity_type != MEMBERSHIP_ENTITY_TYPE:
+    if entity_type not in SAFE_CHANGED_FIELDS and entity_type not in NO_FIELD_DIFF_ENTITY_TYPES:
         raise ValueError(f"entity_type tidak valid: {entity_type!r}")
 
     safe_fields = None

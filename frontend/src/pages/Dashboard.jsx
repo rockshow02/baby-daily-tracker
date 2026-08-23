@@ -17,6 +17,7 @@ import QuickLogSheet from "../components/QuickLogSheet";
 import SwipeableHistoryItem from "../components/SwipeableHistoryItem";
 import SmartInsightsBell from "../components/SmartInsightsBell";
 import MotorActivityCard from "../components/MotorActivityCard";
+import DashboardReminderSummary from "../components/DashboardReminderSummary";
 import { weeklyAverageExcludingToday } from "../utils/insights";
 import { todayWIB, toWIBDateStr, timePeriodLabel } from "../utils/date";
 import { canWrite as canWriteRole, canDeleteRecord } from "../utils/roles";
@@ -91,7 +92,7 @@ export function isLocalOnlyId(id) {
   return typeof id === "string" && id.startsWith("local-");
 }
 
-export default function Dashboard({ child, onOpenProfile }) {
+export default function Dashboard({ child, onOpenProfile, reminderMonitor, onOpenReminders }) {
   const [date, setDate] = useState(todayStr());
   const [summary, setSummary] = useState(null);
   const [feedingLogs, setFeedingLogs] = useState([]);
@@ -694,6 +695,16 @@ export default function Dashboard({ child, onOpenProfile }) {
           </button>
         </div>
       </div>
+
+      {reminderMonitor && (
+        <div className="px-6">
+          <DashboardReminderSummary
+            status={reminderMonitor.status}
+            summary={reminderMonitor.summary}
+            onOpen={onOpenReminders}
+          />
+        </div>
+      )}
 
       {isToday && (
         <div className="px-6">

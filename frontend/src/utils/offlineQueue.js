@@ -55,6 +55,11 @@ const TYPE_LABELS = [
   { match: /\/pumping-logs$/, label: "Perah ASI" },
   { match: /\/activity-logs$/, label: "Aktivitas" },
   { match: /\/medication-logs$/, label: "Obat" },
+  // Care Reminders & Schedules Phase 1 — body-nya cuma opsional
+  // {linked_log_type, linked_log_id}, TIDAK PERNAH judul/teks reminder
+  // apa pun, jadi aman ditampilin apa adanya di panel review.
+  { match: /\/occurrences\/[^/]+\/complete$/, label: "Pengingat selesai" },
+  { match: /\/occurrences\/[^/]+\/skip$/, label: "Pengingat dilewati" },
 ];
 
 // Field body yang ditampilin di ringkasan per tipe — SENGAJA nggak
@@ -68,6 +73,8 @@ const SUMMARY_FIELDS = {
   "Perah ASI": ["duration_minutes", "volume_ml", "breast_side"],
   "Aktivitas": ["activity_type", "duration_minutes"],
   "Obat": ["medication_name", "dosage"],
+  "Pengingat selesai": ["linked_log_type"],
+  "Pengingat dilewati": [],
 };
 
 function describeType(url) {
