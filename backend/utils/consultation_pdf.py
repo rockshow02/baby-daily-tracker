@@ -297,16 +297,43 @@ def _render_illness(section, styles):
     return flows
 
 
+def _render_medication_adherence_summary(summary, styles):
+    """
+    Ringkasan kepatuhan AGREGAT (Medication Schedule & Adherence Phase 1)
+    -- `None` kalau child ini nggak punya jadwal obat yang overlap
+    periode ini SAMA SEKALI (lihat utils/consultation_report.py:
+    _medication_adherence_summary), BUKAN dirender sebagai tabel kosong.
+    CUMA angka agregat, TIDAK PERNAH nama obat per-jadwal -- konsisten
+    sama preview JSON (1 sumber data yang sama, lihat docstring modul).
+    """
+    if summary is None:
+        return []
+    rows = [
+        ("Jumlah jadwal obat aktif pada periode ini", summary["schedule_count"]),
+        ("Dosis yang dijadwalkan (periode ini)", summary["expected_count"]),
+        ("Dosis diberikan", summary["administered_count"]),
+        ("Dosis dilewati", summary["skipped_count"]),
+        ("Dosis terlambat diberikan", summary["late_administered_count"]),
+        ("Dosis belum diselesaikan (lewat jadwal)", summary["overdue_unresolved_count"]),
+        ("Persentase kepatuhan", _fmt_num(summary["adherence_percentage"], "%")),
+    ]
+    return [
+        Paragraph("<b>Ringkasan Kepatuhan Jadwal Obat</b>", styles.normal),
+        _kv_table(rows, styles),
+    ]
+
+
 def _render_medication(section, styles):
     flows = []
     if not section["entries"]:
         flows.append(Paragraph("Tidak ada catatan obat pada periode ini.", styles.normal))
-        return flows
-    rows = [[e["medication_name"], e["dosage"] or "-", e["timestamp"][:16].replace("T", " ")] for e in section["entries"]]
-    flows.append(_entries_table(["Nama Obat", "Dosis", "Waktu"], rows, [6 * cm, 4 * cm, 6 * cm], styles))
-    note = _truncation_note(section, styles)
-    if note:
-        flows.append(note)
+    else:
+        rows = [[e["medication_name"], e["dosage"] or "-", e["timestamp"][:16].replace("T", " ")] for e in section["entries"]]
+        flows.append(_entries_table(["Nama Obat", "Dosis", "Waktu"], rows, [6 * cm, 4 * cm, 6 * cm], styles))
+        note = _truncation_note(section, styles)
+        if note:
+            flows.append(note)
+    flows.extend(_render_medication_adherence_summary(section.get("adherence_summary"), styles))
     return flows
 
 

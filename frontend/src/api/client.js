@@ -93,6 +93,12 @@ const OFFLINE_QUEUEABLE_PATHS = [
   // penuh + validasi server offline buat versi pertama fitur ini.
   /\/children\/\d+\/reminders\/\d+\/occurrences\/[^/]+\/complete$/,
   /\/children\/\d+\/reminders\/\d+\/occurrences\/[^/]+\/skip$/,
+  // Medication Schedule & Adherence Phase 1 — pola SAMA PERSIS reminder
+  // di atas: CUMA aksi kasih/lewati dosis yang boleh diantrikan offline.
+  // Membuat/mengubah/menghapus DEFINISI jadwal obat sengaja TIDAK masuk
+  // sini (tetap online-only, lihat backend/docs/MEDICATION_SCHEDULE.md).
+  /\/children\/\d+\/medication-schedules\/\d+\/occurrences\/[^/]+\/administer$/,
+  /\/children\/\d+\/medication-schedules\/\d+\/occurrences\/[^/]+\/skip$/,
 ];
 
 function isOfflineQueueable(path, method) {
@@ -477,6 +483,28 @@ export const api = {
     request(`/children/${childId}/reminders/${reminderId}/occurrences/${occurrenceKey}/skip`, {
       method: "POST", body: JSON.stringify(payload || {}),
     }),
+
+  // Medication Schedule & Adherence (Phase 1) — lihat
+  // backend/docs/MEDICATION_SCHEDULE.md. Create/update/delete jadwal
+  // SENGAJA online-only (TIDAK ada di OFFLINE_QUEUEABLE_PATHS) — cuma
+  // administer/skip occurrence yang boleh diantrikan offline.
+  listMedicationSchedules: (childId) => request(`/children/${childId}/medication-schedules`),
+  createMedicationSchedule: (childId, payload) =>
+    request(`/children/${childId}/medication-schedules`, { method: "POST", body: JSON.stringify(payload) }),
+  updateMedicationSchedule: (childId, scheduleId, payload) =>
+    request(`/children/${childId}/medication-schedules/${scheduleId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteMedicationSchedule: (childId, scheduleId) =>
+    request(`/children/${childId}/medication-schedules/${scheduleId}`, { method: "DELETE" }),
+  administerMedicationDose: (childId, scheduleId, occurrenceKey) =>
+    request(`/children/${childId}/medication-schedules/${scheduleId}/occurrences/${occurrenceKey}/administer`, {
+      method: "POST", body: JSON.stringify({}),
+    }),
+  skipMedicationDose: (childId, scheduleId, occurrenceKey) =>
+    request(`/children/${childId}/medication-schedules/${scheduleId}/occurrences/${occurrenceKey}/skip`, {
+      method: "POST", body: JSON.stringify({}),
+    }),
+  getMedicationAdherence: (childId, period = "7d") =>
+    request(`/children/${childId}/medication-schedules/adherence?period=${period}`),
 
   // multi-caregiver (Caregiver Roles & Permissions Phase 1 — lihat
   // backend/docs/ROLES_PERMISSIONS.md)

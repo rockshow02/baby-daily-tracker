@@ -81,6 +81,52 @@ describe("api client — immediate online path", () => {
   });
 });
 
+describe("api client — Medication Schedule & Adherence occurrence actions are offline-queueable", () => {
+  it("administerMedicationDose falls back to the offline queue on a network failure", async () => {
+    global.fetch.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+    const result = await api.administerMedicationDose(1, 5, "2026-08-23T08:00");
+
+    expect(result._offlineQueued).toBe(true);
+    const [queued] = await getQueue();
+    expect(queued.url).toBe("/children/1/medication-schedules/5/occurrences/2026-08-23T08:00/administer");
+    expect(queued.userId).toBe(7);
+    expect(queued.clientRequestId).toBeTruthy();
+  });
+
+  it("skipMedicationDose falls back to the offline queue on a network failure", async () => {
+    global.fetch.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+    const result = await api.skipMedicationDose(1, 5, "2026-08-23T08:00");
+
+    expect(result._offlineQueued).toBe(true);
+    const [queued] = await getQueue();
+    expect(queued.url).toBe("/children/1/medication-schedules/5/occurrences/2026-08-23T08:00/skip");
+  });
+
+  it("createMedicationSchedule (definition CRUD) is NOT offline-queueable — a network failure throws instead", async () => {
+    global.fetch.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+    await expect(api.createMedicationSchedule(1, { medication_name: "Obat" })).rejects.toMatchObject({
+      kind: "network",
+    });
+    expect(await getQueue()).toHaveLength(0);
+  });
+
+  it("a normal online administer resolves directly and never touches the offline queue", async () => {
+    const serverResponse = { id: 1, status: "administered", medication_log_id: 10 };
+    global.fetch.mockResolvedValueOnce({ ok: true, status: 201, json: async () => serverResponse });
+
+    const result = await api.administerMedicationDose(1, 5, "2026-08-23T08:00");
+
+    expect(result).toEqual(serverResponse);
+    expect(result._offlineQueued).toBeUndefined();
+    expect(await getQueue()).toHaveLength(0);
+    const [, fetchOptions] = global.fetch.mock.calls[0];
+    expect(fetchOptions.headers["X-Idempotency-Key"]).toBeTruthy();
+  });
+});
+
 describe("api client — structured error classification (ApiError)", () => {
   // /auth/me (GET) dipakai sebagai endpoint contoh — BUKAN offline-
   // queueable, jadi kegagalan jaringan di sini beneran nge-throw

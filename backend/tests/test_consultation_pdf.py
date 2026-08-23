@@ -20,7 +20,9 @@ akhir beneran valid & di memori.
 """
 from datetime import date, datetime
 
-from utils.consultation_pdf import _Styles, _render_growth, render_consultation_pdf
+from utils.consultation_pdf import (
+    _render_growth, _render_medication, _render_medication_adherence_summary, _Styles, render_consultation_pdf,
+)
 
 FAKE_PERIOD = {
     "preset": "7d", "start_date": "2026-08-17", "end_date": "2026-08-23",
@@ -114,6 +116,59 @@ def test_growth_pdf_does_not_leak_raw_python_dict_repr():
     # biar section ini nggak pernah kebobolan nampilin object mentah.
     assert "{" not in text
     assert "}" not in text
+
+
+# --------------------------------------------------------------------------
+# Integrasi Medication Schedule & Adherence Phase 1 -- ringkasan kepatuhan
+# di section `medication` (lihat utils/consultation_report.py:
+# _medication_adherence_summary, backend/docs/MEDICATION_SCHEDULE.md).
+# --------------------------------------------------------------------------
+
+FULL_ADHERENCE_SUMMARY = {
+    "schedule_count": 1, "expected_count": 6, "administered_count": 4, "skipped_count": 1,
+    "overdue_unresolved_count": 1, "on_time_administered_count": 3, "late_administered_count": 1,
+    "adherence_percentage": 66.7,
+}
+
+
+def test_medication_adherence_summary_omitted_entirely_when_none():
+    """`adherence_summary=None` (child belum punya jadwal obat) -- TIDAK ADA flowable apa pun yang dirender, bukan tabel kosong."""
+    assert _render_medication_adherence_summary(None, _Styles()) == []
+
+
+def test_medication_adherence_summary_rendered_when_present():
+    texts = _flowable_texts(_render_medication_adherence_summary(FULL_ADHERENCE_SUMMARY, _Styles()))
+    joined = "\n".join(texts)
+    assert "Ringkasan Kepatuhan Jadwal Obat" in joined
+    assert "66.7%" in joined
+    assert "4" in texts  # administered_count
+    assert "1" in texts  # skipped_count (dan overdue/late, masing-masing sel sendiri)
+
+
+def test_medication_adherence_summary_never_leaks_medication_name_or_instructions():
+    """Ringkasan CUMA angka agregat -- konten sengaja nggak boleh punya field nama obat/instruksi per-jadwal apa pun buat dirender."""
+    assert "medication_name" not in FULL_ADHERENCE_SUMMARY
+    assert "instructions" not in FULL_ADHERENCE_SUMMARY
+
+
+def test_medication_section_appends_adherence_summary_after_entries_table():
+    section = {
+        "entries": [{"medication_name": "Paracetamol", "dosage": "5 ml", "timestamp": "2026-08-23T08:00:00+07:00"}],
+        "total_count_in_period": 1, "truncated": False,
+        "adherence_summary": FULL_ADHERENCE_SUMMARY,
+    }
+    texts = _flowable_texts(_render_medication(section, _Styles()))
+    joined = "\n".join(texts)
+    assert "Paracetamol" in joined
+    assert "Ringkasan Kepatuhan Jadwal Obat" in joined
+
+
+def test_medication_section_with_no_entries_still_renders_adherence_summary_if_present():
+    section = {"entries": [], "total_count_in_period": 0, "truncated": False, "adherence_summary": FULL_ADHERENCE_SUMMARY}
+    texts = _flowable_texts(_render_medication(section, _Styles()))
+    joined = "\n".join(texts)
+    assert "Tidak ada catatan obat pada periode ini." in joined
+    assert "Ringkasan Kepatuhan Jadwal Obat" in joined
 
 
 def test_growth_pdf_end_to_end_render_is_valid_and_in_memory():

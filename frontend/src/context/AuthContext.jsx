@@ -13,6 +13,7 @@ import { cacheUserProfile, getCachedUserProfile, clearUserCache } from "../utils
 import { clearLastSyncedAt } from "../utils/syncMetadata";
 import { clearAllInsightSnapshotsForUser } from "../utils/insightCache";
 import { clearAllReminderSnapshotsForUser } from "../utils/reminderCache";
+import { clearAllMedicationScheduleSnapshotsForUser } from "../utils/medicationScheduleCache";
 import { clearNotificationStateForUser } from "../utils/reminderNotifications";
 
 const AuthContext = createContext(null);
@@ -72,6 +73,9 @@ export function AuthProvider({ children }) {
       // PERNAH boleh kebetulan lihat/dapet notifikasi dari data akun
       // sebelumnya.
       clearAllReminderSnapshotsForUser(uid);
+      // Snapshot jadwal obat (utils/medicationScheduleCache.js) — SAMA
+      // alasannya kayak snapshot reminder di atas.
+      clearAllMedicationScheduleSnapshotsForUser(uid);
       clearNotificationStateForUser(uid);
     }
     setIsOfflineSession(false);

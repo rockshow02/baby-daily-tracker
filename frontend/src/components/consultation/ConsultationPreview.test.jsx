@@ -404,6 +404,60 @@ describe("ConsultationPreview — medication (sensitive)", () => {
     expect(screen.getByText("Paracetamol")).toBeInTheDocument();
     expect(screen.getByText(/1 sdt/)).toBeInTheDocument();
   });
+
+  it("omits the adherence summary entirely when adherence_summary is null (no schedules)", () => {
+    render(<ConsultationPreview report={makeReport({
+      medication: { entries: [], total_count_in_period: 0, truncated: false, adherence_summary: null },
+    })} />);
+    expect(screen.queryByText("Ringkasan Kepatuhan Jadwal Obat")).not.toBeInTheDocument();
+  });
+
+  it("shows the adherence summary counts and percentage when present", () => {
+    render(<ConsultationPreview report={makeReport({
+      medication: {
+        entries: [{ medication_name: "Amoxicillin", dosage: "5 ml", timestamp: "2026-08-20T08:00:00+07:00" }],
+        total_count_in_period: 1, truncated: false,
+        adherence_summary: {
+          schedule_count: 1, expected_count: 6, administered_count: 4, skipped_count: 1,
+          overdue_unresolved_count: 1, on_time_administered_count: 3, late_administered_count: 1,
+          adherence_percentage: 66.7,
+        },
+      },
+    })} />);
+    expect(screen.getByText("Ringkasan Kepatuhan Jadwal Obat")).toBeInTheDocument();
+    expect(screen.getByText("66.7%")).toBeInTheDocument();
+  });
+
+  it("shows a dash (not a fabricated 0%) when adherence_percentage is null", () => {
+    render(<ConsultationPreview report={makeReport({
+      medication: {
+        entries: [], total_count_in_period: 0, truncated: false,
+        adherence_summary: {
+          schedule_count: 1, expected_count: 0, administered_count: 0, skipped_count: 0,
+          overdue_unresolved_count: 0, on_time_administered_count: 0, late_administered_count: 0,
+          adherence_percentage: null,
+        },
+      },
+    })} />);
+    expect(screen.getByText("Ringkasan Kepatuhan Jadwal Obat")).toBeInTheDocument();
+    expect(screen.queryByText("0%")).not.toBeInTheDocument();
+  });
+
+  it("never renders raw medication name or instructions inside the adherence summary block", () => {
+    render(<ConsultationPreview report={makeReport({
+      medication: {
+        entries: [], total_count_in_period: 0, truncated: false,
+        adherence_summary: {
+          schedule_count: 2, expected_count: 3, administered_count: 1, skipped_count: 0,
+          overdue_unresolved_count: 2, on_time_administered_count: 1, late_administered_count: 0,
+          adherence_percentage: 33.3,
+        },
+      },
+    })} />);
+    // Cuma angka agregat -- TIDAK PERNAH ada nama obat/instruksi
+    // per-jadwal apa pun yang bocor ke ringkasan ini.
+    expect(screen.queryByText(/RAHASIA/)).not.toBeInTheDocument();
+  });
 });
 
 describe("ConsultationPreview — vaccination", () => {

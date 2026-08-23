@@ -33,10 +33,11 @@ from datetime import datetime, time, timedelta
 from extensions import db
 from models import (
     DoctorVisitLog, GrowthMeasurement, IllnessLog,
-    MedicationLog, MilestoneLog, TemperatureLog,
+    MedicationDoseAction, MedicationLog, MedicationSchedule, MilestoneLog, TemperatureLog,
 )
 from routes.children_routes import _build_vaccination_list
 from routes.report_routes import _age_str
+from utils.medication_schedule_engine import adherence_percentage, compute_adherence
 from utils.insights_engine import (
     build_comparison,
     build_insights,
@@ -393,7 +394,56 @@ def _illness_section(child_id, start_date, end_date):
     }
 
 
-def _medication_section(child_id, start_date, end_date):
+def _medication_adherence_summary(child_id, start_date, end_date, now):
+    """
+    Ringkasan kepatuhan AGREGAT (Medication Schedule & Adherence Phase 1,
+    lihat backend/docs/MEDICATION_SCHEDULE.md) buat SEMUA jadwal obat anak
+    ini yang overlap periode laporan -- REUSE penuh
+    utils/medication_schedule_engine.py:compute_adherence (SATU sumber
+    kebenaran perhitungan, sama persis endpoint GET .../adherence),
+    BUKAN dihitung ulang di sini.
+
+    SENGAJA cuma ANGKA AGREGAT (jumlah, persentase) -- TIDAK PERNAH nama
+    obat per-jadwal ATAUPUN `instructions` bebas-teks (beda dari
+    `entries` di atas, yang MEMANG udah nampilin `medication_name` sejak
+    Phase 1 Doctor Consultation -- kebijakan yang SUDAH ada, TIDAK
+    diperluas lagi lewat ringkasan baru ini). `None` kalau child ini
+    nggak punya jadwal obat yang overlap periode SAMA SEKALI (fitur ini
+    belum/tidak dipakai) -- BUKAN dict nol yang bisa disalahartikan
+    "kepatuhan 0%".
+    """
+    schedules = MedicationSchedule.query.filter(
+        MedicationSchedule.child_id == child_id,
+        MedicationSchedule.start_date <= end_date,
+        db.or_(MedicationSchedule.end_date.is_(None), MedicationSchedule.end_date >= start_date),
+    ).all()
+    if not schedules:
+        return None
+
+    start_dt, end_dt_exclusive = _datetime_bounds(start_date, end_date)
+    totals = {
+        "expected_count": 0, "administered_count": 0, "skipped_count": 0,
+        "overdue_unresolved_count": 0, "on_time_administered_count": 0, "late_administered_count": 0,
+    }
+    for schedule in schedules:
+        actions = MedicationDoseAction.query.filter(
+            MedicationDoseAction.schedule_id == schedule.id,
+            MedicationDoseAction.occurrence_at >= start_dt,
+            MedicationDoseAction.occurrence_at < end_dt_exclusive,
+        ).all()
+        actions_by_occurrence = {a.occurrence_at: a for a in actions}
+        per_schedule = compute_adherence(schedule, actions_by_occurrence, start_date, end_date, now)
+        for key in totals:
+            totals[key] += per_schedule[key]
+
+    return {
+        "schedule_count": len(schedules),
+        **totals,
+        "adherence_percentage": adherence_percentage(totals["expected_count"], totals["administered_count"]),
+    }
+
+
+def _medication_section(child_id, start_date, end_date, now):
     start_dt, end_dt = _datetime_bounds(start_date, end_date)
     query = MedicationLog.query.filter(
         MedicationLog.child_id == child_id,
@@ -412,6 +462,7 @@ def _medication_section(child_id, start_date, end_date):
         ],
         "total_count_in_period": total_count,
         "truncated": truncated,
+        "adherence_summary": _medication_adherence_summary(child_id, start_date, end_date, now),
     }
 
 
@@ -564,7 +615,7 @@ def build_consultation_report(child, period, sections, questions_text, note_text
     if SECTION_ILLNESS in sections_set:
         data[SECTION_ILLNESS] = _illness_section(child.id, start_date, end_date)
     if SECTION_MEDICATION in sections_set:
-        data[SECTION_MEDICATION] = _medication_section(child.id, start_date, end_date)
+        data[SECTION_MEDICATION] = _medication_section(child.id, start_date, end_date, now)
     if SECTION_VACCINATION in sections_set:
         data[SECTION_VACCINATION] = _vaccination_section(child, end_date)
     if SECTION_MILESTONES in sections_set:

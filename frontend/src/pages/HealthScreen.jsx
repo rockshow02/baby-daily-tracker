@@ -4,6 +4,7 @@ import VaccinationScreen from "../components/VaccinationScreen";
 import SteppedDateTimeInput from "../components/SteppedDateTimeInput";
 import RelatedArticles from "../components/RelatedArticles";
 import DoctorConsultationScreen from "../components/DoctorConsultationScreen";
+import MedicationScheduleScreen from "./MedicationScheduleScreen";
 import { todayWIB } from "../utils/date";
 
 const SUB_TABS = [
@@ -28,7 +29,7 @@ function fmtDateTime(iso) {
   return new Date(iso).toLocaleString("id-ID", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
-export default function HealthScreen({ child }) {
+export default function HealthScreen({ child, currentUserId }) {
   const [activeTab, setActiveTab] = useState("doctor");
   const [visits, setVisits] = useState([]);
   const [temps, setTemps] = useState([]);
@@ -40,6 +41,7 @@ export default function HealthScreen({ child }) {
   const [editingLog, setEditingLog] = useState(null);
   const [editingKind, setEditingKind] = useState(null);
   const [showConsultation, setShowConsultation] = useState(false);
+  const [showMedicationSchedule, setShowMedicationSchedule] = useState(false);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -265,6 +267,13 @@ export default function HealthScreen({ child }) {
 
           {activeTab === "medication" && (
             <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => setShowMedicationSchedule(true)}
+                className="w-full py-2.5 mb-1 rounded-xl2 border border-feed text-feed text-sm font-semibold"
+              >
+                💊 Jadwal Obat
+              </button>
               {medications.length === 0 && <p className="text-ink-faint text-sm">Belum ada catatan obat.</p>}
               {medications.map((m) => (
                 <div
@@ -338,6 +347,17 @@ export default function HealthScreen({ child }) {
           onRecordVisit={() => {
             setShowConsultation(false);
             openAdd();
+          }}
+        />
+      )}
+
+      {showMedicationSchedule && (
+        <MedicationScheduleScreen
+          child={child}
+          currentUserId={currentUserId}
+          onClose={() => {
+            setShowMedicationSchedule(false);
+            loadAll();
           }}
         />
       )}

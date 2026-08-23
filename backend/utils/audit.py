@@ -77,6 +77,13 @@ SAFE_CHANGED_FIELDS = {
     # diisi caregiver dengan nama obat/rincian medis, mis. "Kasih
     # Paracetamol") ada di PRIVATE_CHANGED_FIELDS di bawah.
     "reminder": {"reminder_type", "scheduled_at", "recurrence", "is_active"},
+    # Medication Schedule & Adherence Phase 1 (lihat
+    # backend/docs/MEDICATION_SCHEDULE.md) — CUMA field JADWAL/struktural
+    # (kapan, berapa kali sehari, aktif/nggak) yang aman disebut namanya;
+    # nama obat & dosis (identitas medis spesifik anak, persis kebijakan
+    # `medication_log` di bawah) dan instruksi bebas teks ada di
+    # PRIVATE_CHANGED_FIELDS.
+    "medication_schedule": {"start_date", "end_date", "times_of_day", "is_active"},
 }
 
 PRIVATE_CHANGED_FIELDS = {
@@ -105,6 +112,10 @@ PRIVATE_CHANGED_FIELDS = {
     # berisi nama obat/rincian medis spesifik — sama sensitifnya kayak
     # notes di tipe record lain.
     "reminder": {"title"},
+    # medication_name/dose_value/dose_unit = identitas medis + dosis
+    # spesifik anak (SAMA kebijakannya kayak medication_name/dosage di
+    # `medication_log`); instructions = teks bebas caregiver, analog notes.
+    "medication_schedule": {"medication_name", "dose_value", "dose_unit", "instructions"},
 }
 
 # Urutan TETAP (bukan set) — dipakai buat pesan error yang deterministik
@@ -175,6 +186,29 @@ REMINDER_OCCURRENCE_SKIPPED_ENTITY_TYPE = "reminder_occurrence_skipped"
 # bakal melanggar invarian itu, lihat docstring record_audit_event).
 DOCTOR_CONSULTATION_PDF_EXPORT_ENTITY_TYPE = "doctor_consultation_pdf_export"
 
+# --- Aksi dosis (Medication Schedule & Adherence Phase 1, lihat
+# backend/docs/MEDICATION_SCHEDULE.md) ---
+#
+# Pola SAMA PERSIS REMINDER_OCCURRENCE_*_ENTITY_TYPE di atas — 2
+# entity_type terpisah buat administered vs skipped (nama entity_type-nya
+# SENDIRI adalah metadata "jenis kejadian apa", bukan value leak),
+# `changed_fields` SELALU None (masuk NO_FIELD_DIFF_ENTITY_TYPES di
+# bawah — status administered/skipped TIDAK PERNAH dituliskan sebagai
+# "nilai" di changed_fields, itu ngelanggar invarian nama-field-doang).
+# `action` SELALU 'create' (1 baris MedicationDoseAction BARU beneran
+# dibikin), `entity_id` = MedicationDoseAction.id, `recorded_at` =
+# occurrence_at (kapan JADWAL dosisnya, bukan kapan aksinya dicatat) —
+# waktu ACTUAL aksinya (acted_at) TETAP tersimpan permanen di baris
+# `medication_dose_actions` aslinya, cuma nggak dobel-dicatat di sini.
+#
+# Kalau dosis ini status='administered', 1 MedicationLog BARU JUGA
+# dibikin (endpoint yang SAMA, transaksi yang SAMA) — itu diaudit
+# TERPISAH lewat entity_type "medication_log" yang SUDAH ADA (persis
+# kebijakan `medication_log` yang sudah ada di SAFE/PRIVATE_CHANGED_FIELDS
+# di atas), BUKAN duplikasi di sini.
+MEDICATION_DOSE_ADMINISTERED_ENTITY_TYPE = "medication_dose_administered"
+MEDICATION_DOSE_SKIPPED_ENTITY_TYPE = "medication_dose_skipped"
+
 # Entity_type yang SENGAJA nggak punya entry SAFE_CHANGED_FIELDS sama
 # sekali — `changed_fields` buat SEMUANYA SELALU dipaksa None (lihat
 # record_audit_event di bawah), TIDAK PEDULI apa pun yang dikirim
@@ -184,6 +218,8 @@ NO_FIELD_DIFF_ENTITY_TYPES = (
     REMINDER_OCCURRENCE_COMPLETED_ENTITY_TYPE,
     REMINDER_OCCURRENCE_SKIPPED_ENTITY_TYPE,
     DOCTOR_CONSULTATION_PDF_EXPORT_ENTITY_TYPE,
+    MEDICATION_DOSE_ADMINISTERED_ENTITY_TYPE,
+    MEDICATION_DOSE_SKIPPED_ENTITY_TYPE,
 )
 
 # Dipakai endpoint baca (routes/audit_routes.py) buat validasi query

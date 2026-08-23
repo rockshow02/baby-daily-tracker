@@ -18,6 +18,7 @@ import pytest
 from werkzeug.test import EnvironBuilder
 
 import routes.doctor_consultation_routes as consultation_routes_module
+import routes.medication_schedule_routes as medication_schedule_routes_module
 from extensions import db
 from models import (
     CaregiverAuditEvent, DoctorVisitLog, GrowthMeasurement, IllnessLog,
@@ -36,6 +37,11 @@ FAKE_NOW = datetime(2026, 8, 23, 10, 0, 0)
 def _freeze(monkeypatch, today=FAKE_TODAY, now=FAKE_NOW):
     monkeypatch.setattr(consultation_routes_module, "today_wib", lambda: today)
     monkeypatch.setattr(consultation_routes_module, "now_wib", lambda: now)
+
+
+def _freeze_medication_schedule(monkeypatch, now=FAKE_NOW):
+    """Beku juga `now_wib()` di routes/medication_schedule_routes.py -- dipakai test yang bikin jadwal/aksi lewat endpoint itu SEBELUM preview konsultasi, biar 'sekarang' konsisten di kedua endpoint."""
+    monkeypatch.setattr(medication_schedule_routes_module, "now_wib", lambda: now)
 
 
 def _preview(client, token, child_id, period=None, sections=None, questions=None, note=None):
@@ -458,6 +464,95 @@ def test_medication_rows_are_bounded_and_truncation_is_flagged(client, monkeypat
     assert len(section["entries"]) == 20
     assert section["total_count_in_period"] == 25
     assert section["truncated"] is True
+
+
+# --------------------------------------------------------------------------
+# Integrasi Medication Schedule & Adherence Phase 1 -- ringkasan kepatuhan
+# di dalam section `medication` yang SUDAH ADA (lihat
+# backend/docs/MEDICATION_SCHEDULE.md dan
+# utils/consultation_report.py:_medication_adherence_summary).
+# --------------------------------------------------------------------------
+
+
+def test_medication_section_adherence_summary_is_none_when_no_schedules_exist(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+
+    resp = _preview(client, user["token"], child["id"], sections=["medication"])
+    section = resp.get_json()["sections"]["medication"]
+    assert section["adherence_summary"] is None
+
+
+def test_medication_section_includes_adherence_summary_when_schedule_exists(client, monkeypatch):
+    _freeze(monkeypatch)
+    _freeze_medication_schedule(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+
+    create_resp = client.post(
+        f"/api/children/{child['id']}/medication-schedules",
+        json={
+            "medication_name": "Amoxicillin", "dose_value": 5, "dose_unit": "ml",
+            "times_of_day": ["08:00"], "start_date": (FAKE_TODAY - timedelta(days=1)).isoformat(),
+        },
+        headers=auth_headers(user["token"]),
+    )
+    assert create_resp.status_code == 201, create_resp.get_json()
+    schedule_id = create_resp.get_json()["id"]
+    occ_key = f"{FAKE_TODAY.isoformat()}T08:00"
+    act_resp = client.post(
+        f"/api/children/{child['id']}/medication-schedules/{schedule_id}/occurrences/{occ_key}/administer",
+        json={}, headers=auth_headers(user["token"]),
+    )
+    assert act_resp.status_code == 201, act_resp.get_json()
+
+    resp = _preview(client, user["token"], child["id"], sections=["medication"])
+    summary = resp.get_json()["sections"]["medication"]["adherence_summary"]
+    assert summary is not None
+    assert summary["schedule_count"] == 1
+    assert summary["expected_count"] == 2  # kemarin 08:00 (overdue) + hari ini 08:00 (administered)
+    assert summary["administered_count"] == 1
+    assert summary["overdue_unresolved_count"] == 1
+    assert summary["adherence_percentage"] is not None
+    # Ringkasan CUMA angka agregat -- TIDAK PERNAH nama obat/instruksi
+    # per-jadwal (beda dari `entries`, yang MEMANG sudah menampilkan
+    # medication_name sejak Phase 1 sebelumnya).
+    assert "medication_name" not in summary
+    assert "instructions" not in summary
+
+
+def test_medication_adherence_summary_absent_when_medication_section_not_selected(client, monkeypatch):
+    _freeze(monkeypatch)
+    _freeze_medication_schedule(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    client.post(
+        f"/api/children/{child['id']}/medication-schedules",
+        json={"medication_name": "RAHASIA_Obat", "times_of_day": ["08:00"], "start_date": FAKE_TODAY.isoformat()},
+        headers=auth_headers(user["token"]),
+    )
+
+    resp = _preview(client, user["token"], child["id"], sections=["feeding"])
+    body = resp.get_json()
+    assert "medication" not in body["sections"]
+    assert "RAHASIA_Obat" not in json.dumps(body)
+
+
+def test_medication_adherence_summary_present_in_pdf_export_too(client, monkeypatch):
+    """Requirement: preview & PDF TETAP logically aligned -- section builder yang SAMA dipanggil dua-duanya, ringkasan kepatuhan otomatis ikut ke PDF tanpa perubahan terpisah di sana."""
+    _freeze(monkeypatch)
+    _freeze_medication_schedule(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    client.post(
+        f"/api/children/{child['id']}/medication-schedules",
+        json={"medication_name": "Amoxicillin", "times_of_day": ["08:00"], "start_date": FAKE_TODAY.isoformat()},
+        headers=auth_headers(user["token"]),
+    )
+    resp = _pdf(client, user["token"], child["id"], sections=["medication"])
+    assert resp.status_code == 200
+    assert resp.data.startswith(b"%PDF-")
 
 
 def test_doctor_visits_section_excludes_notes_field(client, monkeypatch):

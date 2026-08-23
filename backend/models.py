@@ -1055,3 +1055,140 @@ class ReminderAction(db.Model):
             "linked_log_type": self.linked_log_type,
             "linked_log_id": self.linked_log_id,
         }
+
+
+class MedicationSchedule(db.Model):
+    """
+    Definisi 1 regimen pemberian obat berulang (Medication Schedule &
+    Adherence — Phase 1, lihat backend/docs/MEDICATION_SCHEDULE.md).
+    SENGAJA CUMA nyimpen JADWAL + METADATA, TIDAK PERNAH status
+    "jatuh tempo"/"terlambat" -- status okurensi SELALU dihitung ULANG
+    saat diminta (lihat utils/medication_schedule_engine.py), PERSIS
+    prinsip arsitektur `Reminder` di atas (PythonAnywhere Free nggak
+    punya scheduler background).
+
+    `medication_name`/`instructions` SENGAJA diperlakukan sebagai teks
+    POTENSIAL SENSITIF (nama obat spesifik/instruksi bebas caregiver)
+    -- TIDAK PERNAH masuk audit trail apa adanya, lihat utils/audit.py.
+    """
+    __tablename__ = "medication_schedules"
+    __table_args__ = (
+        db.Index("ix_medication_schedules_child_active", "child_id", "is_active"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+
+    medication_name = db.Column(db.String(150), nullable=False)
+    # Opsional BERPASANGAN (dua-duanya diisi, atau dua-duanya kosong) --
+    # ditegakkan di utils/medication_schedule_engine.py:validate_dose,
+    # BUKAN di kolom DB (SQLite CHECK constraint lintas-kolom nullable
+    # sering rewel, validasi Python di layer route SUDAH cukup buat
+    # Phase 1 -- lihat juga pola serupa reminder `recurrence`).
+    dose_value = db.Column(db.Float, nullable=True)
+    dose_unit = db.Column(db.String(20), nullable=True)
+    instructions = db.Column(db.Text, nullable=True)
+
+    start_date = db.Column(db.Date, nullable=False, index=True)
+    end_date = db.Column(db.Date, nullable=True)
+    # List string "HH:MM" (24 jam), TERURUT + UNIK -- ditegakkan di
+    # layer validasi (utils/medication_schedule_engine.py:validate_times_of_day)
+    # sebelum disimpan, BUKAN diasumsikan begitu saja tiap dibaca balik.
+    times_of_day = db.Column(db.JSON, nullable=False)
+    # Kolom timezone DISEDIAKAN (skema siap multi-zona nanti), TAPI
+    # Phase 1 CUMA nerima "Asia/Jakarta" -- SELURUH app ini WIB-only
+    # (lihat utils/timezone_utils.py), belum ada kebutuhan nyata buat
+    # zona lain, jadi belum ditambah kompleksitas konversi timezone
+    # asli. Ditegakkan di layer validasi, bukan CHECK constraint DB,
+    # biar gampang diperluas nanti tanpa migrasi skema.
+    timezone = db.Column(db.String(30), nullable=False, default="Asia/Jakarta")
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
+    child = db.relationship(
+        "Child", backref=db.backref("medication_schedules", lazy="dynamic", cascade="all, delete-orphan")
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "child_id": self.child_id,
+            "created_by_user_id": self.created_by_user_id,
+            "created_by_name": self.creator.name if self.creator else None,
+            "medication_name": self.medication_name,
+            "dose_value": self.dose_value,
+            "dose_unit": self.dose_unit,
+            "instructions": self.instructions,
+            "start_date": self.start_date.isoformat(),
+            "end_date": self.end_date.isoformat() if self.end_date else None,
+            "times_of_day": list(self.times_of_day or []),
+            "timezone": self.timezone,
+            "is_active": self.is_active,
+            "created_at": self.created_at.isoformat() + "Z",
+            "updated_at": self.updated_at.isoformat() + "Z",
+        }
+
+
+class MedicationDoseAction(db.Model):
+    """
+    SATU aksi caregiver (diberikan/dilewati) atas SATU okurensi dosis 1
+    MedicationSchedule -- pola SAMA PERSIS `ReminderAction` di atas
+    (baris CUMA dibikin buat okurensi yang BENERAN diaksi, okurensi
+    "pending" TIDAK PERNAH punya baris, `occurrence_at` = kunci unik
+    "okurensi yang MANA").
+
+    BEDA dari ReminderAction: dosis yang ditandai "administered" SELALU
+    otomatis membuat 1 MedicationLog (requirement produk: "without
+    requiring duplicate data entry") -- `medication_log_id` nyimpen
+    tautan itu, DIBUAT DALAM TRANSAKSI DATABASE YANG SAMA (lihat
+    routes/medication_schedule_routes.py), bukan lewat alur "Catat
+    sekarang" 2-langkah opsional kayak Reminder. `acted_at` = waktu
+    AKSI beneran dicatat (bisa mundur dari `occurrence_at` kalau
+    caregiver baru sempat nge-tap belakangan) -- SENGAJA field
+    terpisah dari `occurrence_at` (jadwal), lihat requirement "preserve
+    the distinction between scheduled time and actual administration
+    time".
+    """
+    __tablename__ = "medication_dose_actions"
+    __table_args__ = (
+        db.UniqueConstraint("schedule_id", "occurrence_at", name="uq_medication_dose_action_occurrence"),
+        db.CheckConstraint("status IN ('administered','skipped')", name="ck_medication_dose_actions_status"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    schedule_id = db.Column(db.Integer, db.ForeignKey("medication_schedules.id"), nullable=False, index=True)
+
+    occurrence_at = db.Column(db.DateTime, nullable=False, index=True)
+    status = db.Column(db.String(12), nullable=False)
+
+    acted_at = db.Column(db.DateTime, nullable=False)
+    acted_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+
+    # Diisi CUMA buat status='administered' (lihat docstring kelas) --
+    # TIDAK PERNAH diisi buat 'skipped' (nggak ada obat yang beneran
+    # diberikan, jadi TIDAK ADA MedicationLog yang dibuat sama sekali).
+    medication_log_id = db.Column(db.Integer, db.ForeignKey("medication_logs.id"), nullable=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    schedule = db.relationship(
+        "MedicationSchedule", backref=db.backref("actions", lazy="dynamic", cascade="all, delete-orphan")
+    )
+    actor = db.relationship("User", foreign_keys=[acted_by_user_id])
+    medication_log = db.relationship("MedicationLog", foreign_keys=[medication_log_id])
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "schedule_id": self.schedule_id,
+            "occurrence_at": self.occurrence_at.isoformat() + "+07:00",
+            "status": self.status,
+            "acted_at": self.acted_at.isoformat() + "+07:00",
+            "acted_by_user_id": self.acted_by_user_id,
+            "acted_by_name": self.actor.name if self.actor else None,
+            "medication_log_id": self.medication_log_id,
+        }

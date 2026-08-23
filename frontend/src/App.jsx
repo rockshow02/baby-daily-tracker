@@ -12,6 +12,7 @@ import {
 } from "./utils/sessionCache";
 import { pruneInsightCacheToAccessibleChildren } from "./utils/insightCache";
 import { pruneReminderCacheToAccessibleChildren } from "./utils/reminderCache";
+import { pruneMedicationScheduleCacheToAccessibleChildren } from "./utils/medicationScheduleCache";
 import { useReminderMonitor } from "./hooks/useReminderMonitor";
 import AuthScreen from "./pages/AuthScreen";
 import OnboardingWizard from "./pages/OnboardingWizard";
@@ -84,6 +85,7 @@ function AppContent() {
       // nyangkut jadi "hantu" yang masih keliatan pas offline nanti.
       pruneInsightCacheToAccessibleChildren(user.id, list.map((c) => c.id));
       pruneReminderCacheToAccessibleChildren(user.id, list.map((c) => c.id));
+      pruneMedicationScheduleCacheToAccessibleChildren(user.id, list.map((c) => c.id));
       const cachedActiveId = getCachedActiveChildId(user.id);
       const next = list.find((c) => c.id === cachedActiveId) || list[0] || null;
       setActiveChild(next);
@@ -305,7 +307,7 @@ function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, s
         />
       )}
       {activeView === "growth" && <GrowthScreen child={activeChild} />}
-      {activeView === "health" && <HealthScreen child={activeChild} />}
+      {activeView === "health" && <HealthScreen child={activeChild} currentUserId={user.id} />}
       {activeView === "moments" && <MomentsScreen child={activeChild} />}
       {activeView === "stats" && <StatsScreen child={activeChild} />}
       {activeView === "insights" && <InsightsScreen child={activeChild} currentUserId={user.id} />}

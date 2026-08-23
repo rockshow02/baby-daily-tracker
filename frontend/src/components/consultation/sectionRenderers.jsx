@@ -5,7 +5,7 @@ import PartialDataNotice from "./PartialDataNotice";
 import TruncationNotice from "./TruncationNotice";
 import {
   MISSING_VALUE, formatDateTimeWIB, formatDateWIB, formatDurationMinutes,
-  formatRatePerDay, formatRecordCount, formatTemperatureC, formatTimes,
+  formatInt, formatRatePerDay, formatRecordCount, formatTemperatureC, formatTimes,
   formatVolumeMl, formatWeightKg, formatLengthCm, orDash,
 } from "../../utils/consultationFormat";
 import {
@@ -296,22 +296,63 @@ function IllnessSection({ section }) {
   );
 }
 
+/**
+ * Ringkasan kepatuhan jadwal obat (Medication Schedule & Adherence Phase
+ * 1) -- `section.adherence_summary` datang PERSIS apa adanya dari
+ * utils/consultation_report.py:_medication_adherence_summary, murni
+ * angka agregat (JAMU nama obat/instruksi per-jadwal). `null` berarti
+ * child ini nggak punya jadwal obat yang overlap periode ini SAMA
+ * SEKALI -- TIDAK dirender apa-apa (bukan tabel nol), beda dari
+ * `entries` (riwayat MedicationLog) yang independen bisa tetap kosong
+ * ATAU terisi terlepas dari ada/tidaknya jadwal.
+ */
+function MedicationAdherenceSummary({ adherence }) {
+  if (!adherence) return null;
+  return (
+    <div className="mt-4">
+      <p className="text-xs text-ink-faint font-mono uppercase tracking-wider mb-2">
+        Ringkasan Kepatuhan Jadwal Obat
+      </p>
+      <SummaryGrid
+        rows={[
+          { label: "Jumlah jadwal obat aktif pada periode ini", value: formatInt(adherence.schedule_count) },
+          { label: "Dosis yang dijadwalkan", value: formatInt(adherence.expected_count) },
+          { label: "Dosis diberikan", value: formatInt(adherence.administered_count) },
+          { label: "Dosis dilewati", value: formatInt(adherence.skipped_count) },
+          { label: "Dosis terlambat diberikan", value: formatInt(adherence.late_administered_count) },
+          { label: "Dosis belum diselesaikan (lewat jadwal)", value: formatInt(adherence.overdue_unresolved_count) },
+          {
+            label: "Persentase kepatuhan",
+            value: adherence.adherence_percentage == null ? MISSING_VALUE : `${adherence.adherence_percentage}%`,
+          },
+        ]}
+      />
+    </div>
+  );
+}
+
 function MedicationSection({ section }) {
   const entries = section?.entries || [];
-  if (entries.length === 0) return <EmptySectionState message="Tidak ada catatan obat pada periode ini." />;
   return (
     <>
-      <DetailList>
-        {entries.map((e, i) => (
-          <DetailListItem key={`${e.medication_name}-${e.timestamp}-${i}`}>
-            <p className="font-medium">{orDash(e.medication_name)}</p>
-            <p className="text-ink-muted text-xs mt-0.5">
-              {e.dosage ? `${e.dosage} · ` : ""}{formatDateTimeWIB(e.timestamp)}
-            </p>
-          </DetailListItem>
-        ))}
-      </DetailList>
-      <TruncationNotice visibleCount={entries.length} totalCount={section?.total_count_in_period} />
+      {entries.length === 0 ? (
+        <EmptySectionState message="Tidak ada catatan obat pada periode ini." />
+      ) : (
+        <>
+          <DetailList>
+            {entries.map((e, i) => (
+              <DetailListItem key={`${e.medication_name}-${e.timestamp}-${i}`}>
+                <p className="font-medium">{orDash(e.medication_name)}</p>
+                <p className="text-ink-muted text-xs mt-0.5">
+                  {e.dosage ? `${e.dosage} · ` : ""}{formatDateTimeWIB(e.timestamp)}
+                </p>
+              </DetailListItem>
+            ))}
+          </DetailList>
+          <TruncationNotice visibleCount={entries.length} totalCount={section?.total_count_in_period} />
+        </>
+      )}
+      <MedicationAdherenceSummary adherence={section?.adherence_summary} />
     </>
   );
 }
