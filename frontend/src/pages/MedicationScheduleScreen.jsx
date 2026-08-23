@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api/client";
 import {
   cacheMedicationScheduleSnapshot, getCachedMedicationScheduleSnapshot,
@@ -13,6 +13,15 @@ import { canWrite } from "../utils/roles";
 const MAX_TIMES_PER_DAY = 6;
 const MEDICATION_NAME_MAX_LEN = 150;
 const INSTRUCTIONS_MAX_LEN = 500;
+
+// "Efisien & terbatas" -- PythonAnywhere Free nggak punya scheduler
+// background, jadi frontend inilah yang berkala nanya ulang status
+// SELAGI layar ini terbuka & tab-nya kelihatan (lihat
+// backend/docs/MEDICATION_SCHEDULE.md, pola SAMA PERSIS
+// hooks/useReminderMonitor.js yang sudah ada). 60 detik cukup
+// responsif buat ambang upcoming/due/overdue (hitungan menit),
+// TANPA membebani backend gratis dengan polling kelewat sering.
+const POLL_INTERVAL_MS = 60000;
 
 const DISCLAIMER =
   "Jadwal ini hanya mencerminkan instruksi yang dimasukkan sendiri oleh caregiver — bukan resep " +
@@ -423,6 +432,13 @@ export default function MedicationScheduleScreen({ child, currentUserId, onClose
   const [manageFilter, setManageFilter] = useState("active");
   const [pendingSyncKeys, setPendingSyncKeys] = useState(new Set());
   const [pendingActionKeys, setPendingActionKeys] = useState(new Set());
+  // Proteksi request tumpang-tindih (Defect 2 review) -- ref biasa,
+  // BUKAN state (nggak perlu re-render buat ini), dicek SEBELUM
+  // `load()` beneran mulai fetch baru: tick polling 60 detik yang
+  // kebetulan bareng sama visibilitychange, ATAUPUN reload manual yang
+  // masih nunggu respons sebelumnya, TIDAK PERNAH memicu 2 request
+  // `GET .../medication-schedules` yang tumpang tindih.
+  const loadInFlightRef = useRef(false);
 
   const loadFromCache = useCallback(() => {
     const cached = getCachedMedicationScheduleSnapshot(currentUserId, child.id);
@@ -437,13 +453,24 @@ export default function MedicationScheduleScreen({ child, currentUserId, onClose
     }
   }, [currentUserId, child.id]);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (opts = {}) => {
+    // `silent`: dipakai refresh LATAR BELAKANG (polling 60 detik &
+    // balik-jadi-visible, lihat useEffect di bawah) -- BEDA dari reload
+    // yang dipicu user (buka layar, ganti anak, "Coba lagi", aksi
+    // administer/skip) yang WAJAR mulai dari keadaan bersih. Refresh
+    // diam-diam TIDAK PERNAH menghapus pesan error/konflik yang lagi
+    // ditampilkan HANYA karena timer-nya kebetulan jalan (requirement
+    // review: "do not clear a meaningful conflict/error message because
+    // a background refresh started").
+    const silent = opts.silent === true;
     if (!isOnline) {
       loadFromCache();
       return;
     }
+    if (loadInFlightRef.current) return; // proteksi tumpang tindih, lihat deklarasi ref di atas
+    loadInFlightRef.current = true;
     setStatus((prev) => (prev === "ready" || prev === "offline_cached" ? prev : "loading"));
-    setErrorMessage("");
+    if (!silent) setErrorMessage("");
     try {
       const res = await api.listMedicationSchedules(child.id);
       setData(res);
@@ -462,6 +489,8 @@ export default function MedicationScheduleScreen({ child, currentUserId, onClose
       }
       setStatus("error");
       setErrorMessage(err?.message || "Gagal memuat jadwal obat.");
+    } finally {
+      loadInFlightRef.current = false;
     }
   }, [child.id, isOnline, currentUserId, loadFromCache]);
 
@@ -481,6 +510,37 @@ export default function MedicationScheduleScreen({ child, currentUserId, onClose
     window.addEventListener(QUEUE_CHANGE_EVENT, onQueueChange);
     return () => window.removeEventListener(QUEUE_CHANGE_EVENT, onQueueChange);
   }, [load]);
+
+  // Monitor terbatas (Defect 2 review) -- status due/overdue backend
+  // BISA basi kalau layar ini dibiarkan terbuka lama tanpa interaksi
+  // apa pun. Pola SAMA PERSIS hooks/useReminderMonitor.js, DITAMBAH 2
+  // penyempurnaan yang eksplisit diminta review: (1) TIDAK PERNAH
+  // polling selagi offline (effect ini nggak dipasang sama sekali kalau
+  // `isOnline` false -- bukan cuma "polling tapi hasilnya dibuang"),
+  // (2) TIDAK PERNAH benar-benar fetch selagi tab tersembunyi (interval
+  // TETAP jalan supaya nggak perlu dipasang/dicabut berkali-kali, tapi
+  // tick-nya sendiri no-op kalau `document.visibilityState !== "visible"`).
+  // TIDAK ADA WebSocket/worker/cron/Celery/Redis/koneksi persisten --
+  // ini MURNI polling REST biasa selagi tab terbuka & online, konsisten
+  // sama arsitektur "tanpa scheduler" seluruh fitur ini.
+  useEffect(() => {
+    if (!isOnline) return undefined;
+
+    const tick = () => {
+      if (document.visibilityState === "visible") load({ silent: true });
+    };
+    const interval = setInterval(tick, POLL_INTERVAL_MS);
+
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") load({ silent: true });
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [isOnline, load]);
 
   const handleAct = async (schedule, occurrence, action) => {
     const key = occurrenceIdentity(schedule.id, occurrence.occurrence_key);

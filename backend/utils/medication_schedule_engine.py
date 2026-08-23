@@ -172,6 +172,33 @@ def valid_occurrence_range(schedule, today):
     return earliest_dt, latest_dt
 
 
+def is_occurrence_actionable(occurrence_at, now, resolved_status=None):
+    """
+    True kalau 1 okurensi SECARA WAKTU sudah boleh diaksi
+    (administer/skip) SEKARANG -- murni cek MOMEN (jam), bukan tanggung
+    jawab fungsi ini buat cek tanggal/jam ada di `times_of_day`/rentang
+    aktif schedule (itu tugas `valid_occurrence_range()` + pemanggil,
+    lihat routes/medication_schedule_routes.py).
+
+    REUSE PENUH `compute_occurrence_state()` (ambang 15 menit "upcoming"
+    yang SAMA dipakai buat label state yang ditampilkan di UI) --
+    BUKAN angka ajaib baru: "belum boleh diaksi" = "masih upcoming",
+    "boleh diaksi" = "due" atau "overdue". Ini SATU sumber kebenaran
+    yang sama dipakai baik oleh endpoint aksi (`_act_on_occurrence`)
+    MAUPUN field `can_act` di respons list (`_occurrence_to_json`) --
+    kalau dua-duanya pernah tidak sinkron, endpoint aksi yang tetap
+    otoritatif (menolak `400`), terlepas apa yang sempat ditampilkan UI.
+
+    Okurensi yang SUDAH resolved (`resolved_status` bukan None) TIDAK
+    PERNAH actionable lagi -- dicek LEBIH DULU, sebelum
+    compute_occurrence_state, supaya nggak bergantung urutan
+    perbandingan string status vs due/overdue.
+    """
+    if resolved_status is not None:
+        return False
+    return compute_occurrence_state(occurrence_at, now, None) in ("due", "overdue")
+
+
 def _build_occurrence_dict(occ_at, action, now):
     resolved_status = action.status if action else None
     return {

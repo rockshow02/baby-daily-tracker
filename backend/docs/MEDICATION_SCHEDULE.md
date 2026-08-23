@@ -145,11 +145,54 @@ aktif setahun. Endpoint administer/skip memvalidasi tanggal via
 `valid_occurrence_range()` **dan** jam via keanggotaan
 `schedule.times_of_day` sebelum menerima aksi apa pun.
 
+### Kelayakan MOMEN (jam) — `is_occurrence_actionable()` (defect review Agustus 2026)
+
+`valid_occurrence_range()` di atas CUMA membatasi **tanggal** — 1
+tanggal yang sah bisa punya beberapa jam pemberian, sebagian sudah
+`due`/`overdue` dan sebagian lain masih jauh di masa depan hari itu
+juga (mis. jadwal jam 08:00 & 20:00). Tanggal yang sah SENDIRIAN
+**tidak cukup** untuk memutuskan boleh/tidaknya 1 okurensi diaksi —
+dibutuhkan cek MOMEN terpisah:
+
+`utils/medication_schedule_engine.py:is_occurrence_actionable(occurrence_at,
+now, resolved_status)` — **REUSE PENUH** ambang 15 menit milik
+`compute_occurrence_state()` (SATU sumber kebenaran yang sama dipakai
+buat label state yang ditampilkan), bukan angka ajaib baru:
+
+| Kondisi | Actionable? |
+|---|---|
+| Lebih dari 15 menit **sebelum** `occurrence_at` | ❌ Tidak (masih `upcoming`) |
+| TEPAT 15 menit sebelum `occurrence_at` | ✅ Ya (batas inklusif, sudah `due`) |
+| `due` atau `overdue` | ✅ Ya |
+| Sudah ada `MedicationDoseAction` (resolved) | ❌ Tidak, apa pun waktunya |
+| Di luar rentang tanggal/jam sah schedule (`valid_occurrence_range()`/`times_of_day`) | ❌ Tidak |
+| Schedule nonaktif atau `start_date` di masa depan | ❌ Tidak |
+
+Ini SATU fungsi murni yang dipakai **dua tempat**, dijamin tidak pernah
+tidak-sinkron:
+
+1. `_act_on_occurrence()` (endpoint administer/skip) — okurensi yang
+   masih `upcoming` ditolak `400` dengan pesan Indonesia yang jelas
+   ("Dosis ini belum bisa ditandai sekarang — masih terlalu awal dari
+   jadwalnya."), **sebelum** membuat `MedicationLog`/
+   `MedicationDoseAction`/`IdempotencyKey`/audit event apa pun.
+2. `_occurrence_to_json()` (field `can_act` di respons list) — dihitung
+   dari `now` yang SAMA dengan yang dipakai men-generate `state`
+   okurensi itu sendiri.
+
+`_act_on_occurrence()` memanggil `now_wib()` **TEPAT SEKALI** per
+request, dipakai ulang untuk `today`, validasi kelayakan momen, DAN
+`acted_at` — mencegah celah 2 bacaan jam sistem yang berbeda dalam 1
+request yang sama (mis. lolos validasi lalu `acted_at` kebetulan
+terpotong ke sisi lain ambang 15 menit).
+
 Setiap objek okurensi di respons list menyertakan `can_act` yang
-**digabung server** dari role, status okurensi (`status is None`), DAN
-`valid_occurrence_range()` — field yang SAMA PERSIS dipakai endpoint
-aksi. Frontend memakai field ini langsung, tidak pernah menghitung
-ulang kelayakan tanggal/jam sendiri dari timezone browser.
+**digabung server** dari role, kelayakan TANGGAL
+(`valid_occurrence_range()`), DAN kelayakan MOMEN
+(`is_occurrence_actionable()`) — tiga-tiganya SAMA PERSIS dipakai
+endpoint aksi. Frontend memakai field ini langsung, **tidak pernah**
+menghitung ulang kelayakan tanggal/jam sendiri dari timezone/jam
+browser.
 
 ## Integrasi dengan `MedicationLog` yang sudah ada
 
@@ -253,6 +296,87 @@ Pola SAMA PERSIS Care Reminders:
   (`frontend/src/utils/medicationScheduleCache.js`, pola identik
   `reminderCache.js`) — dibersihkan otomatis saat logout dan saat akses
   ke seorang anak dicabut.
+
+### Kebijakan cached-action KONSERVATIF (defect review Agustus 2026)
+
+Snapshot offline bisa berisi `can_act=true` yang **formerly valid**
+tapi sudah basi begitu waktu berjalan (mis. cache diambil saat 1
+okurensi masih `due`, lalu device offline lama sampai jendela itu
+sudah lewat, ATAUPUN — sebelum defect ini diperbaiki — snapshot lama
+yang kebetulan sempat menyimpan `can_act=true` yang keliru buat
+okurensi yang masih jauh `upcoming`). Kebijakan Phase 1:
+
+- `MedicationScheduleScreen.jsx` **tidak pernah** menghitung ulang
+  `can_act` sendiri dari jam browser — tombol administer/skip SELALU
+  dan HANYA merender `occurrence.can_act` PERSIS apa adanya dari
+  respons/snapshot terakhir yang dipercaya (online ATAUPUN cached),
+  konsisten dengan prinsip "backend tetap otoritatif" di seluruh
+  dokumen ini.
+- Konsekuensinya: sebuah okurensi yang **sudah** actionable (`can_act:
+  true`) di snapshot terakhir TETAP boleh diaksi offline (masuk
+  antrian) — termasuk kalau kenyataannya di server sudah SEMAKIN due
+  (waktu cuma maju, `due`/`overdue` tidak pernah kembali jadi
+  `upcoming`). Sebuah okurensi yang **belum** actionable
+  (`can_act: false`, mis. masih `upcoming`) di snapshot terakhir TIDAK
+  PERNAH bisa diaksi offline — tombolnya tidak pernah dirender sama
+  sekali, terlepas berapa lama device sudah offline atau jam berapa
+  browser mengklaim sekarang.
+- **Reconnect tetap otoritatif ke backend**: request yang sempat
+  diantrikan (dari snapshot yang trusted) direvalidasi ULANG oleh
+  `is_occurrence_actionable()` di server pas beneran disinkronkan —
+  kalau (skenario langka) ternyata masih dianggap terlalu awal saat
+  itu, endpoint balas `400` dengan pesan yang sama
+  ("...masih terlalu awal dari jadwalnya."). `useOfflineSync.js` yang
+  SUDAH ADA menangani ini SAMA seperti kegagalan validasi 400/422
+  lainnya — item diparkir sebagai `NEEDS_REVIEW`
+  (`reviewReason: "validation"`) dengan pesan server apa adanya,
+  ditampilkan lewat `QueueReviewPanel.jsx` yang sudah ada — **tidak
+  pernah** hilang diam-diam, dan **tidak** butuh perubahan kode baru di
+  `useOfflineSync.js` (mekanisme generik yang sudah ada sudah cukup).
+- Label "Menunggu sinkron" dipertahankan APA ADANYA sampai
+  `QUEUE_CHANGE_EVENT` beneran menandakan item itu selesai disinkron —
+  refresh latar belakang (lihat bagian Monitor terbatas di bawah)
+  **tidak pernah** mengubah/menghapus status ini sendiri.
+
+### Monitor terbatas (polling) — defect review Agustus 2026
+
+`MedicationScheduleScreen.jsx` dibiarkan terbuka lama TANPA interaksi
+apa pun sebelumnya bisa menampilkan status due/overdue/`can_act` yang
+basi selamanya (backend cuma dihitung ulang saat benar-benar diminta,
+lihat bagian Arsitektur). Layar ini sekarang memasang monitor terbatas
+yang polanya SAMA PERSIS `hooks/useReminderMonitor.js` yang sudah ada
+(mounted per-layar, bukan hook terpisah — "satu layar" tidak
+memerlukan abstraksi baru):
+
+- Refresh SEKALI setiap `document.visibilityState` berubah jadi
+  `"visible"`.
+- Selagi online DAN visible, refresh berkala setiap 60 detik
+  (`POLL_INTERVAL_MS`).
+- **Tidak pernah** memasang interval/listener sama sekali selagi
+  offline (bukan cuma "polling tapi hasilnya dibuang").
+- Interval TETAP jalan tiap tick selagi tab tersembunyi (supaya tidak
+  perlu dipasang/dicabut berkali-kali), tapi tick-nya sendiri **no-op**
+  kalau `document.visibilityState !== "visible"` — tidak pernah
+  benar-benar fetch selagi hidden.
+- Proteksi tumpang-tindih: 1 ref (`loadInFlightRef`) memastikan tidak
+  pernah ada 2 request `GET .../medication-schedules` yang berjalan
+  bersamaan, baik dari tick timer, visibilitychange, MAUPUN reload
+  manual yang kebetulan tumpang tindih.
+- Refresh latar belakang (`silent: true`) **tidak pernah** membalikkan
+  status ke skeleton loading (data yang sudah tampil dipertahankan
+  sampai respons baru beneran datang) DAN **tidak pernah** menghapus
+  pesan error/konflik yang lagi ditampilkan — HANYA reload yang
+  dipicu USER (buka layar, ganti anak, tombol "Coba lagi", aksi
+  administer/skip) yang wajar membersihkan pesan lama.
+- Interval + event listener dibersihkan (`clearInterval`/
+  `removeEventListener`) saat komponen unmount.
+- **Tidak ada** WebSocket/worker/cron/Celery/Redis/koneksi persisten —
+  ini murni polling REST biasa selagi tab terbuka & online, kompatibel
+  penuh dengan PythonAnywhere Free.
+- Status due/overdue/`can_act` **tidak pernah** dihitung dari jam
+  browser — setiap tick (baik silent maupun bukan) mengambil ulang
+  state yang SUDAH dihitung server, konsisten dengan seluruh dokumen
+  ini.
 
 ## Adherence (formula kepatuhan)
 
@@ -523,6 +647,19 @@ Karena migrasi ini cuma menambah 2 tabel baru:
     jejak data jadwal obat sama sekali di laporan.
 12. Ganti akun (logout/login akun lain) — verifikasi tidak ada data
     jadwal obat akun sebelumnya yang bocor di cache.
+13. Buat jadwal dengan jam beberapa jam lagi hari ini (mis. jam 20:00
+    saat sekarang jam 08:00) — verifikasi tombol "Sudah diberikan"/
+    "Lewati" **tidak muncul** sampai 15 menit sebelum jam itu; coba
+    panggil endpoint administer langsung (mis. lewat curl/Postman)
+    untuk okurensi itu — harus ditolak `400` dengan pesan yang jelas.
+14. Biarkan layar Jadwal Obat terbuka tanpa interaksi >60 detik dengan
+    1 okurensi yang mendekati batas `upcoming`→`due` — verifikasi
+    tombol aksinya muncul otomatis TANPA perlu reload manual. Pindah ke
+    tab lain lalu kembali — verifikasi refresh langsung terjadi begitu
+    tab terlihat lagi.
+15. Putuskan koneksi selagi layar ini terbuka — verifikasi tidak ada
+    request baru yang terkirim (cek Network tab) sampai koneksi
+    kembali.
 
 ## Keterbatasan Phase 1 yang diketahui
 

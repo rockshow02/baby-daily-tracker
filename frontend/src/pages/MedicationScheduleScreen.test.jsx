@@ -29,6 +29,14 @@ function setOnline(value) {
   Object.defineProperty(window.navigator, "onLine", { value, configurable: true });
 }
 
+function setVisibility(state) {
+  Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+}
+
+function fireVisibilityChange() {
+  document.dispatchEvent(new Event("visibilitychange"));
+}
+
 function makeSchedule(overrides = {}) {
   const occurrenceCanAct = overrides.can_act ?? true;
   return {
@@ -72,6 +80,7 @@ const emptyAdherence = {
 
 beforeEach(() => {
   setOnline(true);
+  setVisibility("visible");
   localStorage.clear();
   Object.values(apiMock).forEach((fn) => fn.mockReset());
   apiMock.getMedicationAdherence.mockResolvedValue(emptyAdherence);
@@ -79,6 +88,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.clearAllTimers();
+  vi.useRealTimers();
 });
 
 describe("MedicationScheduleScreen — loading/success/empty/error states", () => {
@@ -375,5 +385,208 @@ describe("MedicationScheduleScreen — no raw JSON/internal field names leak", (
     expect(bodyText).not.toMatch(/\bundefined\b/);
     expect(bodyText).not.toMatch(/\bnull\b/);
     expect(bodyText).not.toMatch(/occurrence_key|medication_schedule|dose_unit|is_active/);
+  });
+});
+
+// --------------------------------------------------------------------------
+// Defect 2 review (Agustus 2026): monitor terbatas -- polling 60 detik +
+// visibilitychange, TIDAK PERNAH selagi offline/hidden, TIDAK PERNAH
+// tumpang tindih, TIDAK PERNAH menghapus data/pesan yang lagi ditampilkan
+// cuma karena refresh diam-diam ini jalan.
+// --------------------------------------------------------------------------
+
+describe("MedicationScheduleScreen — background polling & visibility", () => {
+  it("1. polls every 60 seconds while the tab is visible and online", async () => {
+    apiMock.listMedicationSchedules.mockResolvedValue(makeScheduleResponse());
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await vi.waitFor(() => expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(1));
+
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(3);
+  });
+
+  it("2. never polls while offline", async () => {
+    apiMock.listMedicationSchedules.mockResolvedValue(makeScheduleResponse());
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    setOnline(false);
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await vi.waitFor(() => expect(screen.queryByText("Memuat jadwal obat...")).not.toBeInTheDocument());
+    expect(apiMock.listMedicationSchedules).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(apiMock.listMedicationSchedules).not.toHaveBeenCalled();
+  });
+
+  it("3. never fetches while the document is hidden", async () => {
+    apiMock.listMedicationSchedules.mockResolvedValue(makeScheduleResponse());
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await vi.waitFor(() => expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(1));
+
+    setVisibility("hidden");
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(1);
+  });
+
+  it("4. changing from hidden to visible triggers an immediate refresh", async () => {
+    apiMock.listMedicationSchedules.mockResolvedValue(makeScheduleResponse());
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await waitFor(() => expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(1));
+
+    setVisibility("hidden");
+    fireVisibilityChange();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(1); // hidden -- nggak nambah
+
+    setVisibility("visible");
+    fireVisibilityChange();
+    await waitFor(() => expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(2));
+  });
+
+  it("5. going offline stops polling", async () => {
+    apiMock.listMedicationSchedules.mockResolvedValue(makeScheduleResponse());
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await vi.waitFor(() => expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(1));
+
+    setOnline(false);
+    window.dispatchEvent(new Event("offline"));
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(1);
+  });
+
+  it("6. returning online resumes safe refresh behavior", async () => {
+    apiMock.listMedicationSchedules.mockResolvedValue(makeScheduleResponse());
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    setOnline(false);
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    expect(apiMock.listMedicationSchedules).not.toHaveBeenCalled();
+
+    setOnline(true);
+    window.dispatchEvent(new Event("online"));
+    await vi.waitFor(() => expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(1));
+
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(2);
+  });
+
+  it("7. removes the interval and visibilitychange listener on unmount", async () => {
+    apiMock.listMedicationSchedules.mockResolvedValue(makeScheduleResponse());
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { unmount } = render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await vi.waitFor(() => expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(1));
+
+    unmount();
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(1);
+  });
+
+  it("8. multiple timer ticks do not create overlapping requests", async () => {
+    let resolveFirst;
+    apiMock.listMedicationSchedules
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockResolvedValue(makeScheduleResponse());
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+
+    // Request PERTAMA (mount) masih menggantung -- tick 60 detik yang
+    // jatuh SELAGI itu belum selesai TIDAK PERNAH memicu request kedua
+    // yang tumpang tindih.
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(1);
+
+    resolveFirst(makeScheduleResponse());
+    await vi.waitFor(() => expect(screen.queryByText("Memuat jadwal obat...")).not.toBeInTheDocument());
+  });
+
+  it("9. background refresh preserves already displayed data instead of flashing back to a loading screen", async () => {
+    apiMock.listMedicationSchedules.mockResolvedValue(makeScheduleResponse());
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await vi.waitFor(() => expect(screen.getAllByText(/Paracetamol/).length).toBeGreaterThan(0));
+
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(screen.queryByText("Memuat jadwal obat...")).not.toBeInTheDocument();
+    expect(screen.getAllByText(/Paracetamol/).length).toBeGreaterThan(0);
+  });
+
+  it("10. background refresh does not erase a caregiver-conflict message", async () => {
+    apiMock.listMedicationSchedules.mockResolvedValue(makeScheduleResponse());
+    apiMock.administerMedicationDose.mockRejectedValue(
+      new ApiError({ kind: "http_error", status: 409, message: "Dosis ini sudah pernah ditandai sebelumnya." }),
+    );
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await screen.findAllByText(/Paracetamol/);
+
+    fireEvent.click(screen.getByRole("button", { name: "Sudah diberikan" }));
+    await screen.findByText(/sudah ditandai oleh caregiver lain/);
+
+    // Refresh LATAR BELAKANG (visibilitychange -> visible) lewat SETELAH
+    // pesan konflik muncul -- pesannya TETAP ada, nggak boleh ke-wipe
+    // cuma karena refresh diam-diam ini jalan (beda dari reload yang
+    // dipicu USER, mis. tombol "Coba lagi", yang WAJAR membersihkan
+    // pesan lama).
+    fireVisibilityChange();
+    await waitFor(() => expect(apiMock.listMedicationSchedules.mock.calls.length).toBeGreaterThanOrEqual(3));
+    expect(screen.getByText(/sudah ditandai oleh caregiver lain/)).toBeInTheDocument();
+  });
+});
+
+// --------------------------------------------------------------------------
+// Defect 2 review: kebijakan offline cached-action KONSERVATIF -- cache
+// bisa berisi `can_act=true` yang formerly valid tapi udah basi.
+// TIDAK PERNAH dihitung ulang dari jam browser, backend TETAP yang
+// memutuskan final saat reconnect.
+// --------------------------------------------------------------------------
+
+describe("MedicationScheduleScreen — offline cached-action safety", () => {
+  it("11. never enables an action for an occurrence that was NOT already actionable in the last trusted snapshot", async () => {
+    const staleUpcoming = makeSchedule({
+      occurrences: [{
+        occurrence_key: "2026-08-23T20:00", occurrence_at: "2026-08-23T20:00:00+07:00",
+        state: "upcoming", status: null, acted_at: null, acted_by_user_id: null, acted_by_name: null,
+        medication_log_id: null, can_act: false,
+      }],
+    });
+    cacheMedicationScheduleSnapshot(CURRENT_USER_ID, testChild.id, makeScheduleResponse({ schedules: [staleUpcoming] }));
+    setOnline(false);
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await screen.findAllByText(/Paracetamol/);
+
+    // Cached can_act=false dihormati apa adanya -- TIDAK PERNAH dihitung
+    // ulang dari jam browser buat "membolehkan" okurensi yang masih
+    // upcoming di snapshot terakhir yang dipercaya.
+    expect(screen.queryByRole("button", { name: "Sudah diberikan" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Lewati" })).not.toBeInTheDocument();
+  });
+
+  it("allows an offline action when the occurrence was already actionable in the last trusted snapshot", async () => {
+    cacheMedicationScheduleSnapshot(CURRENT_USER_ID, testChild.id, makeScheduleResponse()); // default: can_act true, state "due"
+    setOnline(false);
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await screen.findAllByText(/Paracetamol/);
+
+    expect(screen.getByRole("button", { name: "Sudah diberikan" })).toBeInTheDocument();
+  });
+
+  it("12. a queued offline action keeps its distinct 'Menunggu sinkron' state, not silently lost or shown as done", async () => {
+    apiMock.listMedicationSchedules.mockResolvedValue(makeScheduleResponse());
+    apiMock.administerMedicationDose.mockResolvedValue({ id: "local-1", _offlineQueued: true });
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await screen.findAllByText(/Paracetamol/);
+
+    fireEvent.click(screen.getByRole("button", { name: "Sudah diberikan" }));
+    expect(await screen.findByText("Menunggu sinkron")).toBeInTheDocument();
+
+    // Refresh latar belakang lain TIDAK PERNAH diam-diam mengubah label
+    // ini jadi "selesai"/menghilangkannya -- cuma QUEUE_CHANGE_EVENT
+    // (sinkron beneran kelar) yang boleh membersihkannya.
+    fireVisibilityChange();
+    await waitFor(() => expect(apiMock.listMedicationSchedules.mock.calls.length).toBeGreaterThanOrEqual(2));
+    expect(screen.getByText("Menunggu sinkron")).toBeInTheDocument();
   });
 });

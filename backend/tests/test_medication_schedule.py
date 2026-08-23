@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 import pytest
 
 import routes.medication_schedule_routes as medication_schedule_routes_module
-from models import CaregiverAuditEvent, MedicationDoseAction, MedicationLog, MedicationSchedule
+from models import CaregiverAuditEvent, IdempotencyKey, MedicationDoseAction, MedicationLog, MedicationSchedule
 from tests.conftest import auth_headers, create_child, register
 from tests.test_roles_permissions import invite_and_join
 from utils.medication_schedule_engine import LOOKBACK_DAYS, MAX_TIMES_PER_DAY
@@ -457,6 +457,222 @@ def test_occurrence_state_thresholds(client, monkeypatch, minutes_since_schedule
 
 
 # --------------------------------------------------------------------------
+# Defect 1 review (Agustus 2026): kebijakan actionability SAMA-HARI --
+# okurensi yang MASIH "upcoming" (>15 menit lagi) TIDAK PERNAH boleh
+# diaksi lebih awal, walau TANGGALNYA sendiri sudah sah hari ini. Lihat
+# utils/medication_schedule_engine.py:is_occurrence_actionable().
+# --------------------------------------------------------------------------
+
+
+def test_same_day_occurrence_several_hours_in_the_future_is_rejected(client, monkeypatch):
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    schedule_id = _create_schedule(client, user["token"], child["id"], times_of_day=["08:00", "20:00"]).get_json()["id"]
+
+    resp = _act(client, user["token"], child["id"], schedule_id, _occ_key(FAKE_NOW.date(), "20:00"), "administer")
+    assert resp.status_code == 400
+    assert "awal" in resp.get_json()["error"]
+
+
+@pytest.mark.parametrize(
+    "minutes_before_now,expected_status",
+    [
+        (16, 400),  # 16 menit lagi -- masih upcoming, ditolak
+        (15, 201),  # TEPAT 15 menit lagi -- batas inklusif, diterima
+        (0, 201),   # tepat waktu -- diterima
+    ],
+)
+def test_administer_actionability_boundary(client, monkeypatch, minutes_before_now, expected_status):
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    occ_time = FAKE_NOW + timedelta(minutes=minutes_before_now)
+    schedule_id = _create_schedule(
+        client, user["token"], child["id"],
+        times_of_day=[occ_time.strftime("%H:%M")], start_date=occ_time.date().isoformat(),
+    ).get_json()["id"]
+
+    resp = _act(client, user["token"], child["id"], schedule_id, _occ_key(occ_time.date(), occ_time.strftime("%H:%M")), "administer")
+    assert resp.status_code == expected_status, resp.get_json()
+
+
+def test_overdue_occurrence_is_accepted(client, monkeypatch):
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    occ_time = FAKE_NOW - timedelta(hours=5)
+    schedule_id = _create_schedule(
+        client, user["token"], child["id"],
+        times_of_day=[occ_time.strftime("%H:%M")], start_date=occ_time.date().isoformat(),
+    ).get_json()["id"]
+
+    resp = _act(client, user["token"], child["id"], schedule_id, _occ_key(occ_time.date(), occ_time.strftime("%H:%M")), "administer")
+    assert resp.status_code == 201
+
+
+def test_resolved_occurrence_has_can_act_false_in_list(client, monkeypatch):
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    schedule_id = _create_schedule(client, user["token"], child["id"]).get_json()["id"]
+    occ_key = _occ_key(FAKE_NOW.date(), "08:00")
+    assert _act(client, user["token"], child["id"], schedule_id, occ_key, "administer").status_code == 201
+
+    body = _list_schedules(client, user["token"], child["id"]).get_json()
+    occ = body["schedules"][0]["occurrences"][0]
+    assert occ["status"] == "administered"
+    assert occ["can_act"] is False
+
+
+def test_too_early_occurrence_in_list_api_has_can_act_false(client, monkeypatch):
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    occ_time = FAKE_NOW + timedelta(minutes=16)
+    _create_schedule(
+        client, user["token"], child["id"],
+        times_of_day=[occ_time.strftime("%H:%M")], start_date=FAKE_NOW.date().isoformat(),
+    )
+
+    body = _list_schedules(client, user["token"], child["id"]).get_json()
+    occ = body["schedules"][0]["occurrences"][0]
+    assert occ["state"] == "upcoming"
+    assert occ["can_act"] is False
+
+
+def test_exactly_at_boundary_occurrence_in_list_api_has_can_act_true(client, monkeypatch):
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    occ_time = FAKE_NOW + timedelta(minutes=15)
+    _create_schedule(
+        client, user["token"], child["id"],
+        times_of_day=[occ_time.strftime("%H:%M")], start_date=FAKE_NOW.date().isoformat(),
+    )
+
+    body = _list_schedules(client, user["token"], child["id"]).get_json()
+    occ = body["schedules"][0]["occurrences"][0]
+    assert occ["state"] == "due"
+    assert occ["can_act"] is True
+
+
+def test_rejected_early_administer_creates_zero_medication_logs(client, monkeypatch):
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    schedule_id = _create_schedule(client, user["token"], child["id"], times_of_day=["20:00"]).get_json()["id"]
+
+    resp = _act(client, user["token"], child["id"], schedule_id, _occ_key(FAKE_NOW.date(), "20:00"), "administer")
+    assert resp.status_code == 400
+    assert MedicationLog.query.filter_by(child_id=child["id"]).count() == 0
+
+
+def test_rejected_early_administer_creates_zero_dose_actions(client, monkeypatch):
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    schedule_id = _create_schedule(client, user["token"], child["id"], times_of_day=["20:00"]).get_json()["id"]
+
+    resp = _act(client, user["token"], child["id"], schedule_id, _occ_key(FAKE_NOW.date(), "20:00"), "administer")
+    assert resp.status_code == 400
+    assert MedicationDoseAction.query.filter_by(schedule_id=schedule_id).count() == 0
+
+
+def test_rejected_early_administer_creates_zero_idempotency_rows_and_audit_events(client, monkeypatch):
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    schedule_id = _create_schedule(client, user["token"], child["id"], times_of_day=["20:00"]).get_json()["id"]
+
+    resp = _act(client, user["token"], child["id"], schedule_id, _occ_key(FAKE_NOW.date(), "20:00"), "administer", idem_key="early-1")
+    assert resp.status_code == 400
+    assert IdempotencyKey.query.filter_by(user_id=user["id"], endpoint="medication-schedule-administer").count() == 0
+    assert CaregiverAuditEvent.query.filter_by(child_id=child["id"], entity_type="medication_dose_administered").count() == 0
+    assert CaregiverAuditEvent.query.filter_by(child_id=child["id"], entity_type="medication_log").count() == 0
+
+    # Idempotency key nggak boleh "kepakai" -- retry pas okurensi udah
+    # actionable TETAP dievaluasi ulang, bukan ke-replay dari respons
+    # error yang gagal ini (pola sama persis test_reminders.py).
+    _freeze_now(monkeypatch, now=FAKE_NOW + timedelta(hours=11))  # 20:00 hari yang sama -- sekarang due
+    retry = _act(client, user["token"], child["id"], schedule_id, _occ_key(FAKE_NOW.date(), "20:00"), "administer", idem_key="early-1")
+    assert retry.status_code == 201
+
+
+def test_rejected_early_skip_creates_no_dose_action_or_audit_event(client, monkeypatch):
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    schedule_id = _create_schedule(client, user["token"], child["id"], times_of_day=["20:00"]).get_json()["id"]
+
+    resp = _act(client, user["token"], child["id"], schedule_id, _occ_key(FAKE_NOW.date(), "20:00"), "skip")
+    assert resp.status_code == 400
+    assert MedicationDoseAction.query.filter_by(schedule_id=schedule_id).count() == 0
+    assert CaregiverAuditEvent.query.filter_by(child_id=child["id"], entity_type="medication_dose_skipped").count() == 0
+
+
+def test_now_wib_is_sampled_exactly_once_per_action_request(client, monkeypatch):
+    user = register(client)
+    child = create_child(client, user["token"])
+    schedule_id = _create_schedule(client, user["token"], child["id"]).get_json()["id"]
+
+    calls = {"n": 0}
+
+    def counting_now():
+        calls["n"] += 1
+        return FAKE_NOW
+
+    monkeypatch.setattr(medication_schedule_routes_module, "now_wib", counting_now)
+    resp = _act(client, user["token"], child["id"], schedule_id, _occ_key(FAKE_NOW.date(), "08:00"), "administer")
+    assert resp.status_code == 201
+    assert calls["n"] == 1
+
+
+def test_offline_retry_after_occurrence_becomes_actionable_succeeds_exactly_once(client, monkeypatch):
+    """
+    Simulasi antrian offline: request PERTAMA dikirim saat okurensi
+    MASIH terlalu awal (ditolak, TIDAK ADA idempotency key kesimpen) --
+    "waktu" lalu maju sampai okurensi itu due, request DIULANG (retry
+    antrian offline) dengan idempotency key yang SAMA -- HARUS diterima
+    SEKALI, dan retry berikutnya lagi dengan key yang sama HARUS
+    ke-replay (bukan bikin baris kedua).
+    """
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    schedule_id = _create_schedule(client, user["token"], child["id"], times_of_day=["20:00"]).get_json()["id"]
+    occ_key = _occ_key(FAKE_NOW.date(), "20:00")
+
+    too_early = _act(client, user["token"], child["id"], schedule_id, occ_key, "administer", idem_key="offline-retry-1")
+    assert too_early.status_code == 400
+
+    _freeze_now(monkeypatch, now=FAKE_NOW + timedelta(hours=10, minutes=5))  # 20:05 -- due
+    synced = _act(client, user["token"], child["id"], schedule_id, occ_key, "administer", idem_key="offline-retry-1")
+    assert synced.status_code == 201
+    assert MedicationDoseAction.query.filter_by(schedule_id=schedule_id).count() == 1
+
+    replay = _act(client, user["token"], child["id"], schedule_id, occ_key, "administer", idem_key="offline-retry-1")
+    assert replay.status_code == 201
+    assert replay.get_json()["id"] == synced.get_json()["id"]
+    assert MedicationDoseAction.query.filter_by(schedule_id=schedule_id).count() == 1
+
+
+def test_concurrent_conflict_protection_still_works_within_actionable_window(client, monkeypatch):
+    """Regresi: penambahan cek actionability TIDAK PERNAH melemahkan sumbu konflik occurrence-sama/key-beda yang sudah ada."""
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    schedule_id = _create_schedule(client, user["token"], child["id"]).get_json()["id"]
+    occ_key = _occ_key(FAKE_NOW.date(), "08:00")
+
+    first = _act(client, user["token"], child["id"], schedule_id, occ_key, "administer", idem_key="conflict-key-a")
+    assert first.status_code == 201
+    second = _act(client, user["token"], child["id"], schedule_id, occ_key, "administer", idem_key="conflict-key-b")
+    assert second.status_code == 409
+    assert MedicationDoseAction.query.filter_by(schedule_id=schedule_id).count() == 1
+
+
+# --------------------------------------------------------------------------
 # 6. Jadwal nonaktif.
 # --------------------------------------------------------------------------
 
@@ -640,10 +856,14 @@ def test_idempotency_key_reused_with_different_occurrence_returns_conflict(clien
     _freeze_now(monkeypatch)
     user = register(client)
     child = create_child(client, user["token"])
-    schedule_id = _create_schedule(client, user["token"], child["id"], times_of_day=["08:00", "20:00"]).get_json()["id"]
+    # Kedua jam sengaja dipilih AKTIF (boleh diaksi) pada FAKE_NOW=10:00
+    # -- "09:45" tepat di batas 15 menit due, bukan jam yang masih
+    # upcoming, biar test ini murni nguji sumbu idempotency-key-beda-
+    # occurrence, bukan ketimpa pengecekan kelayakan momen.
+    schedule_id = _create_schedule(client, user["token"], child["id"], times_of_day=["08:00", "09:45"]).get_json()["id"]
 
     key1 = _occ_key(FAKE_NOW.date(), "08:00")
-    key2 = _occ_key(FAKE_NOW.date(), "20:00")
+    key2 = _occ_key(FAKE_NOW.date(), "09:45")
     first = _act(client, user["token"], child["id"], schedule_id, key1, "administer", idem_key="shared-key")
     assert first.status_code == 201
     second = _act(client, user["token"], child["id"], schedule_id, key2, "administer", idem_key="shared-key")

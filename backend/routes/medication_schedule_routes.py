@@ -29,9 +29,9 @@ from utils.auth import get_current_user_id
 from utils.idempotency import CONFLICT_MESSAGE, compute_fingerprint, idempotent_create
 from utils.medication_schedule_engine import (
     DOSE_UNITS, ScheduleValidationError, adherence_percentage, compute_adherence,
-    compute_schedule_occurrences, next_actionable_occurrence_at, occurrence_key_for,
-    parse_occurrence_key, validate_date_range, validate_dose, validate_instructions,
-    validate_medication_name, validate_times_of_day, valid_occurrence_range,
+    compute_schedule_occurrences, is_occurrence_actionable, next_actionable_occurrence_at,
+    occurrence_key_for, parse_occurrence_key, validate_date_range, validate_dose,
+    validate_instructions, validate_medication_name, validate_times_of_day, valid_occurrence_range,
 )
 from utils.timezone_utils import now_wib
 
@@ -42,6 +42,7 @@ NO_EDIT_PERMISSION_MESSAGE = "Anda tidak punya izin untuk mengubah jadwal obat i
 NO_DELETE_PERMISSION_MESSAGE = "Anda tidak punya izin untuk menghapus jadwal obat ini."
 SCHEDULE_NOT_FOUND_MESSAGE = "Jadwal obat tidak ditemukan"
 OUT_OF_RANGE_MESSAGE = "Dosis ini di luar jangkauan yang bisa diaksi"
+TOO_EARLY_MESSAGE = "Dosis ini belum bisa ditandai sekarang — masih terlalu awal dari jadwalnya."
 
 ADHERENCE_PERIODS = {"7d": 7, "30d": 30}
 
@@ -118,10 +119,20 @@ def _capabilities(role, created_by_user_id, user_id):
     }
 
 
-def _occurrence_to_json(o, can_act_schedule, occ_range):
+def _occurrence_to_json(o, can_act_schedule, occ_range, now):
+    """
+    `can_act` -- OTORITATIF dari backend, digabung dari role/kepemilikan
+    (`can_act_schedule`), kelayakan TANGGAL (`occ_range`, dicek
+    terhadap `valid_occurrence_range()` yang SAMA PERSIS dipakai
+    `_act_on_occurrence`), DAN kelayakan MOMEN/jam
+    (`is_occurrence_actionable()` -- SATU sumber kebenaran yang sama
+    juga dipakai endpoint aksi buat menolak/menerima). Frontend TIDAK
+    PERNAH menghitung ulang salah satu dari tiga ini sendiri.
+    """
     occ_at = o["occurrence_at"]
     date_eligible = occ_range is not None and occ_range[0] <= occ_at <= occ_range[1]
-    can_act = bool(can_act_schedule) and date_eligible and o["status"] is None
+    time_eligible = is_occurrence_actionable(occ_at, now, o["status"])
+    can_act = bool(can_act_schedule) and date_eligible and time_eligible
     return {
         "occurrence_key": o["occurrence_key"],
         "occurrence_at": o["occurrence_at"].isoformat() + "+07:00",
@@ -190,7 +201,7 @@ def list_medication_schedules(child_id):
             **s.to_dict(),
             **caps,
             "next_occurrence_at": (next_at.isoformat() + "+07:00") if next_at else None,
-            "occurrences": [_occurrence_to_json(o, caps["can_act"], occ_range) for o in occurrences],
+            "occurrences": [_occurrence_to_json(o, caps["can_act"], occ_range, now) for o in occurrences],
         })
 
     next_upcoming_at = min(next_upcoming_candidates) if next_upcoming_candidates else None
@@ -380,13 +391,31 @@ def _act_on_occurrence(child_id, schedule_id, occurrence_key, status, endpoint_n
     if occurrence_at.strftime("%H:%M") not in (schedule.times_of_day or []):
         return jsonify({"error": OUT_OF_RANGE_MESSAGE}), 400
 
-    today = now_wib().date()
+    # SATU panggilan now_wib() buat SELURUH request ini -- dipakai ulang
+    # buat `today`, validasi kelayakan momen (di bawah), DAN `acted_at`
+    # -- requirement review: cukup 1 pembacaan jam sistem per request,
+    # supaya nggak ada celah 2 bacaan yang beda dalam request yang sama
+    # (mis. lolos cek kelayakan lalu acted_at kebetulan kepotong ke sisi
+    # lain ambang 15 menit).
+    now = now_wib()
+    today = now.date()
     occ_range = valid_occurrence_range(schedule, today)
     if occ_range is None:
         return jsonify({"error": OUT_OF_RANGE_MESSAGE}), 400
     earliest, latest = occ_range
     if not (earliest <= occurrence_at <= latest):
         return jsonify({"error": OUT_OF_RANGE_MESSAGE}), 400
+
+    # Kelayakan MOMEN (jam) -- SATU sumber kebenaran yang sama dipakai
+    # field `can_act` di respons list (lihat _occurrence_to_json di
+    # atas, is_occurrence_actionable() di utils/medication_schedule_engine.py).
+    # Okurensi yang masih "upcoming" (>15 menit lagi) TIDAK PERNAH boleh
+    # diaksi lebih awal walau tanggalnya sendiri sudah sah (defect
+    # review: dosis 20:00 nggak boleh ditandai jam 08:00 di hari yang
+    # sama). Ditolak SEBELUM membuat MedicationLog/MedicationDoseAction/
+    # IdempotencyKey/audit event APA PUN.
+    if not is_occurrence_actionable(occurrence_at, now, None):
+        return jsonify({"error": TOO_EARLY_MESSAGE}), 400
 
     client_request_id = request.headers.get("X-Idempotency-Key")
     fingerprint = compute_fingerprint({
@@ -424,7 +453,7 @@ def _act_on_occurrence(child_id, schedule_id, occurrence_key, status, endpoint_n
     if conflict:
         return conflict
 
-    acted_at = now_wib()
+    acted_at = now
     medication_log_id = None
 
     if status == "administered":

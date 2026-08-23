@@ -16,6 +16,7 @@ from utils.medication_schedule_engine import (
     adherence_percentage,
     compute_adherence,
     compute_schedule_occurrences,
+    is_occurrence_actionable,
     next_actionable_occurrence_at,
     occurrence_key_for,
     parse_occurrence_key,
@@ -188,6 +189,48 @@ def test_occurrences_multiplied_by_times_per_day():
     occs = compute_schedule_occurrences(schedule, {}, TODAY, datetime(2026, 8, 23, 10, 0, 0))
     assert len(occs) == 3
     assert [o["occurrence_key"] for o in occs] == ["2026-08-23T06:00", "2026-08-23T12:00", "2026-08-23T18:00"]
+
+
+# --------------------------------------------------------------------------
+# is_occurrence_actionable() -- Defect 1 review (Agustus 2026): okurensi
+# yang MASIH "upcoming" (>15 menit lagi) TIDAK PERNAH actionable, walau
+# tanggal/jadwalnya sendiri sah hari ini. Murni reuse ambang
+# `compute_occurrence_state()` yang sama (bukan angka ajaib baru).
+# --------------------------------------------------------------------------
+
+NOW = datetime(2026, 8, 23, 10, 0, 0)
+
+
+def test_more_than_15_minutes_before_is_not_actionable():
+    occ_at = NOW + timedelta(minutes=16)
+    assert is_occurrence_actionable(occ_at, NOW, None) is False
+
+
+def test_exactly_15_minutes_before_is_actionable():
+    occ_at = NOW + timedelta(minutes=15)
+    assert is_occurrence_actionable(occ_at, NOW, None) is True
+
+
+def test_exactly_at_scheduled_time_is_actionable():
+    assert is_occurrence_actionable(NOW, NOW, None) is True
+
+
+def test_overdue_is_actionable():
+    occ_at = NOW - timedelta(hours=5)
+    assert is_occurrence_actionable(occ_at, NOW, None) is True
+
+
+def test_far_in_the_future_same_day_is_not_actionable():
+    """Defect 1 -- dosis 20:00 TIDAK PERNAH actionable jam 08:00 hari yang sama."""
+    occ_at = datetime(2026, 8, 23, 20, 0, 0)
+    assert is_occurrence_actionable(occ_at, NOW, None) is False
+
+
+@pytest.mark.parametrize("resolved_status", ["administered", "skipped"])
+def test_resolved_occurrence_is_never_actionable_regardless_of_time(resolved_status):
+    # Bahkan okurensi yang jauh di masa lalu (overdue) -- begitu resolved, TETAP TIDAK actionable.
+    occ_at = NOW - timedelta(hours=5)
+    assert is_occurrence_actionable(occ_at, NOW, resolved_status) is False
 
 
 # --------------------------------------------------------------------------
