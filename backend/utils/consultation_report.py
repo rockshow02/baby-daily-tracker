@@ -111,6 +111,17 @@ QUESTIONS_MAX_LEN = 1000
 NOTE_MAX_LEN = 1000
 MAX_RANGE_DAYS = 90
 
+# Batas ukuran body request KHUSUS endpoint konsultasi -- jauh lebih
+# ketat dari MAX_CONTENT_LENGTH global aplikasi (6MB, lihat config.py,
+# dilonggarkan buat upload foto). Body endpoint ini SEHARUSNYA cuma
+# berisi <=16 kode section pendek, metadata periode, dan 2 field teks
+# yang sudah dibatasi panjangnya sendiri (QUESTIONS_MAX_LEN/NOTE_MAX_LEN)
+# -- 20KB SUDAH sangat longgar buat itu. Dicek SEDINI mungkin (lewat
+# `Content-Length`, SEBELUM body di-parse JSON ataupun query database
+# apa pun dijalankan) di routes/doctor_consultation_routes.py, biar
+# body raksasa nggak nyeret CPU parsing/laporan/render PDF sia-sia.
+MAX_CONSULTATION_BODY_BYTES = 20_000
+
 DISCLAIMER = (
     "Laporan ini dibuat dari catatan yang dimasukkan oleh caregiver dan bukan "
     "diagnosis atau pengganti konsultasi medis profesional."

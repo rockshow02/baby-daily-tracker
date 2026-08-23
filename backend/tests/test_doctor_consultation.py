@@ -621,3 +621,55 @@ def test_existing_doctor_visit_crud_still_works(client, monkeypatch):
     listing = client.get(f"/api/children/{child['id']}/doctor-visits", headers=auth_headers(user["token"]))
     assert listing.status_code == 200
     assert len(listing.get_json()) == 1
+
+
+# --------------------------------------------------------------------------
+# 10. Batas ukuran body khusus endpoint konsultasi (bug review Agustus 2026).
+# --------------------------------------------------------------------------
+
+
+def test_oversized_consultation_body_is_rejected_before_report_generation(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    # Field asing yang GEDE BANGET -- di luar 4 field yang dikenal, jadi
+    # nggak pernah dipakai buat generate laporan apa pun, TAPI body-nya
+    # sendiri harus tetap ditolak SEBELUM sempat coba diparse/dipakai.
+    huge_body = {"period": {"preset": "7d"}, "padding": "x" * 30_000}
+    resp = client.post(
+        f"/api/children/{child['id']}/doctor-consultation/preview",
+        json=huge_body, headers=auth_headers(user["token"]),
+    )
+    assert resp.status_code == 413
+
+
+def test_body_within_normal_bounds_is_accepted(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    resp = _preview(
+        client, user["token"], child["id"],
+        sections=list(SENSITIVE_SECTIONS) + ["feeding", "sleep", "diaper", "growth"],
+        questions="x" * 1000, note="y" * 1000,
+    )
+    assert resp.status_code == 200
+
+
+def test_unexpected_top_level_fields_are_silently_ignored_consistent_with_other_endpoints(client, monkeypatch):
+    """
+    Kebijakan yang SENGAJA dipilih (didokumentasikan di
+    backend/docs/DOCTOR_CONSULTATION.md): field top-level tak dikenal
+    diabaikan diam-diam, KONSISTEN sama SELURUH endpoint lain di app ini
+    (mis. routes/health_routes.py) yang juga nggak pernah menolak key
+    request asing -- bukan kelalaian, keputusan sadar biar nggak ada
+    kebijakan validasi yang beda sendiri cuma di endpoint ini.
+    """
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    resp = client.post(
+        f"/api/children/{child['id']}/doctor-consultation/preview",
+        json={"period": {"preset": "7d"}, "unexpected_field": "should be ignored, not rejected"},
+        headers=auth_headers(user["token"]),
+    )
+    assert resp.status_code == 200

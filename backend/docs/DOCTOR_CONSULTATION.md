@@ -101,6 +101,91 @@ yang sudah ada (daftar obat/sakit/kunjungan dokter); yang dibatasi CUMA
 sendiri, dan mengunduh PDF. Endpoint PDF menegakkan ini SERVER-SIDE
 (403 kalau `can_export` false) — tombol frontend cuma UI hint.
 
+### Kapabilitas frontend — least-privilege sebelum ada respons (bug review Agustus 2026)
+
+**Root cause defect (diperbaiki):** `DoctorConsultationScreen.jsx` versi
+awal default-kan `canAddNotes`/`canExport`/`canRecordVisit` ke `true`
+SEBELUM preview pertama pernah berhasil (`report?.capabilities ? ... :
+true`) — Viewer sempat melihat field pertanyaan/catatan (dan bisa
+mengetik ke situ) sebelum backend pernah bilang APA yang boleh
+dilakukan. Backend tetap menolak (403) kalau isinya beneran dikirim,
+TAPI kontrol frontend-nya sendiri salah nampilin privilege yang belum
+tentu ada.
+
+**Perbaikan:** ketiga capability itu SEKARANG default `false` sampai
+ada respons preview yang BERHASIL DAN masih jadi snapshot aktif (lihat
+`activeSnapshot` di bawah) — TIDAK PERNAH optimis. Konsekuensi UX yang
+disengaja: Owner/Editor JUGA baru melihat field pertanyaan/catatan &
+tombol Unduh PDF/Catat Hasil Kunjungan SETELAH preview pertama mereka
+berhasil, bukan langsung dari awal — trade-off yang dipilih SENGAJA
+(opsi 3 dari kebijakan yang direview) karena tidak butuh mengubah
+kontrak props `HealthScreen.jsx`→`DoctorConsultationScreen.jsx` (tidak
+melebar ke refactor yang tidak terkait) dan lebih aman daripada
+kemungkinan Viewer sempat lihat kontrol privileged walau sebentar.
+Kegagalan preview (network error ATAUPUN 403) TIDAK PERNAH mengubah
+`activeSnapshot` yang sudah ada — kapabilitas yang sudah diketahui
+sebelumnya TETAP dipertahankan, tidak "naik" ataupun "turun" gara-gara
+1 percobaan gagal.
+
+### Konsistensi preview ↔ PDF — snapshot immutable (bug review Agustus 2026)
+
+**Root cause defect (diperbaiki):** tombol Unduh PDF memanggil
+`buildPayload()` ULANG dari state form TERKINI, sedangkan konfirmasi
+privasi membaca `report.sensitive_sections_included` dari preview
+LAMA — kalau user memilih section sensitif SETELAH preview pertama
+(tanpa preview ulang), PDF yang benar-benar terkirim ke server bisa
+memuat section yang TIDAK PERNAH direview ataupun dikonfirmasi
+privasinya.
+
+**Perbaikan:** `activeSnapshot` (state `{payload, report}`) adalah
+SATU-SATUNYA sumber kebenaran buat export — payload baru (`sections`
+terurut deterministik ngikutin urutan tetap, BUKAN Set/array yang bisa
+terus dimutasi) dan hasil preview-nya disimpan BERPASANGAN dan ATOMIK
+CUMA kalau respons itu masih yang TERBARU (lihat `requestSeqRef`, buat
+race out-of-order) DAN tidak ada edit yang terjadi SELAGI request itu
+masih terbang (lihat `editCounterRef`, ref BUKAN state React, biar
+nggak kena masalah closure basi). Perubahan input APA PUN setelah
+snapshot ada (periode/tanggal kustom/section/pertanyaan/catatan)
+langsung menandainya `stale` — tombol Unduh PDF & Catat Hasil Kunjungan
+disembunyikan, pesan `Pilihan laporan berubah. Buat pratinjau ulang
+sebelum mengunduh PDF.` ditampilkan, konfirmasi privasi yang lagi
+kebuka otomatis dibatalkan (bukan dimutasi diam-diam). `handleDownload`
+mengirim `activeSnapshot.payload` APA ADANYA — TIDAK PERNAH membangun
+ulang payload dari form. Konfirmasi privasi membaca
+`activeSnapshot.report.sensitive_sections_included` (bukan state form
+saat ini ataupun laporan lain manapun) dan menyebutkan LABEL section
+sensitif yang beneran mau diekspor. Teks pertanyaan/catatan tetap
+CUMA hidup di state React komponen ini (tidak pernah localStorage/
+sessionStorage/IndexedDB/URL/log) dan lenyap otomatis begitu komponen
+unmount (Health screen membungkusnya dengan render kondisional, bukan
+`display:none`) ATAUPUN begitu `child` yang aktif berganti (efek
+terpisah yang membersihkan snapshot+state transien+membatalkan request
+yang mungkin masih terbang buat anak lama).
+
+## Request validation & size limits
+
+Body endpoint konsultasi SEHARUSNYA kecil (≤16 kode section pendek,
+metadata periode, dan 2 field teks yang masing-masing sudah dibatasi
+1000 karakter) — jauh lebih kecil dari `MAX_CONTENT_LENGTH` global
+aplikasi (6MB, `config.py`, dilonggarkan buat upload foto). Endpoint
+ini menambahkan batas KHUSUS yang lebih ketat:
+`utils/consultation_report.py:MAX_CONSULTATION_BODY_BYTES = 20_000`
+(20KB), dicek lewat header `Content-Length` **sebelum** body di-parse
+JSON — apalagi sebelum query database/render PDF apa pun dijalankan —
+balas `413` kalau dilampaui (lihat
+`routes/doctor_consultation_routes.py:_parse_request_payload`).
+`MAX_CONTENT_LENGTH` global tetap jadi jaring pengaman kalau
+`Content-Length` kebetulan tidak ada (mis. body chunked).
+
+**Field top-level tak dikenal SENGAJA diabaikan diam-diam** (dibaca
+lewat `data.get(...)`, TIDAK divalidasi allowlist-nya) — ini KONSISTEN
+dengan konvensi SELURUH endpoint lain di app ini (`health_routes.py`,
+`reminder_routes.py`, dst — semuanya baca field yang dikenal satu-satu,
+TIDAK ADA yang menolak key request asing). Menambahkan kebijakan
+"tolak field asing" cuma di endpoint ini akan jadi perilaku validasi
+yang tidak konsisten/mengejutkan dibanding endpoint lain — keputusan
+sadar untuk TIDAK melakukannya, bukan kelalaian.
+
 ## Date & timezone policy
 
 Semua batas tanggal WIB (`Asia/Jakarta`), lewat `utils/timezone_utils.py`
@@ -249,6 +334,14 @@ tambahan.
       offline cache) tidak terpengaruh.
 - [ ] Klik "Unduh PDF" berkali-kali cepat TIDAK memicu unduhan ganda
       (tombol disabled selama proses).
+- [ ] Setelah preview berhasil, ubah pilihan section (mis. centang
+      "Riwayat Obat") TANPA preview ulang — tombol Unduh PDF & Catat
+      Hasil Kunjungan hilang, muncul pesan "Pilihan laporan berubah.
+      Buat pratinjau ulang sebelum mengunduh PDF."
+- [ ] Sebelum preview pertama berhasil, Viewer/Owner/Editor SAMA-SAMA
+      belum melihat field pertanyaan/catatan ataupun tombol Unduh
+      PDF/Catat Hasil Kunjungan (least-privilege default) — Owner/Editor
+      baru melihatnya SETELAH preview pertama mereka berhasil.
 
 ## Deployment steps
 

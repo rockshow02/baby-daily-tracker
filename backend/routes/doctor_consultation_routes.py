@@ -30,6 +30,7 @@ from utils.auth import get_current_user_id
 from utils.consultation_pdf import render_consultation_pdf
 from utils.consultation_report import (
     ConsultationValidationError,
+    MAX_CONSULTATION_BODY_BYTES,
     SENSITIVE_SECTIONS,
     build_consultation_report,
     resolve_consultation_period,
@@ -71,7 +72,29 @@ def _parse_request_payload(role, capabilities):
     additional_note -- SEKALI, dipakai SAMA PERSIS oleh endpoint preview
     maupun pdf (1 sumber kebenaran validasi). Balikin
     (period, sections, questions_text, note_text, error_response_atau_None).
+
+    Field top-level di luar 4 yang dikenal (`period`/`sections`/
+    `questions`/`additional_note`) SENGAJA diabaikan diam-diam (dibaca
+    lewat `data.get(...)`, TIDAK PERNAH divalidasi allowlist-nya) --
+    KONSISTEN sama konvensi SELURUH endpoint lain di app ini (mis.
+    routes/health_routes.py, routes/reminder_routes.py: semuanya baca
+    field yang dikenal satu-satu lewat `.get()`, TIDAK ADA yang menolak
+    key request tak dikenal). Menambahkan kebijakan "tolak field asing"
+    CUMA di endpoint ini bakal jadi perilaku validasi yang nggak
+    konsisten/mengejutkan dibanding endpoint lain, jadi SENGAJA tidak
+    ditambahkan di sini juga.
     """
+    # Cek ukuran body SEDINI mungkin -- dari header `Content-Length`
+    # (kalau ada, kasus umum buat POST JSON dari fetch()), SEBELUM body
+    # di-parse JSON apalagi query database/render PDF apa pun
+    # dijalankan. `MAX_CONTENT_LENGTH` global aplikasi (config.py, 6MB)
+    # tetap jadi jaring pengaman kalau header ini kebetulan nggak ada
+    # (mis. body chunked) -- batas di sini SENGAJA jauh lebih ketat,
+    # khusus buat endpoint yang body-nya SEHARUSNYA kecil (lihat
+    # utils/consultation_report.py:MAX_CONSULTATION_BODY_BYTES).
+    if request.content_length is not None and request.content_length > MAX_CONSULTATION_BODY_BYTES:
+        return None, None, None, None, (jsonify({"error": "Ukuran permintaan terlalu besar"}), 413)
+
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return None, None, None, None, (jsonify({"error": "Format data tidak valid"}), 400)
