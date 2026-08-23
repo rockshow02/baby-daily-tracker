@@ -213,6 +213,17 @@ def _render_activity_mood(section, styles):
 
 
 def _render_growth(section, styles):
+    """
+    3 kelompok (bug review: preview sempat nggak nampilin pengukuran
+    SEBELUMNYA & perubahan lingkar kepala sama sekali -- PDF ini
+    ternyata punya celah yang SAMA, diperbaiki bareng biar kesetaraan
+    LOGIS preview<->PDF tetap terjaga, lihat
+    frontend/src/components/consultation/sectionRenderers.jsx:GrowthSection):
+    pengukuran terakhir, pengukuran SEBELUMNYA (CUMA kalau ada), lalu
+    perubahan (CUMA kalau ada pengukuran sebelumnya buat dibandingkan).
+    `_fmt_num` cuma balikin "-" buat `None` SUNGGUHAN (BUKAN 0, BUKAN
+    falsy) -- nilai 0 literal & delta negatif tetap tampil apa adanya.
+    """
     flows = []
     latest, previous = section["latest"], section["previous"]
     rows = [
@@ -220,11 +231,27 @@ def _render_growth(section, styles):
         ("Berat terakhir (kg)", _fmt_num(latest["weight_kg"]) if latest else "-"),
         ("Tinggi terakhir (cm)", _fmt_num(latest["height_cm"]) if latest else "-"),
         ("Lingkar kepala terakhir (cm)", _fmt_num(latest["head_circumference_cm"]) if latest else "-"),
-        ("Perubahan berat sejak pengukuran sebelumnya (kg)", _fmt_num(section["weight_change_kg"])),
-        ("Perubahan tinggi sejak pengukuran sebelumnya (cm)", _fmt_num(section["height_change_cm"])),
         ("Hari sejak pengukuran terakhir", _fmt_num(section["days_since_latest_measurement"])),
     ]
     flows.append(_kv_table(rows, styles))
+    if previous:
+        flows.append(Spacer(1, 6))
+        flows.append(Paragraph("Pengukuran sebelumnya:", styles.normal))
+        previous_rows = [
+            ("Tanggal", previous["measured_date"]),
+            ("Berat (kg)", _fmt_num(previous["weight_kg"])),
+            ("Tinggi (cm)", _fmt_num(previous["height_cm"])),
+            ("Lingkar kepala (cm)", _fmt_num(previous["head_circumference_cm"])),
+        ]
+        flows.append(_kv_table(previous_rows, styles))
+        flows.append(Spacer(1, 6))
+        flows.append(Paragraph("Perubahan sejak pengukuran sebelumnya:", styles.normal))
+        change_rows = [
+            ("Perubahan berat (kg)", _fmt_num(section["weight_change_kg"])),
+            ("Perubahan tinggi (cm)", _fmt_num(section["height_change_cm"])),
+            ("Perubahan lingkar kepala (cm)", _fmt_num(section["head_circumference_change_cm"])),
+        ]
+        flows.append(_kv_table(change_rows, styles))
     measurements = section["measurements_in_period"]
     if measurements:
         flows.append(Spacer(1, 6))

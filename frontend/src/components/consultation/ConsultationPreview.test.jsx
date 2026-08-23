@@ -183,20 +183,122 @@ describe("ConsultationPreview — activity & mood", () => {
 });
 
 describe("ConsultationPreview — growth", () => {
-  it("shows latest and previous measurements", () => {
+  const FULL_GROWTH = {
+    latest: { measured_date: "2026-08-20", weight_kg: 8.2, height_cm: 68, head_circumference_cm: 44 },
+    previous: { measured_date: "2026-07-20", weight_kg: 7.8, height_cm: 66, head_circumference_cm: 43 },
+    weight_change_kg: 0.4, height_change_cm: 2, head_circumference_change_cm: 1,
+    days_since_latest_measurement: 3,
+    // SENGAJA tanggal & nilai BEDA dari `latest`/`previous` di atas
+    // (bukan duplikat) biar assertion `getByText` di test-test bawah
+    // nggak ambigu.
+    measurements_in_period: [{ measured_date: "2026-08-15", weight_kg: 8.1, height_cm: 67.5, head_circumference_cm: 43.8 }],
+    total_count_in_period: 1,
+    truncated: false,
+  };
+
+  it("shows all latest measurement values (date/weight/height/head circumference/days since)", () => {
+    render(<ConsultationPreview report={makeReport({ growth: FULL_GROWTH })} />);
+    expect(screen.getByText("Pengukuran terakhir")).toBeInTheDocument();
+    expect(screen.getByText("20 Agu 2026")).toBeInTheDocument();
+    expect(screen.getByText("8,2 kg")).toBeInTheDocument();
+    expect(screen.getByText("68,0 cm")).toBeInTheDocument();
+    expect(screen.getByText("44,0 cm")).toBeInTheDocument();
+    expect(screen.getByText("3 hari")).toBeInTheDocument();
+  });
+
+  it("shows the previous-measurement heading and date when previous exists", () => {
+    render(<ConsultationPreview report={makeReport({ growth: FULL_GROWTH })} />);
+    expect(screen.getByText("Pengukuran sebelumnya")).toBeInTheDocument();
+    expect(screen.getByText("20 Jul 2026")).toBeInTheDocument();
+  });
+
+  it("shows the previous weight, height, and head circumference", () => {
+    render(<ConsultationPreview report={makeReport({ growth: FULL_GROWTH })} />);
+    expect(screen.getByText("7,8 kg")).toBeInTheDocument();
+    expect(screen.getByText("66,0 cm")).toBeInTheDocument();
+    expect(screen.getByText("43,0 cm")).toBeInTheDocument();
+  });
+
+  it("shows the weight, height, and head-circumference change with readable labels", () => {
+    render(<ConsultationPreview report={makeReport({ growth: FULL_GROWTH })} />);
+    expect(screen.getByText("Perubahan sejak pengukuran sebelumnya")).toBeInTheDocument();
+    expect(screen.getByText("Perubahan berat")).toBeInTheDocument();
+    expect(screen.getByText("Perubahan tinggi")).toBeInTheDocument();
+    expect(screen.getByText("Perubahan lingkar kepala")).toBeInTheDocument();
+    expect(screen.getByText("0,4 kg")).toBeInTheDocument();
+    expect(screen.getByText("2,0 cm")).toBeInTheDocument();
+    expect(screen.getByText("1,0 cm")).toBeInTheDocument();
+  });
+
+  it("shows no previous-measurement or change group when previous is absent", () => {
     render(<ConsultationPreview report={makeReport({
       growth: {
         latest: { measured_date: "2026-08-20", weight_kg: 8.2, height_cm: 68, head_circumference_cm: 44 },
-        previous: { measured_date: "2026-07-20", weight_kg: 7.8, height_cm: 66, head_circumference_cm: 43 },
-        weight_change_kg: 0.4, height_change_cm: 2, head_circumference_change_cm: 1,
-        days_since_latest_measurement: 3,
-        measurements_in_period: [{ measured_date: "2026-08-20", weight_kg: 8.2, height_cm: 68, head_circumference_cm: 44 }],
-        total_count_in_period: 1,
-        truncated: false,
+        previous: null, weight_change_kg: null, height_change_cm: null, head_circumference_change_cm: null,
+        days_since_latest_measurement: 3, measurements_in_period: [], total_count_in_period: 0, truncated: false,
       },
     })} />);
-    expect(screen.getByText("8,2 kg")).toBeInTheDocument();
-    expect(screen.getByText("Tanggal pengukuran terakhir")).toBeInTheDocument();
+    expect(screen.queryByText("Pengukuran sebelumnya")).not.toBeInTheDocument();
+    expect(screen.queryByText("Perubahan sejak pengukuran sebelumnya")).not.toBeInTheDocument();
+  });
+
+  it("shows available previous values and a dash for missing individual previous fields, without hiding the whole group", () => {
+    render(<ConsultationPreview report={makeReport({
+      growth: {
+        latest: { measured_date: "2026-08-20", weight_kg: 8.2, height_cm: 68, head_circumference_cm: 44 },
+        // Pengukuran sebelumnya CUMA punya berat -- tinggi & lingkar
+        // kepala nggak diisi caregiver waktu itu.
+        previous: { measured_date: "2026-07-20", weight_kg: 7.8, height_cm: null, head_circumference_cm: null },
+        weight_change_kg: 0.4, height_change_cm: null, head_circumference_change_cm: null,
+        days_since_latest_measurement: 3, measurements_in_period: [], total_count_in_period: 0, truncated: false,
+      },
+    })} />);
+    expect(screen.getByText("Pengukuran sebelumnya")).toBeInTheDocument();
+    expect(screen.getByText("20 Jul 2026")).toBeInTheDocument();
+    expect(screen.getByText("7,8 kg")).toBeInTheDocument();
+    // Delta berat TETAP ada (tersedia), tinggi/lingkar kepala jadi "—".
+    expect(screen.getByText("0,4 kg")).toBeInTheDocument();
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(3); // tinggi & lingkar kepala previous + 2 delta null
+  });
+
+  it("shows a dash for a null head-circumference change even when other deltas are available", () => {
+    render(<ConsultationPreview report={makeReport({
+      growth: {
+        latest: { measured_date: "2026-08-20", weight_kg: 8.2, height_cm: 68, head_circumference_cm: 44 },
+        previous: { measured_date: "2026-07-20", weight_kg: 7.8, height_cm: 66, head_circumference_cm: null },
+        weight_change_kg: 0.4, height_change_cm: 2, head_circumference_change_cm: null,
+        days_since_latest_measurement: 3, measurements_in_period: [], total_count_in_period: 0, truncated: false,
+      },
+    })} />);
+    const changeHeading = screen.getByText("Perubahan sejak pengukuran sebelumnya");
+    expect(changeHeading.closest("div")).toHaveTextContent("Perubahan lingkar kepala");
+    expect(screen.getByText("0,4 kg")).toBeInTheDocument();
+    expect(screen.getByText("2,0 cm")).toBeInTheDocument();
+  });
+
+  it("displays a literal zero change as a real zero, not as missing", () => {
+    render(<ConsultationPreview report={makeReport({
+      growth: {
+        latest: { measured_date: "2026-08-20", weight_kg: 8.2, height_cm: 68, head_circumference_cm: 44 },
+        previous: { measured_date: "2026-07-20", weight_kg: 8.2, height_cm: 68, head_circumference_cm: 44 },
+        weight_change_kg: 0, height_change_cm: 0, head_circumference_change_cm: 0,
+        days_since_latest_measurement: 3, measurements_in_period: [], total_count_in_period: 0, truncated: false,
+      },
+    })} />);
+    expect(screen.getAllByText("0,0 kg").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("0,0 cm").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("preserves the minus sign for a negative change", () => {
+    render(<ConsultationPreview report={makeReport({
+      growth: {
+        latest: { measured_date: "2026-08-20", weight_kg: 7.6, height_cm: 68, head_circumference_cm: 44 },
+        previous: { measured_date: "2026-07-20", weight_kg: 7.8, height_cm: 66, head_circumference_cm: 43 },
+        weight_change_kg: -0.2, height_change_cm: 2, head_circumference_change_cm: 1,
+        days_since_latest_measurement: 3, measurements_in_period: [], total_count_in_period: 0, truncated: false,
+      },
+    })} />);
+    expect(screen.getByText("-0,2 kg")).toBeInTheDocument();
   });
 
   it("labels a lifetime-latest measurement outside the period clearly", () => {
@@ -211,12 +313,51 @@ describe("ConsultationPreview — growth", () => {
       },
     })} />);
     expect(screen.getByText("Pengukuran terakhir yang tersedia")).toBeInTheDocument();
-    expect(screen.queryByText("Tanggal pengukuran terakhir")).not.toBeInTheDocument();
+    expect(screen.queryByText("Tanggal")).not.toBeInTheDocument();
   });
 
   it("shows the empty state when there is no measurement at all", () => {
     render(<ConsultationPreview report={makeReport({ growth: { latest: null, measurements_in_period: [] } })} />);
     expect(screen.getByText("Belum ada pengukuran pertumbuhan.")).toBeInTheDocument();
+  });
+
+  it("shows the in-period measurement list", () => {
+    render(<ConsultationPreview report={makeReport({ growth: FULL_GROWTH })} />);
+    expect(screen.getByText("Pengukuran pada periode ini")).toBeInTheDocument();
+  });
+
+  it("shows the truncation notice when the in-period list is truncated", () => {
+    render(<ConsultationPreview report={makeReport({
+      growth: {
+        ...FULL_GROWTH,
+        measurements_in_period: [{ measured_date: "2026-08-20", weight_kg: 8.2, height_cm: 68, head_circumference_cm: 44 }],
+        total_count_in_period: 5,
+        truncated: true,
+      },
+    })} />);
+    expect(screen.getByText("Menampilkan 1 dari 5 catatan terbaru pada periode ini.")).toBeInTheDocument();
+  });
+
+  it("does not leak technical field names or raw JSON", () => {
+    const { container } = render(<ConsultationPreview report={makeReport({ growth: FULL_GROWTH })} />);
+    expect(container.querySelector("pre")).toBeNull();
+    for (const key of [
+      "measured_date", "weight_kg", "height_cm", "head_circumference_cm",
+      "weight_change_kg", "days_since_latest_measurement", "total_count_in_period", '"truncated":',
+    ]) {
+      expect(container.textContent).not.toContain(key);
+    }
+  });
+
+  it("contains a malformed growth field (measurements_in_period not an array) without crashing sibling sections", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(<ConsultationPreview report={makeReport({
+      growth: { latest: { measured_date: "2026-08-20" }, previous: null, measurements_in_period: "not-an-array" },
+      feeding: { total_events: 3, avg_events_per_day: 0.4, by_type: { asi_langsung: 2, asi_perah: 1, sufor: 0, mpasi: 0 }, total_volume_ml: 0, events_with_volume: 0 },
+    })} />);
+    expect(screen.getByText("Bagian ini tidak dapat ditampilkan.")).toBeInTheDocument();
+    expect(screen.getByText("3 kali")).toBeInTheDocument();
+    spy.mockRestore();
   });
 });
 

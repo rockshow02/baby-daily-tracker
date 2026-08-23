@@ -311,6 +311,21 @@ koma (format Indonesia via `Intl.NumberFormat("id-ID", ...)`), durasi
 menit diformat jadi "X jam Y menit" yang bisa dibaca, nilai yang nggak
 ada SELALU jadi `—` (TIDAK PERNAH `null`/`undefined`/`NaN` literal).
 
+**Section `growth` — 3 kelompok** (bug review: preview & PDF sempat
+CUMA nampilin pengukuran TERAKHIR, diam-diam nge-drop pengukuran
+SEBELUMNYA dan perubahan lingkar kepala walau backend SUDAH ngirim
+keduanya): "Pengukuran terakhir" (tanggal/berat/tinggi/lingkar kepala/
+hari sejak pengukuran), "Pengukuran sebelumnya" (CUMA muncul kalau
+`previous` beneran ada — field individual yang kosong tetap tampil
+`—`, BUKAN nyembunyiin seluruh kelompok), lalu "Perubahan sejak
+pengukuran sebelumnya" (berat/tinggi/lingkar kepala — delta `null`
+jadi `—`, delta `0` tetap tampil "0,0" apa adanya, delta negatif tetap
+bertanda minus, TIDAK PERNAH dihitung ulang di frontend/PDF, TIDAK
+PERNAH diberi label "normal"/"lambat"/dst). PDF (`utils/consultation_pdf.py:_render_growth`)
+diperbaiki BARENGAN, kelompok yang sama, biar kesetaraan logis
+preview↔PDF tetap terjaga — lihat
+`backend/tests/test_consultation_pdf.py`.
+
 **Data parsial/kosong/terpotong**: field opsional yang cuma sebagian
 event punya nilai (mis. volume menyusui/memerah ASI) ditampilkan
 sebagai "Total volume yang tercatat" (BUKAN "Total volume", biar nggak

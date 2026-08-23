@@ -169,6 +169,15 @@ function ActivityMoodSection({ section }) {
   );
 }
 
+/**
+ * `formatWeightKg`/`formatLengthCm` SUDAH null-safe sendiri (balikin
+ * MISSING_VALUE kalau `null`/`undefined`) -- helper ini CUMA nge-pastiin
+ * pemanggil eksplisit soal itu di titik-titik yang butuh (previous/
+ * changes, field OPSIONAL yang backend boleh nggak isi walau
+ * measurement-nya sendiri ADA), TIDAK PERNAH nganggep nilai yang hilang
+ * sebagai nol -- lihat requirement review: delta/nilai individual yang
+ * `null` WAJIB tetap `—`, literal 0 WAJIB tetap tampil sebagai "0,0".
+ */
 function GrowthSection({ section, period }) {
   const latest = section?.latest || null;
   const previous = section?.previous || null;
@@ -180,17 +189,49 @@ function GrowthSection({ section, period }) {
   return (
     <div className="space-y-3">
       {latest && (
-        <SummaryGrid
-          rows={[
-            { label: latestOutsidePeriod ? "Pengukuran terakhir yang tersedia" : "Tanggal pengukuran terakhir", value: formatDateWIB(latest.measured_date) },
-            { label: "Berat terakhir", value: formatWeightKg(latest.weight_kg) },
-            { label: "Tinggi terakhir", value: formatLengthCm(latest.height_cm) },
-            { label: "Lingkar kepala terakhir", value: latest.head_circumference_cm != null ? formatLengthCm(latest.head_circumference_cm) : MISSING_VALUE },
-            previous ? { label: "Perubahan berat sejak pengukuran sebelumnya", value: section?.weight_change_kg != null ? formatWeightKg(section.weight_change_kg) : MISSING_VALUE } : null,
-            previous ? { label: "Perubahan tinggi sejak pengukuran sebelumnya", value: section?.height_change_cm != null ? formatLengthCm(section.height_change_cm) : MISSING_VALUE } : null,
-            { label: "Hari sejak pengukuran terakhir", value: section?.days_since_latest_measurement != null ? `${section.days_since_latest_measurement} hari` : MISSING_VALUE },
-          ]}
-        />
+        <div>
+          <h4 className="text-xs font-semibold text-ink-faint uppercase tracking-wider mb-1.5">Pengukuran terakhir</h4>
+          <SummaryGrid
+            rows={[
+              { label: latestOutsidePeriod ? "Pengukuran terakhir yang tersedia" : "Tanggal", value: formatDateWIB(latest.measured_date) },
+              { label: "Berat", value: formatWeightKg(latest.weight_kg) },
+              { label: "Tinggi", value: formatLengthCm(latest.height_cm) },
+              { label: "Lingkar kepala", value: formatLengthCm(latest.head_circumference_cm) },
+              { label: "Hari sejak pengukuran", value: section?.days_since_latest_measurement != null ? `${section.days_since_latest_measurement} hari` : MISSING_VALUE },
+            ]}
+          />
+        </div>
+      )}
+      {/* Pengukuran sebelumnya & perubahan CUMA ditampilkan kalau
+          `previous` beneran ADA -- bukan cuma di-skip diam-diam kalau
+          kosong (requirement: jangan sembunyikan section kosong tanpa
+          penjelasan), tapi di sini emang TIDAK ADA apa pun buat
+          dibandingkan sama sekali kalau nggak ada pengukuran sebelumnya,
+          jadi menampilkan grup kosong justru menyesatkan. */}
+      {previous && (
+        <div>
+          <h4 className="text-xs font-semibold text-ink-faint uppercase tracking-wider mb-1.5">Pengukuran sebelumnya</h4>
+          <SummaryGrid
+            rows={[
+              { label: "Tanggal", value: formatDateWIB(previous.measured_date) },
+              { label: "Berat", value: formatWeightKg(previous.weight_kg) },
+              { label: "Tinggi", value: formatLengthCm(previous.height_cm) },
+              { label: "Lingkar kepala", value: formatLengthCm(previous.head_circumference_cm) },
+            ]}
+          />
+        </div>
+      )}
+      {previous && (
+        <div>
+          <h4 className="text-xs font-semibold text-ink-faint uppercase tracking-wider mb-1.5">Perubahan sejak pengukuran sebelumnya</h4>
+          <SummaryGrid
+            rows={[
+              { label: "Perubahan berat", value: formatWeightKg(section?.weight_change_kg) },
+              { label: "Perubahan tinggi", value: formatLengthCm(section?.height_change_cm) },
+              { label: "Perubahan lingkar kepala", value: formatLengthCm(section?.head_circumference_change_cm) },
+            ]}
+          />
+        </div>
       )}
       {measurements.length > 0 ? (
         <div>
