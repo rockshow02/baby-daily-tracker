@@ -114,7 +114,19 @@ def _log_belongs_to_child(linked_log_type, linked_log_id, child_id):
     return db.session.query(model.id).filter_by(id=linked_log_id, child_id=child_id).first() is not None
 
 
-def _occurrence_to_json(o):
+def _occurrence_to_json(o, reminder_can_act, date_range):
+    """
+    `can_act`: OTORITATIF dari backend (bukan cuma role, TAPI JUGA
+    tanggal okurensi INI dicek terhadap `date_range` --
+    `valid_occurrence_date_range()` yang SAMA PERSIS dipakai
+    `_act_on_occurrence` buat validasi beneran, jadi frontend nggak
+    perlu -- dan nggak boleh -- ngitung ulang eligibility tanggal
+    sendiri pakai timezone browser. `date_range` `None` berarti TIDAK
+    ADA okurensi reminder ini yang bisa diaksi sama sekali sekarang.
+    """
+    occ_date = o["occurrence_at"].date()
+    date_eligible = date_range is not None and date_range[0] <= occ_date <= date_range[1]
+    can_act = bool(reminder_can_act) and date_eligible and o["status"] is None
     return {
         "occurrence_key": o["occurrence_key"],
         "occurrence_at": o["occurrence_at"].isoformat() + "+07:00",
@@ -125,6 +137,7 @@ def _occurrence_to_json(o):
         "acted_by_name": o["acted_by_name"],
         "linked_log_type": o["linked_log_type"],
         "linked_log_id": o["linked_log_id"],
+        "can_act": can_act,
     }
 
 
@@ -153,14 +166,25 @@ def list_reminders(child_id):
     for r in reminders:
         # Query dibatasi ke rentang lookback yang RELEVAN doang buat
         # reminder INI (bukan seluruh riwayat) -- lihat
-        # utils/reminder_engine.py:valid_occurrence_date_range().
-        earliest, _latest = valid_occurrence_date_range(r.scheduled_at, r.recurrence, today)
-        lookback_start_dt = datetime.combine(earliest, time.min)
-        actions = ReminderAction.query.filter(
-            ReminderAction.reminder_id == r.id,
-            ReminderAction.occurrence_at >= lookback_start_dt,
-        ).all()
-        actions_by_date = {a.occurrence_at.date(): a for a in actions}
+        # utils/reminder_engine.py:valid_occurrence_date_range(). `None`
+        # (reminder 'none' yang jadwalnya, ATAU reminder 'daily' yang
+        # tanggal mulainya, masih di masa depan) berarti TIDAK ADA
+        # okurensi/aksi yang mungkin ada buat reminder ini SAMA SEKALI
+        # sekarang (compute_reminder_occurrences/next_pending_occurrence_at
+        # dua-duanya nggak pernah konsultasi actions_by_date buat reminder
+        # yang belum mulai) -- lewati query ReminderAction sama sekali,
+        # bukan cuma "asal jangan crash".
+        date_range = valid_occurrence_date_range(r.scheduled_at, r.recurrence, today)
+        if date_range is None:
+            actions_by_date = {}
+        else:
+            earliest, _latest = date_range
+            lookback_start_dt = datetime.combine(earliest, time.min)
+            actions = ReminderAction.query.filter(
+                ReminderAction.reminder_id == r.id,
+                ReminderAction.occurrence_at >= lookback_start_dt,
+            ).all()
+            actions_by_date = {a.occurrence_at.date(): a for a in actions}
 
         occurrences = compute_reminder_occurrences(r, actions_by_date, today, now)
         next_at = next_pending_occurrence_at(r, actions_by_date, today)
@@ -173,13 +197,14 @@ def list_reminders(child_id):
         if next_at is not None:
             next_upcoming_candidates.append(next_at)
 
+        reminder_can_act = role in WRITE_ROLES
         reminder_dicts.append({
             **r.to_dict(),
             "can_edit": can_delete_record(role, r.created_by_user_id, user_id),
             "can_delete": can_delete_record(role, r.created_by_user_id, user_id),
-            "can_act": role in WRITE_ROLES,
+            "can_act": reminder_can_act,
             "next_occurrence_at": (next_at.isoformat() + "+07:00") if next_at else None,
-            "occurrences": [_occurrence_to_json(o) for o in occurrences],
+            "occurrences": [_occurrence_to_json(o, reminder_can_act, date_range) for o in occurrences],
         })
 
     next_upcoming_at = min(next_upcoming_candidates) if next_upcoming_candidates else None
@@ -353,7 +378,15 @@ def _act_on_occurrence(child_id, reminder_id, occurrence_key, status, endpoint_n
         return jsonify({"error": "Format occurrence_key tidak valid, harus YYYY-MM-DD"}), 400
 
     today = now_wib().date()
-    earliest, latest = valid_occurrence_date_range(reminder.scheduled_at, reminder.recurrence, today)
+    date_range = valid_occurrence_date_range(reminder.scheduled_at, reminder.recurrence, today)
+    # `None` = TIDAK ADA tanggal yang sah diaksi sama sekali right now
+    # (mis. reminder 'none' yang jadwalnya sendiri masih di masa depan,
+    # ATAU reminder 'daily' yang belum sampai tanggal mulainya) -- WAJIB
+    # ditolak SEBELUM unpacking, requirement review: "future one-time
+    # occurrence must not be acted on early".
+    if date_range is None:
+        return jsonify({"error": "Okurensi ini di luar jangkauan yang bisa diaksi"}), 400
+    earliest, latest = date_range
     if not (earliest <= occ_date <= latest):
         return jsonify({"error": "Okurensi ini di luar jangkauan yang bisa diaksi"}), 400
 

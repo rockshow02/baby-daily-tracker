@@ -86,17 +86,33 @@ def occurrence_datetime_for_date(scheduled_at, occ_date):
 def valid_occurrence_date_range(reminder_scheduled_at, recurrence, today):
     """
     (earliest_date, latest_date) inklusif — rentang tanggal yang SAH
-    diminta lewat endpoint complete/skip untuk reminder ini SEKARANG.
+    diminta lewat endpoint complete/skip untuk reminder ini SEKARANG, atau
+    `None` kalau TIDAK ADA tanggal yang sah sama sekali right now (dipilih
+    SENGAJA daripada balikin rentang "kebalik"/kosong ambigu semacam
+    `(besok, hari_ini)` — itu gampang kepakai salah sebagai rentang beneran
+    kalau pemanggil lupa nge-cek, jadi `None` yang eksplisit di sini WAJIB
+    dicek dulu sebelum dipakai, lihat routes/reminder_routes.py).
+
     TERPISAH dari occurrence yang DITAMPILKAN di daftar (fungsi
     `compute_reminder_occurrences` di bawah, yang cuma nunjukin SEBAGIAN
     buat UI) — endpoint aksi tetap boleh nerima occurrence_key historis
     APA PUN dalam batas ini, nggak melulu yang kebetulan lagi tampil di
-    halaman list saat itu. Okurensi MASA DEPAN (`> today`) maupun
-    SEBELUM reminder ini dibuat, ATAUPUN LEBIH LAMA dari
-    `DAILY_LOOKBACK_DAYS` selalu ditolak (bukan cuma disembunyikan dari
-    tampilan) — mencegah aksi di luar jangkauan historis yang wajar.
+    halaman list saat itu.
+
+    Okurensi MASA DEPAN (`> today`) — baik reminder 'none' yang jadwalnya
+    sendiri belum tiba, MAUPUN reminder 'daily' yang `start_date`-nya
+    sendiri belum tiba — SELALU ditolak (`None`), bukan cuma disembunyikan
+    dari tampilan (requirement review: "future one-time occurrence must
+    not be acted on early"). Okurensi SEBELUM reminder ini dibuat,
+    ATAUPUN LEBIH LAMA dari `DAILY_LOOKBACK_DAYS` (khusus 'daily') juga
+    selalu ditolak — mencegah aksi di luar jangkauan historis yang wajar.
     """
     start_date = reminder_scheduled_at.date()
+    if start_date > today:
+        # Jadwalnya sendiri (buat 'none') ATAU tanggal MULAI-nya (buat
+        # 'daily') belum tiba -- TIDAK ADA okurensi yang bisa diaksi sama
+        # sekali hari ini, apa pun occurrence_key yang dikirim.
+        return None
     if recurrence == "none":
         return start_date, start_date
     lookback_start = max(start_date, today - timedelta(days=DAILY_LOOKBACK_DAYS))
@@ -172,14 +188,26 @@ def next_pending_occurrence_at(reminder, actions_by_date, today):
     TERLEPAS dari batas tampilan `compute_reminder_occurrences` di atas,
     soalnya reminder harian SELALU punya "besok" selama masih aktif
     (rekursinya nggak pernah "habis").
+
+    Reminder yang JADWAL/TANGGAL MULAI-nya sendiri masih di MASA DEPAN
+    (`today < start_date`) SELALU balikin `reminder.scheduled_at` APA
+    ADANYA — TIDAK PERNAH "hari ini" (requirement review: reminder
+    harian yang belum mulai TIDAK PERNAH boleh nunjuk ke okurensi hari
+    ini yang sebenernya nggak pernah ada — konsisten sama
+    `compute_reminder_occurrences`/`valid_occurrence_date_range` di
+    atas, yang SAMA-SAMA nggak pernah menghasilkan/menerima okurensi
+    sebelum `start_date`).
     """
     if not reminder.is_active:
         return None
     start_date = reminder.scheduled_at.date()
+    if today < start_date:
+        return reminder.scheduled_at
+
     if reminder.recurrence == "none":
         if start_date in actions_by_date:
             return None
-        return occurrence_datetime_for_date(reminder.scheduled_at, start_date)
+        return reminder.scheduled_at
     if today not in actions_by_date:
         return occurrence_datetime_for_date(reminder.scheduled_at, today)
     return occurrence_datetime_for_date(reminder.scheduled_at, today + timedelta(days=1))

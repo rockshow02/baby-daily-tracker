@@ -294,10 +294,17 @@ def test_one_time_reminder_far_in_future_is_upcoming(client, monkeypatch):
     _create_reminder(client, user["token"], child["id"], scheduled_at=scheduled_at.isoformat())
 
     body = _list_reminders(client, user["token"], child["id"]).get_json()
-    assert body["reminders"][0]["occurrences"][0]["state"] == "upcoming"
+    reminder = body["reminders"][0]
+    occ = reminder["occurrences"][0]
+    assert occ["state"] == "upcoming"
     assert body["summary"]["due_count"] == 0
     assert body["summary"]["overdue_count"] == 0
     assert body["summary"]["next_upcoming_at"] is not None
+    assert reminder["next_occurrence_at"] == scheduled_at.isoformat() + "+07:00"
+    # Reminder-nya sendiri tetap "can_act" (role owner) TAPI okurensi-nya
+    # SENDIRI belum boleh diaksi -- tanggal jadwalnya sendiri belum tiba.
+    assert reminder["can_act"] is True
+    assert occ["can_act"] is False
 
 
 # --------------------------------------------------------------------------
@@ -722,3 +729,209 @@ def test_existing_stats_endpoint_still_works_after_reminders_addition(client, mo
     child = create_child(client, user["token"])
     resp = client.get(f"/api/children/{child['id']}/stats?days=7", headers=auth_headers(user["token"]))
     assert resp.status_code == 200
+
+
+# --------------------------------------------------------------------------
+# 18. Regresi: reminder ('none' ATAUPUN 'daily') yang jadwal/tanggal
+# mulainya SENDIRI masih di masa depan -- lihat
+# utils/reminder_engine.py:valid_occurrence_date_range() &
+# next_pending_occurrence_at() buat kontrak lengkapnya.
+# --------------------------------------------------------------------------
+
+
+def test_completing_future_one_time_reminder_before_scheduled_date_is_rejected(client, monkeypatch):
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    scheduled_at = FAKE_NOW + timedelta(days=5)  # 2026-08-28, 08-23 masih hari ini
+    reminder_id = _create_reminder(client, user["token"], child["id"], scheduled_at=scheduled_at.isoformat()).get_json()["id"]
+
+    resp = _act(client, user["token"], child["id"], reminder_id, scheduled_at.date().isoformat(), "complete")
+    assert resp.status_code in (400, 409)
+
+
+def test_skipping_future_one_time_reminder_before_scheduled_date_is_rejected(client, monkeypatch):
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    scheduled_at = FAKE_NOW + timedelta(days=5)
+    reminder_id = _create_reminder(client, user["token"], child["id"], scheduled_at=scheduled_at.isoformat()).get_json()["id"]
+
+    resp = _act(client, user["token"], child["id"], reminder_id, scheduled_at.date().isoformat(), "skip")
+    assert resp.status_code in (400, 409)
+
+
+def test_rejected_future_one_time_action_creates_no_reminder_action_or_audit_event(client, monkeypatch):
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    scheduled_at = FAKE_NOW + timedelta(days=5)
+    reminder_id = _create_reminder(client, user["token"], child["id"], scheduled_at=scheduled_at.isoformat()).get_json()["id"]
+
+    resp = _act(client, user["token"], child["id"], reminder_id, scheduled_at.date().isoformat(), "complete",
+                idem_key="future-reject-1")
+    assert resp.status_code in (400, 409)
+    assert ReminderAction.query.filter_by(reminder_id=reminder_id).count() == 0
+    assert CaregiverAuditEvent.query.filter_by(
+        child_id=child["id"], entity_type="reminder_occurrence_completed",
+    ).count() == 0
+
+    # Idempotency key nggak boleh "kepakai" -- retry sama sekali beda alur
+    # (misal jadwalnya udah dikoreksi) tetap harus dievaluasi ulang, bukan
+    # ke-replay dari respons error yang gagal ini.
+    retry = _act(client, user["token"], child["id"], reminder_id, scheduled_at.date().isoformat(), "complete",
+                 idem_key="future-reject-1")
+    assert retry.status_code in (400, 409)
+
+
+def test_future_one_time_reminder_can_be_completed_on_its_scheduled_date(client, monkeypatch):
+    scheduled_at = FAKE_NOW + timedelta(days=5)
+    user = register(client)
+    child = create_child(client, user["token"])
+    _freeze_now(monkeypatch, now=FAKE_NOW)
+    reminder_id = _create_reminder(client, user["token"], child["id"], scheduled_at=scheduled_at.isoformat()).get_json()["id"]
+
+    # "Sekarang" maju ke tanggal jadwalnya sendiri (jam berapa pun hari itu).
+    _freeze_now(monkeypatch, now=datetime.combine(scheduled_at.date(), scheduled_at.time().replace(hour=0, minute=1)))
+    resp = _act(client, user["token"], child["id"], reminder_id, scheduled_at.date().isoformat(), "complete")
+    assert resp.status_code == 201
+
+
+def test_unresolved_past_one_time_reminder_can_still_be_completed(client, monkeypatch):
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    scheduled_at = FAKE_NOW - timedelta(days=5)
+    reminder_id = _create_reminder(client, user["token"], child["id"], scheduled_at=scheduled_at.isoformat()).get_json()["id"]
+
+    resp = _act(client, user["token"], child["id"], reminder_id, scheduled_at.date().isoformat(), "complete")
+    assert resp.status_code == 201
+
+
+def test_future_action_rejection_respects_wib_midnight(client, monkeypatch):
+    """00:00 WIB tanggal jadwalnya sendiri -- HARUS udah dianggap 'tiba', bukan masih 'kemarin'."""
+    scheduled_at = datetime(2026, 8, 28, 8, 0, 0)
+    user = register(client)
+    child = create_child(client, user["token"])
+    _freeze_now(monkeypatch, now=FAKE_NOW)
+    reminder_id = _create_reminder(client, user["token"], child["id"], scheduled_at=scheduled_at.isoformat()).get_json()["id"]
+
+    _freeze_now(monkeypatch, now=datetime(2026, 8, 27, 23, 59, 0))
+    still_rejected = _act(client, user["token"], child["id"], reminder_id, "2026-08-28", "complete")
+    assert still_rejected.status_code in (400, 409)
+
+    _freeze_now(monkeypatch, now=datetime(2026, 8, 28, 0, 0, 0))
+    now_allowed = _act(client, user["token"], child["id"], reminder_id, "2026-08-28", "complete")
+    assert now_allowed.status_code == 201
+
+
+def test_daily_reminder_starting_in_future_produces_no_occurrences_before_start_date(client, monkeypatch):
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    start_at = FAKE_NOW + timedelta(days=5)  # 2026-08-28, 08:00
+    _create_reminder(client, user["token"], child["id"], recurrence="daily", scheduled_at=start_at.isoformat())
+
+    body = _list_reminders(client, user["token"], child["id"]).get_json()
+    reminder = body["reminders"][0]
+    assert reminder["occurrences"] == []
+    assert reminder["next_occurrence_at"] == start_at.isoformat() + "+07:00"
+    assert body["summary"]["due_count"] == 0
+    assert body["summary"]["overdue_count"] == 0
+    assert body["summary"]["next_upcoming_at"] == start_at.isoformat() + "+07:00"
+
+
+def test_completing_daily_reminder_before_start_date_is_rejected(client, monkeypatch):
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    start_at = FAKE_NOW + timedelta(days=5)
+    reminder_id = _create_reminder(client, user["token"], child["id"], recurrence="daily", scheduled_at=start_at.isoformat()).get_json()["id"]
+
+    resp = _act(client, user["token"], child["id"], reminder_id, FAKE_NOW.date().isoformat(), "complete")
+    assert resp.status_code in (400, 409)
+    resp_start_date = _act(client, user["token"], child["id"], reminder_id, start_at.date().isoformat(), "complete")
+    # tanggal mulainya sendiri belum "tiba" relatif ke `now` yang masih dibekukan di FAKE_NOW.
+    assert resp_start_date.status_code in (400, 409)
+    assert ReminderAction.query.filter_by(reminder_id=reminder_id).count() == 0
+
+
+def test_daily_reminder_on_start_date_shows_correct_occurrence_and_allows_action(client, monkeypatch):
+    start_at = datetime(2026, 8, 28, 8, 0, 0)
+    user = register(client)
+    child = create_child(client, user["token"])
+    _freeze_now(monkeypatch, now=FAKE_NOW)
+    reminder_id = _create_reminder(client, user["token"], child["id"], recurrence="daily", scheduled_at=start_at.isoformat()).get_json()["id"]
+
+    _freeze_now(monkeypatch, now=datetime(2026, 8, 28, 9, 0, 0))
+    body = _list_reminders(client, user["token"], child["id"]).get_json()
+    reminder = body["reminders"][0]
+    keys = [o["occurrence_key"] for o in reminder["occurrences"]]
+    assert keys == ["2026-08-28"]
+    assert reminder["next_occurrence_at"] == "2026-08-28T08:00:00+07:00"
+
+    resp = _act(client, user["token"], child["id"], reminder_id, "2026-08-28", "complete")
+    assert resp.status_code == 201
+
+
+def test_daily_reminder_after_resolving_start_date_next_pending_is_following_day(client, monkeypatch):
+    start_at = datetime(2026, 8, 28, 8, 0, 0)
+    user = register(client)
+    child = create_child(client, user["token"])
+    _freeze_now(monkeypatch, now=FAKE_NOW)
+    reminder_id = _create_reminder(client, user["token"], child["id"], recurrence="daily", scheduled_at=start_at.isoformat()).get_json()["id"]
+
+    _freeze_now(monkeypatch, now=datetime(2026, 8, 28, 9, 0, 0))
+    _act(client, user["token"], child["id"], reminder_id, "2026-08-28", "complete")
+
+    body = _list_reminders(client, user["token"], child["id"]).get_json()
+    reminder = body["reminders"][0]
+    assert reminder["next_occurrence_at"] == "2026-08-29T08:00:00+07:00"
+
+
+def test_list_reminders_does_not_crash_for_children_with_future_scheduled_reminders(client, monkeypatch):
+    """
+    Regresi: `valid_occurrence_date_range()` balikin `None` buat reminder
+    yang jadwal/tanggal mulainya sendiri di masa depan -- pemanggil di
+    routes/reminder_routes.py WAJIB nge-guard `None` ini sebelum unpacking,
+    kalau kelupaan bakal ngangkat TypeError dan bikin SELURUH endpoint
+    GET /reminders anak ini 500, bukan cuma occurrence yang bermasalah.
+    """
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    _create_reminder(client, user["token"], child["id"], scheduled_at=(FAKE_NOW + timedelta(days=1)).isoformat())
+    _create_reminder(client, user["token"], child["id"], recurrence="daily", scheduled_at=(FAKE_NOW + timedelta(days=1)).isoformat())
+    _create_reminder(client, user["token"], child["id"], scheduled_at=(FAKE_NOW - timedelta(days=1)).isoformat())
+
+    resp = _list_reminders(client, user["token"], child["id"])
+    assert resp.status_code == 200
+    assert len(resp.get_json()["reminders"]) == 3
+
+
+def test_occurrence_can_act_field_reflects_date_eligibility_not_just_role(client, monkeypatch):
+    _freeze_now(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    future_id = _create_reminder(client, user["token"], child["id"], scheduled_at=(FAKE_NOW + timedelta(days=5)).isoformat()).get_json()["id"]
+    today_id = _create_reminder(client, user["token"], child["id"], scheduled_at=FAKE_NOW.isoformat()).get_json()["id"]
+
+    body = _list_reminders(client, user["token"], child["id"]).get_json()
+    by_id = {r["id"]: r for r in body["reminders"]}
+    assert by_id[future_id]["can_act"] is True  # role owner tetap bisa nulis
+    assert by_id[future_id]["occurrences"][0]["can_act"] is False  # tapi okurensi ini sendiri belum boleh
+    assert by_id[today_id]["occurrences"][0]["can_act"] is True
+
+
+def test_viewer_never_gets_can_act_true_even_for_eligible_occurrence(client, monkeypatch):
+    _freeze_now(monkeypatch)
+    owner = register(client, name="Pemilik", email="owner-rem3@example.com")
+    child = create_child(client, owner["token"])
+    viewer = register(client, name="Viewer2", email="viewer2-rem@example.com")
+    invite_and_join(client, owner["token"], child["id"], viewer["token"], "viewer")
+    _create_reminder(client, owner["token"], child["id"], scheduled_at=FAKE_NOW.isoformat())
+
+    body = _list_reminders(client, viewer["token"], child["id"]).get_json()
+    reminder = body["reminders"][0]
+    assert reminder["can_act"] is False
+    assert reminder["occurrences"][0]["can_act"] is False

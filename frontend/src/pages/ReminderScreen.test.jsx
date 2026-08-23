@@ -29,6 +29,12 @@ function setOnline(value) {
 }
 
 function makeReminder(overrides = {}) {
+  // `occurrence.can_act` DEFAULT ngikutin `overrides.can_act` (role reminder)
+  // -- persis kayak backend beneran ngegabungin role + tanggal + status jadi
+  // 1 field per-okurensi (lihat routes/reminder_routes.py:_occurrence_to_json).
+  // Test yang mau nguji kelayakan TANGGAL secara terpisah dari role harus
+  // nge-override `occurrences` eksplisit (lihat describe "action eligibility").
+  const occurrenceCanAct = overrides.can_act ?? true;
   return {
     id: 1, child_id: 10, created_by_user_id: 1, reminder_type: "medication",
     title: "Obat pagi", scheduled_at: "2026-08-23T08:00:00+07:00", recurrence: "none",
@@ -39,7 +45,7 @@ function makeReminder(overrides = {}) {
       {
         occurrence_key: "2026-08-23", occurrence_at: "2026-08-23T08:00:00+07:00",
         state: "due", status: null, acted_at: null, acted_by_user_id: null, acted_by_name: null,
-        linked_log_type: null, linked_log_id: null,
+        linked_log_type: null, linked_log_id: null, can_act: occurrenceCanAct,
       },
     ],
     ...overrides,
@@ -226,6 +232,75 @@ describe("ReminderScreen — complete/skip flow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Selesai" }));
 
     expect(await screen.findByText("Menunggu sinkron")).toBeInTheDocument();
+  });
+});
+
+describe("ReminderScreen — action eligibility (backend-authoritative, defect review Agustus 2026)", () => {
+  it("keeps a future one-time reminder visible in Akan Datang but hides Complete/Skip", async () => {
+    // Reminder 'none' yang jadwalnya sendiri di masa depan -- backend
+    // SELALU balikin state "upcoming" (tetap tampil) TAPI occurrence.can_act
+    // false (belum boleh diaksi). Tombol aksi TIDAK BOLEH dirender sama
+    // sekali, bukan cuma disabled -- lihat ReminderScreen.jsx:OccurrenceCard.
+    const futureReminder = makeReminder({
+      can_act: true,
+      occurrences: [{
+        occurrence_key: "2026-08-28", occurrence_at: "2026-08-28T08:00:00+07:00",
+        state: "upcoming", status: null, acted_at: null, acted_by_user_id: null, acted_by_name: null,
+        linked_log_type: null, linked_log_id: null, can_act: false,
+      }],
+    });
+    apiMock.listReminders.mockResolvedValue(
+      makeReminderResponse({ reminders: [futureReminder], summary: { due_count: 0, overdue_count: 0, next_upcoming_at: "2026-08-28T08:00:00+07:00" } }),
+    );
+    render(<ReminderScreen child={testChild} currentUserId={CURRENT_USER_ID} />);
+
+    expect(await screen.findByText("Akan Datang")).toBeInTheDocument();
+    expect(screen.getAllByText(/Obat pagi/).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "Selesai" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Lewati" })).not.toBeInTheDocument();
+  });
+
+  it("allows Complete/Skip for an occurrence later today when can_act is true (same-day policy)", async () => {
+    // Kebijakan Fase 1: reminder 'none' yang jadwalnya HARI INI boleh
+    // diselesaikan lebih awal (belum jam-nya persis) -- backend nge-kirim
+    // can_act true buat kasus ini, frontend WAJIB percaya begitu aja.
+    const laterTodayReminder = makeReminder({
+      can_act: true,
+      occurrences: [{
+        occurrence_key: "2026-08-23", occurrence_at: "2026-08-23T20:00:00+07:00",
+        state: "upcoming", status: null, acted_at: null, acted_by_user_id: null, acted_by_name: null,
+        linked_log_type: null, linked_log_id: null, can_act: true,
+      }],
+    });
+    apiMock.listReminders.mockResolvedValue(makeReminderResponse({ reminders: [laterTodayReminder] }));
+    render(<ReminderScreen child={testChild} currentUserId={CURRENT_USER_ID} />);
+
+    await screen.findAllByText(/Obat pagi/);
+    expect(screen.getByRole("button", { name: "Selesai" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Lewati" })).toBeInTheDocument();
+  });
+
+  it("never enables actions for a future-dated occurrence restored from offline cache", async () => {
+    // Requirement review: "offline cached data cannot enable an action for
+    // a future calendar-day occurrence" -- cache-nya sendiri SUDAH nyimpen
+    // can_act apa adanya dari respons server terakhir (lihat
+    // utils/reminderCache.js), jadi ini regresi buat jalur offline juga,
+    // bukan cuma jalur online.
+    const futureReminder = makeReminder({
+      can_act: true,
+      occurrences: [{
+        occurrence_key: "2026-08-28", occurrence_at: "2026-08-28T08:00:00+07:00",
+        state: "upcoming", status: null, acted_at: null, acted_by_user_id: null, acted_by_name: null,
+        linked_log_type: null, linked_log_id: null, can_act: false,
+      }],
+    });
+    cacheReminderSnapshot(CURRENT_USER_ID, testChild.id, makeReminderResponse({ reminders: [futureReminder] }));
+    setOnline(false);
+    render(<ReminderScreen child={testChild} currentUserId={CURRENT_USER_ID} />);
+
+    await screen.findAllByText(/Obat pagi/);
+    expect(screen.queryByRole("button", { name: "Selesai" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Lewati" })).not.toBeInTheDocument();
   });
 });
 

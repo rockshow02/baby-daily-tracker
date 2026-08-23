@@ -159,16 +159,67 @@ Reminder — lihat bagian Frontend). Okurensi di luar jendela ini tidak
 ikut muncul di 1 respons list, tapi baris `ReminderAction`-nya sendiri
 (kalau ada) tetap permanen di database.
 
-**Rentang okurensi yang sah untuk endpoint aksi** (`complete`/`skip`)
-sedikit berbeda dari jendela TAMPILAN di atas —
-`valid_occurrence_date_range()`:
-- `none`: hanya `scheduled_at.date()` yang sah.
-- `daily`: `[max(scheduled_at.date(), today - 14 hari), today]` —
-  boleh menindaklanjuti okurensi historis yang lebih tua dari yang
-  kebetulan tampil di halaman list saat itu (selama masih dalam jendela
-  14 hari), tapi **tidak pernah** okurensi masa depan (belum terjadi)
-  ataupun lebih tua dari jendela ini (mencegah aksi historis tak
-  terbatas).
+## Kelayakan TAMPILAN vs kelayakan AKSI
+
+Dua konsep ini **sengaja dipisah**, dihitung oleh dua fungsi murni yang
+berbeda, dan **wajib** dibaca berbeda:
+
+- **Kelayakan tampilan** (`compute_reminder_occurrences()`) — okurensi
+  mana saja yang MUNCUL di array `occurrences` dalam 1 respons
+  `GET /reminders`. Reminder `none` selalu menampilkan 1 baris (apa pun
+  statusnya, termasuk yang jadwalnya sendiri masih di masa depan — biar
+  tetap kelihatan sebagai `upcoming`). Reminder `daily` menampilkan
+  jendela `DAILY_LOOKBACK_DAYS` hari ke belakang + hari ini — **kosong**
+  (`[]`) kalau `scheduled_at.date()` (tanggal mulainya) masih di masa
+  depan, karena secara harfiah belum ada satu pun okurensi yang pernah
+  terjadi.
+- **Kelayakan aksi** (`valid_occurrence_date_range()`) — tanggal mana
+  saja yang boleh diterima endpoint `complete`/`skip` untuk reminder
+  ini, SEKARANG. Balikin `date` inklusif `(earliest, latest)`, atau
+  **`None`** kalau TIDAK ADA tanggal yang sah sama sekali saat ini
+  (dipilih eksplisit `None` — bukan rentang kosong/kebalik semacam
+  `(besok, hari_ini)` — supaya pemanggil **wajib** mengecek dulu sebelum
+  unpacking, mencegah bug rentang-terbalik):
+  - `none`: `None` kalau `scheduled_at.date() > today` (jadwalnya
+    sendiri belum tiba — **okurensi masa depan tidak pernah bisa
+    diselesaikan/dilewati lebih awal**, walau tetap tampil sebagai
+    `upcoming`). Begitu tanggal jadwalnya tiba (jam berapa pun hari
+    itu), rentangnya `(scheduled_at.date(), scheduled_at.date())` — dan
+    tetap sah untuk tanggal itu selamanya setelahnya (okurensi lama yang
+    belum di-resolve tetap bisa diselesaikan/dilewati kapan saja, tidak
+    ada batas historis untuk `none`).
+  - `daily`: `None` kalau `scheduled_at.date()` (tanggal MULAI reminder
+    ini) `> today` — reminder harian yang belum mulai **tidak** punya
+    satu pun okurensi yang sah diaksi, walau `today` kebetulan cocok
+    format tanggal apa pun. Begitu tanggal mulainya tiba:
+    `[max(scheduled_at.date(), today - 14 hari), today]` — boleh
+    menindaklanjuti okurensi historis yang lebih tua dari yang kebetulan
+    tampil di halaman list saat itu (selama masih dalam jendela 14
+    hari), tapi **tidak pernah** okurensi masa depan (belum terjadi)
+    ataupun lebih tua dari jendela ini (mencegah aksi historis tak
+    terbatas).
+
+  Endpoint aksi (`_act_on_occurrence` di `routes/reminder_routes.py`)
+  **wajib** mengecek `None` sebelum unpack (`date_range is None` → `400`
+  langsung), baru kemudian mengecek `earliest <= occurrence_key <=
+  latest`. Backend tetap otoritatif untuk kedua defect Agustus 2026 yang
+  direview: (1) reminder `none` yang jadwalnya sendiri di masa depan
+  tidak bisa diaksi lebih awal, dan (2) reminder `daily` yang tanggal
+  mulainya sendiri di masa depan tidak melaporkan/menerima okurensi hari
+  ini yang sebenarnya belum pernah ada.
+
+  Setiap objek okurensi di respons list menyertakan `can_act` —
+  **digabung server** dari role reminder (`can_act` di level reminder),
+  status okurensi itu sendiri (`status is None`, belum di-resolve), DAN
+  tanggal okurensi itu dicek terhadap `valid_occurrence_date_range()` di
+  atas — field yang SAMA PERSIS dipakai endpoint aksi buat menolak/
+  menerima. Frontend (`ReminderScreen.jsx`) **memakai field ini
+  langsung** untuk mengaktifkan/menonaktifkan tombol Selesai/Lewati,
+  **tidak pernah** menghitung ulang kelayakan tanggal sendiri dari
+  timezone/locale browser — kalau `can_act` backend dan tombol frontend
+  pernah tidak sinkron, backend selalu menang (endpoint aksi tetap
+  menolak lewat pengecekan yang sama, terlepas apa yang sempat
+  ditampilkan UI).
 
 ## Ringkasan dashboard
 
@@ -177,6 +228,18 @@ sedikit berbeda dari jendela TAMPILAN di atas —
 reminder aktif anak itu — endpoint yang SAMA dipakai baik oleh layar
 Reminder penuh maupun ringkasan ringkas di Dashboard, supaya tidak ada
 2 jalur perhitungan status yang bisa berbeda hasilnya.
+
+`next_occurrence_at` per-reminder (dan `next_upcoming_at` gabungan di
+`summary`) dihitung `next_pending_occurrence_at()` — untuk reminder yang
+jadwal/tanggal mulainya sendiri masih di masa depan, nilainya SELALU
+`scheduled_at` reminder itu apa adanya (**tidak pernah** dibulatkan ke
+hari ini), konsisten dengan `valid_occurrence_date_range()` di atas yang
+juga tidak pernah mengizinkan aksi pada okurensi sebelum tanggal
+tersebut. `due_count`/`overdue_count` tidak pernah menghitung reminder
+semacam ini karena `compute_reminder_occurrences()` juga tidak pernah
+memunculkan okurensi sebelum tanggal mulainya (lihat bagian di atas) —
+dashboard, daftar list, dan monitor notifikasi frontend semuanya
+membaca angka yang sama ini, jadi ketiganya otomatis konsisten.
 
 ## Roles & permissions
 
@@ -312,7 +375,8 @@ POST   /api/children/<child_id>/reminders/<reminder_id>/occurrences/<occurrence_
           "occurrence_key": "2026-08-23", "occurrence_at": "2026-08-23T08:00:00+07:00",
           "state": "completed", "status": "completed",
           "acted_at": "...", "acted_by_user_id": 2, "acted_by_name": "Bunda",
-          "linked_log_type": "medication_log", "linked_log_id": 41
+          "linked_log_type": "medication_log", "linked_log_id": 41,
+          "can_act": false
         }
       ]
     }

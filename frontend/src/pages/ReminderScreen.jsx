@@ -157,7 +157,15 @@ function ReminderFormModal({ initial, onClose, onSubmit, submitting, errorMessag
 
 function OccurrenceCard({ reminder, occurrence, onComplete, onSkip, onRecordNow, pendingSync }) {
   const isPending = pendingSync;
-  const canAct = reminder.can_act && !isPending && (occurrence.status == null);
+  // `occurrence.can_act` datang LANGSUNG dari backend (lihat
+  // routes/reminder_routes.py:_occurrence_to_json) -- udah nggabungin
+  // role reminder INI, status okurensi INI, DAN tanggal kalender WIB
+  // okurensi INI dicek terhadap valid_occurrence_date_range() yang
+  // SAMA PERSIS dipakai endpoint aksi buat nolak/nerima. Frontend
+  // SENGAJA nggak ngitung ulang eligibility tanggal sendiri (nggak
+  // boleh gantungin ke timezone/locale browser) -- backend tetap
+  // otoritatif, tombol ini cuma UI hint.
+  const canAct = occurrence.can_act && !isPending;
   const linkableLogType = RECORD_NOW_LOG_TYPES[reminder.reminder_type];
 
   return (
