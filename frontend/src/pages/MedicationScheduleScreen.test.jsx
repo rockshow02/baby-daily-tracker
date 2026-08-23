@@ -500,7 +500,8 @@ describe("MedicationScheduleScreen — background polling & visibility", () => {
     expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(1);
 
     resolveFirst(makeScheduleResponse());
-    await vi.waitFor(() => expect(screen.queryByText("Memuat jadwal obat...")).not.toBeInTheDocument());
+    vi.useRealTimers();
+    await waitFor(() => expect(screen.queryByText("Memuat jadwal obat...")).not.toBeInTheDocument());
   });
 
   it("9. background refresh preserves already displayed data instead of flashing back to a loading screen", async () => {
@@ -588,5 +589,238 @@ describe("MedicationScheduleScreen — offline cached-action safety", () => {
     fireVisibilityChange();
     await waitFor(() => expect(apiMock.listMedicationSchedules.mock.calls.length).toBeGreaterThanOrEqual(2));
     expect(screen.getByText("Menunggu sinkron")).toBeInTheDocument();
+  });
+});
+
+// --------------------------------------------------------------------------
+// Round 3 review: refresh diam-diam (polling & visibilitychange) yang
+// GAGAL (500/403/network) TIDAK PERNAH menurunkan layar dari `ready`/
+// `offline_cached` ke layar error/forbidden penuh selama data terpercaya
+// masih ada -- cuma peringatan non-destruktif TERPISAH
+// (`backgroundWarning`), yang jelas ke `errorMessage`/pesan konflik.
+// Items 1 & 2 (initial 500 -> full error, initial 403 -> full forbidden)
+// SUDAH dicakup oleh describe "loading/success/empty/error states" di
+// atas ("shows a retryable error state on a non-network failure" &
+// "shows a permission-denied state on a forbidden failure") -- kedua
+// test itu TETAP lolos tanpa perubahan (dibuktikan lewat 17. di bawah),
+// jadi TIDAK diduplikasi di sini.
+// --------------------------------------------------------------------------
+
+describe("MedicationScheduleScreen — silent refresh failures preserve displayed data", () => {
+  it("3. 'Coba lagi' performs a new request and recovers successfully", async () => {
+    apiMock.listMedicationSchedules
+      .mockRejectedValueOnce(new ApiError({ kind: "server_error", status: 500, message: "Gagal memuat." }))
+      .mockResolvedValueOnce(makeScheduleResponse());
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await screen.findByText("Gagal memuat.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Coba lagi" }));
+
+    await screen.findAllByText(/Paracetamol/);
+    expect(screen.queryByText("Gagal memuat.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Coba lagi" })).not.toBeInTheDocument();
+  });
+
+  it("4. a successful silent polling refresh updates displayed schedule data", async () => {
+    apiMock.listMedicationSchedules
+      .mockResolvedValueOnce(makeScheduleResponse())
+      .mockResolvedValue(makeScheduleResponse({ schedules: [makeSchedule({ medication_name: "Amoxicillin" })] }));
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await vi.waitFor(() => expect(screen.getAllByText(/Paracetamol/).length).toBeGreaterThan(0));
+
+    await vi.advanceTimersByTimeAsync(60000);
+    await vi.waitFor(() => expect(screen.getAllByText(/Amoxicillin/).length).toBeGreaterThan(0));
+  });
+
+  it("5+6. silent polling HTTP 500 preserves previously displayed data and never switches to the full error screen", async () => {
+    apiMock.listMedicationSchedules
+      .mockResolvedValueOnce(makeScheduleResponse())
+      .mockRejectedValueOnce(new ApiError({ kind: "server_error", status: 500, message: "Internal Server Error" }));
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await vi.waitFor(() => expect(screen.getAllByText(/Paracetamol/).length).toBeGreaterThan(0));
+
+    await vi.advanceTimersByTimeAsync(60000);
+    await vi.waitFor(() => expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(2));
+
+    expect(screen.getAllByText(/Paracetamol/).length).toBeGreaterThan(0);
+    expect(screen.queryByText("Internal Server Error")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Coba lagi" })).not.toBeInTheDocument();
+  });
+
+  it("7. a caregiver-conflict message is not overwritten by a silent refresh failure", async () => {
+    apiMock.listMedicationSchedules
+      .mockResolvedValueOnce(makeScheduleResponse()) // mount
+      .mockResolvedValueOnce(makeScheduleResponse()) // reload dari dalam handleAct setelah konflik 409
+      .mockRejectedValueOnce(new ApiError({ kind: "server_error", status: 500, message: "Internal Server Error" })); // refresh silent -- GAGAL
+    apiMock.administerMedicationDose.mockRejectedValue(
+      new ApiError({ kind: "http_error", status: 409, message: "Dosis ini sudah pernah ditandai sebelumnya." }),
+    );
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await screen.findAllByText(/Paracetamol/);
+
+    fireEvent.click(screen.getByRole("button", { name: "Sudah diberikan" }));
+    await screen.findByText(/sudah ditandai oleh caregiver lain/);
+
+    fireVisibilityChange();
+    await waitFor(() => expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(3));
+    expect(screen.getByText(/sudah ditandai oleh caregiver lain/)).toBeInTheDocument();
+    expect(screen.queryByText("Internal Server Error")).not.toBeInTheDocument();
+  });
+
+  it("8. shows a separate background-refresh warning without hiding the data", async () => {
+    apiMock.listMedicationSchedules
+      .mockResolvedValueOnce(makeScheduleResponse())
+      .mockRejectedValueOnce(new ApiError({ kind: "server_error", status: 500, message: "Internal Server Error" }));
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await screen.findAllByText(/Paracetamol/);
+
+    fireVisibilityChange();
+    expect(await screen.findByText("Pembaruan otomatis gagal. Data terakhir masih ditampilkan.")).toBeInTheDocument();
+    expect(screen.getAllByText(/Paracetamol/).length).toBeGreaterThan(0);
+    // Nggak pernah bocorin status HTTP/detail server mentah.
+    expect(screen.queryByText(/500/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Internal Server Error")).not.toBeInTheDocument();
+  });
+
+  it("9. the background-refresh warning clears after the next successful silent refresh", async () => {
+    apiMock.listMedicationSchedules
+      .mockResolvedValueOnce(makeScheduleResponse())
+      .mockRejectedValueOnce(new ApiError({ kind: "server_error", status: 500, message: "Internal Server Error" }))
+      .mockResolvedValueOnce(makeScheduleResponse());
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await screen.findAllByText(/Paracetamol/);
+
+    fireVisibilityChange();
+    await screen.findByText("Pembaruan otomatis gagal. Data terakhir masih ditampilkan.");
+
+    fireVisibilityChange();
+    await waitFor(() =>
+      expect(screen.queryByText("Pembaruan otomatis gagal. Data terakhir masih ditampilkan.")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("10. a visibility-triggered refresh failure has the same non-destructive behavior as polling", async () => {
+    apiMock.listMedicationSchedules
+      .mockResolvedValueOnce(makeScheduleResponse())
+      .mockRejectedValueOnce(new ApiError({ kind: "server_error", status: 500, message: "Internal Server Error" }));
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await screen.findAllByText(/Paracetamol/);
+
+    fireVisibilityChange();
+    await waitFor(() => expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(2));
+    expect(screen.getAllByText(/Paracetamol/).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "Coba lagi" })).not.toBeInTheDocument();
+  });
+
+  it("11. a silent network failure preserves the trusted snapshot already displayed", async () => {
+    apiMock.listMedicationSchedules
+      .mockResolvedValueOnce(makeScheduleResponse())
+      .mockRejectedValueOnce(new ApiError({ kind: "network", status: null, message: "Nggak ada koneksi internet." }));
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await screen.findAllByText(/Paracetamol/);
+
+    fireVisibilityChange();
+    await waitFor(() => expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(2));
+    // TETAP nunjukin snapshot yang SUDAH ada (status TETAP `ready`,
+    // BUKAN dipaksa pindah ke offline_cached/kosong) -- kegagalan
+    // jaringan sesaat SELAGI silent & data terpercaya sudah ada CUMA
+    // jadi peringatan latar belakang.
+    expect(screen.getAllByText(/Paracetamol/).length).toBeGreaterThan(0);
+    expect(await screen.findByText("Pembaruan otomatis gagal. Data terakhir masih ditampilkan.")).toBeInTheDocument();
+  });
+
+  it("12. pending offline queued/syncing indicators survive a failed silent refresh", async () => {
+    apiMock.listMedicationSchedules
+      .mockResolvedValueOnce(makeScheduleResponse())
+      .mockRejectedValueOnce(new ApiError({ kind: "server_error", status: 500, message: "Internal Server Error" }));
+    apiMock.administerMedicationDose.mockResolvedValue({ id: "local-1", _offlineQueued: true });
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await screen.findAllByText(/Paracetamol/);
+
+    fireEvent.click(screen.getByRole("button", { name: "Sudah diberikan" }));
+    expect(await screen.findByText("Menunggu sinkron")).toBeInTheDocument();
+
+    fireVisibilityChange();
+    await waitFor(() => expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("Menunggu sinkron")).toBeInTheDocument();
+  });
+
+  it("13. a timer tick and a visibility event coinciding never fire overlapping requests", async () => {
+    apiMock.listMedicationSchedules.mockResolvedValue(makeScheduleResponse());
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await vi.waitFor(() => expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(1));
+
+    apiMock.listMedicationSchedules.mockImplementationOnce(() => new Promise(() => {})); // tick berikutnya sengaja digantung selamanya
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(2);
+
+    fireVisibilityChange(); // dateng SELAGI tick di atas masih menggantung -- HARUS di-skip
+    expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(2);
+  });
+
+  it("14. a response belonging to an obsolete child does not overwrite the new child's data", async () => {
+    const childB = { ...testChild, id: 20 };
+    let resolveSilentA;
+    apiMock.listMedicationSchedules
+      .mockResolvedValueOnce(makeScheduleResponse()) // mount anak A
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveSilentA = resolve; })); // refresh silent anak A -- sengaja digantung
+
+    const { rerender } = render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await screen.findAllByText(/Paracetamol/);
+
+    fireVisibilityChange(); // mulai refresh silent anak A (menggantung)
+    await waitFor(() => expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(2));
+
+    rerender(<MedicationScheduleScreen child={childB} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+
+    // Respons TELAT buat anak A akhirnya datang -- HARUS dibuang, TIDAK
+    // PERNAH menimpa tampilan yang sekarang mewakili anak B.
+    resolveSilentA(makeScheduleResponse({ schedules: [makeSchedule({ medication_name: "Obat Basi Anak A" })] }));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByText(/Obat Basi Anak A/)).not.toBeInTheDocument();
+  });
+
+  it("15. no state update occurs after unmount where practical", async () => {
+    let resolveSlow;
+    apiMock.listMedicationSchedules.mockReturnValue(new Promise((resolve) => { resolveSlow = resolve; }));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { unmount } = render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    unmount();
+
+    resolveSlow(makeScheduleResponse());
+    await new Promise((r) => setTimeout(r, 0));
+
+    const stateUpdateWarning = consoleError.mock.calls.some(
+      ([msg]) => typeof msg === "string" && msg.includes("unmounted component"),
+    );
+    expect(stateUpdateWarning).toBe(false);
+    consoleError.mockRestore();
+  });
+
+  it("16. can_act is never recalculated or upgraded client-side after a failed silent refresh", async () => {
+    const notYetActionable = makeSchedule({
+      occurrences: [{
+        occurrence_key: "2026-08-23T20:00", occurrence_at: "2026-08-23T20:00:00+07:00",
+        state: "upcoming", status: null, acted_at: null, acted_by_user_id: null, acted_by_name: null,
+        medication_log_id: null, can_act: false,
+      }],
+    });
+    apiMock.listMedicationSchedules
+      .mockResolvedValueOnce(makeScheduleResponse({ schedules: [notYetActionable] }))
+      .mockRejectedValueOnce(new ApiError({ kind: "server_error", status: 500, message: "Internal Server Error" }));
+    render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await screen.findAllByText(/Paracetamol/);
+    expect(screen.queryByRole("button", { name: "Sudah diberikan" })).not.toBeInTheDocument();
+
+    fireVisibilityChange();
+    await waitFor(() => expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(2));
+
+    // Snapshot can_act=false yang SUDAH ADA TETAP dipertahankan -- TIDAK
+    // PERNAH "naik" jadi bisa diaksi cuma karena refresh-nya sendiri
+    // GAGAL (bukan hasil hitungan ulang jam browser).
+    expect(screen.queryByRole("button", { name: "Sudah diberikan" })).not.toBeInTheDocument();
   });
 });

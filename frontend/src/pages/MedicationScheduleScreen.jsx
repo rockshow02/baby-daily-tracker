@@ -27,6 +27,15 @@ const DISCLAIMER =
   "Jadwal ini hanya mencerminkan instruksi yang dimasukkan sendiri oleh caregiver — bukan resep " +
   "atau saran medis. Selalu ikuti petunjuk dokter/apoteker untuk dosis dan jadwal pemberian obat.";
 
+// Refresh LATAR BELAKANG yang gagal (polling/visibilitychange) SELAGI
+// data terpercaya masih tertampil -- pesan ini SENGAJA generik/non-teknis
+// (nggak pernah nyebut status HTTP/detail server, lihat load() di bawah)
+// dan disimpan TERPISAH dari `errorMessage` (yang dipakai buat
+// kegagalan reload PENUH atau pesan konflik aksi) -- requirement
+// review: kegagalan refresh diam-diam TIDAK PERNAH boleh menimpa salah
+// satu dari itu.
+const BACKGROUND_REFRESH_WARNING = "Pembaruan otomatis gagal. Data terakhir masih ditampilkan.";
+
 function useOnlineStatus() {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   useEffect(() => {
@@ -432,16 +441,59 @@ export default function MedicationScheduleScreen({ child, currentUserId, onClose
   const [manageFilter, setManageFilter] = useState("active");
   const [pendingSyncKeys, setPendingSyncKeys] = useState(new Set());
   const [pendingActionKeys, setPendingActionKeys] = useState(new Set());
-  // Proteksi request tumpang-tindih (Defect 2 review) -- ref biasa,
-  // BUKAN state (nggak perlu re-render buat ini), dicek SEBELUM
-  // `load()` beneran mulai fetch baru: tick polling 60 detik yang
-  // kebetulan bareng sama visibilitychange, ATAUPUN reload manual yang
-  // masih nunggu respons sebelumnya, TIDAK PERNAH memicu 2 request
-  // `GET .../medication-schedules` yang tumpang tindih.
+  // Peringatan refresh LATAR BELAKANG yang gagal -- TERPISAH dari
+  // `errorMessage` (dipakai buat kegagalan reload PENUH & pesan
+  // konflik aksi), lihat BACKGROUND_REFRESH_WARNING & load() di bawah.
+  const [backgroundWarning, setBackgroundWarning] = useState("");
+
+  // Mirror status/data lewat ref -- dibaca di dalam load() (termasuk di
+  // dalam blok catch, SETELAH await) buat nentuin "ada data terpercaya
+  // yang lagi ditampilkan sekarang" TANPA nambah status/data sebagai
+  // dependency useCallback load() (itu bakal bikin identitas load()
+  // ganti tiap kali data berubah -- useEffect polling di bawah
+  // dependen ke [isOnline, load], jadi interval-nya bakal
+  // dipasang-ulang tiap refresh sukses, ngerusak kontrak "polling
+  // persis 60 detik" yang sudah dites). Disinkronkan lewat effect biasa
+  // -- cukup, soalnya load() SELALU nunggu 1 `await` network sebelum
+  // baca ref ini, jadi nggak pernah baca nilai yang "telat 1 render".
+  const statusRef = useRef(status);
+  useEffect(() => { statusRef.current = status; }, [status]);
+
+  // Proteksi request tumpang-tindih (Defect 2 review) -- menjaga SEMUA
+  // kombinasi (silent-vs-silent, mis. tick 60 detik ketimpa
+  // visibilitychange, MAUPUN silent-vs-foreground/foreground-vs-foreground)
+  // supaya nggak pernah ada 2 request `GET .../medication-schedules`
+  // yang beneran jalan bersamaan buat komponen ini.
   const loadInFlightRef = useRef(false);
+
+  // Penjaga respons buat anak yang SUDAH BUKAN anak aktif lagi (defect
+  // review) -- SENGAJA diikat ke identitas `child.id`, BUKAN "nomor
+  // urut request keberapa" (approach nomor urut generik SEMPAT dicoba
+  // & keliru: request yang di-skip gara-gara `loadInFlightRef` di atas
+  // ikut naikin nomor urutnya, jadi request ASLI yang masih menggantung
+  // -- yang JUSTRU bakal beneran selesai -- ketuduh "basi" & hasilnya
+  // dibuang, walau anaknya sama sekali nggak pernah berubah). Diupdate
+  // lewat effect terpisah SETIAP `child.id` berubah; `load()` membaca
+  // `child.id` dari closure-nya sendiri (nilai SAAT closure itu dibuat)
+  // dan membandingkannya ke ref ini SETELAH await selesai -- kalau beda,
+  // berarti anak aktifnya sudah ganti SELAGI request ini menggantung,
+  // respons dibuang diam-diam (nggak pernah menimpa tampilan anak yang
+  // baru).
+  const activeChildIdRef = useRef(child.id);
+  useEffect(() => { activeChildIdRef.current = child.id; }, [child.id]);
+
+  // Nggak pernah setState lagi setelah unmount (praktis buat request
+  // monitor latar belakang yang jawabannya baru datang setelah layar
+  // ini udah ditutup/di-unmount).
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const loadFromCache = useCallback(() => {
     const cached = getCachedMedicationScheduleSnapshot(currentUserId, child.id);
+    setBackgroundWarning("");
     if (cached) {
       setData(cached.data);
       setCachedAt(cached.cachedAt);
@@ -459,25 +511,57 @@ export default function MedicationScheduleScreen({ child, currentUserId, onClose
     // yang dipicu user (buka layar, ganti anak, "Coba lagi", aksi
     // administer/skip) yang WAJAR mulai dari keadaan bersih. Refresh
     // diam-diam TIDAK PERNAH menghapus pesan error/konflik yang lagi
-    // ditampilkan HANYA karena timer-nya kebetulan jalan (requirement
-    // review: "do not clear a meaningful conflict/error message because
-    // a background refresh started").
+    // ditampilkan HANYA karena timer-nya kebetulan jalan, DAN (defect
+    // review lanjutan) TIDAK PERNAH menurunkan layar dari `ready`/
+    // `offline_cached` ke layar error PENUH cuma gara-gara 1 kegagalan
+    // refresh yang sifatnya sementara -- selama data terpercaya masih
+    // ada, kegagalan itu CUMA jadi peringatan kecil non-destruktif
+    // (`backgroundWarning`), lihat blok catch di bawah.
     const silent = opts.silent === true;
+    // Anak yang diminta closure INI (lihat komentar `activeChildIdRef`
+    // di atas) -- dibaca SEKALI di sini, dibandingkan lagi setelah await
+    // selesai.
+    const requestedChildId = child.id;
+
     if (!isOnline) {
       loadFromCache();
       return;
     }
-    if (loadInFlightRef.current) return; // proteksi tumpang tindih, lihat deklarasi ref di atas
+    if (loadInFlightRef.current) return; // request lain (silent ATAUPUN foreground) masih jalan -- lihat komentar loadInFlightRef di atas
     loadInFlightRef.current = true;
-    setStatus((prev) => (prev === "ready" || prev === "offline_cached" ? prev : "loading"));
-    if (!silent) setErrorMessage("");
+
+    const hadTrustedData = statusRef.current === "ready" || statusRef.current === "offline_cached";
+
+    if (!silent) {
+      setStatus((prev) => (prev === "ready" || prev === "offline_cached" ? prev : "loading"));
+      setErrorMessage("");
+    }
+
     try {
       const res = await api.listMedicationSchedules(child.id);
+      if (!mountedRef.current || requestedChildId !== activeChildIdRef.current) return; // komponen sudah unmount, atau anak aktifnya sudah ganti -- respons ini dibuang diam-diam
       setData(res);
       setCachedAt(null);
       setStatus("ready");
+      setBackgroundWarning("");
       cacheMedicationScheduleSnapshot(currentUserId, child.id, res);
     } catch (err) {
+      if (!mountedRef.current || requestedChildId !== activeChildIdRef.current) return;
+
+      if (silent && hadTrustedData) {
+        // Data terpercaya SUDAH tertampil (`ready`/`offline_cached`) --
+        // kegagalan refresh diam-diam ini (network, 500, 401/403,
+        // apa pun) TIDAK PERNAH menyentuh `data`/`status`/`errorMessage`
+        // yang lagi ditampilkan (termasuk pesan konflik caregiver kalau
+        // ada) -- CUMA peringatan non-destruktif yang jelas & non-teknis
+        // (nggak pernah nyebut status HTTP/detail server mentah). Ini
+        // JUGA yang menjamin 401/403 diam-diam TIDAK PERNAH "menaikkan"
+        // kapabilitas -- snapshot `can_act`/dkk yang sudah ada
+        // dipertahankan APA ADANYA, bukan diganti/direka ulang.
+        setBackgroundWarning(BACKGROUND_REFRESH_WARNING);
+        return;
+      }
+
       if (err instanceof ApiError && err.kind === "network") {
         loadFromCache();
         return;
@@ -707,6 +791,11 @@ export default function MedicationScheduleScreen({ child, currentUserId, onClose
         {(status === "ready" || status === "offline_cached") && data && (
           <>
             {errorMessage && <p className="text-warn text-xs mb-3">{errorMessage}</p>}
+            {backgroundWarning && (
+              <p className="text-[11px] text-ink-faint bg-void border border-void-hairline rounded-lg px-3 py-2 mb-3">
+                {backgroundWarning}
+              </p>
+            )}
 
             {isOnline && <AdherenceSummaryWidget childId={child.id} isOnline={isOnline} />}
 
