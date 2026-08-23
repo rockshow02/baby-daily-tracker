@@ -874,12 +874,22 @@ def test_days_with_records_unions_all_supported_categories_on_the_same_day(clien
 
 
 # ============================================================================
-# Review pasca-Phase-1 — Issue 2: feeding_volume_ml/pumping_volume_ml/
-# activity_duration_minutes SEBELUMNYA memakai total mentah (sum of
-# non-null, yang jadi 0 kalau semua event nggak punya nilai) langsung di
-# perbandingan periode -- bikin -100%/+100% palsu pas 1 periode punya
-# event tapi TIDAK SATU PUN keukur. Lihat
-# utils/insights_engine.py:_measured_total_or_none()/build_comparison().
+# Review pasca-Phase-1 — Issue 2 (+ lanjutannya): feeding_volume_ml/
+# pumping_volume_ml/activity_duration_minutes SEBELUMNYA memakai total
+# mentah (sum of non-null, yang jadi 0 kalau semua event nggak punya
+# nilai) langsung di perbandingan periode -- bikin -100%/+100% palsu pas
+# 1 periode punya event tapi TIDAK SATU PUN keukur.
+#
+# Revisi LANJUTAN (round ini): kebijakan konservatif SEBELUMNYA masih
+# ngasih lolos total PARSIAL (sebagian event keukur, sebagian nggak)
+# sebagai kalau itu total LENGKAP buat perbandingan -- itu SENDIRI bisa
+# keliru (1 event 20ml + 1 event null cuma "PALING SEDIKIT 20ml", bukan
+# "totalnya 20ml"; event yang ilang itu bisa aja gede banget dan
+# membalik kesimpulan naik/turun). Sekarang total PARSIAL JUGA jadi
+# `None` di `comparisons` -- CUMA "nggak ada event sama sekali" (0) dan
+# "semua event keukur" (total lengkap) yang boleh dipakai buat
+# perbandingan. Lihat utils/insights_engine.py:_measured_total_or_none()/
+# build_comparison() dan backend/docs/INSIGHTS.md.
 # ============================================================================
 
 
@@ -994,25 +1004,63 @@ def test_pumping_volume_comparison_both_periods_measured_computes_a_real_change(
     assert "pumping_volume_increased" in codes
 
 
-def test_pumping_volume_comparison_mixed_measured_and_unmeasured_uses_conservative_partial_sum(client, monkeypatch):
-    """Kebijakan konservatif (didokumentasikan di INSIGHTS.md): data PARSIAL (sebagian event keukur) tetap dipakai apa adanya, TIDAK di-null-kan semua."""
+def test_pumping_volume_comparison_current_partial_previous_complete_is_unavailable_not_a_false_total(client, monkeypatch):
+    """
+    Contoh PERSIS dari laporan review: periode sekarang 1 event 20ml +
+    1 event null, periode sebelumnya 100ml lengkap. `current` HARUS
+    `None` (bukan 20 -- 20 cuma "paling sedikit", event yang ilang itu
+    bisa aja bikin totalnya lebih dari 100), dan TIDAK PERNAH ada kartu
+    "pumping_volume_decreased" dari sini.
+    """
     _freeze_today(monkeypatch)
     user = register(client)
     child = create_child(client, user["token"])
     cid = child["id"]
 
-    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), volume_ml=120))
+    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), volume_ml=20))
     db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 12, 0, 0), volume_ml=None))
-    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 12, 8, 0, 0), volume_ml=80))
+    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 12, 8, 0, 0), volume_ml=100))
     db.session.commit()
 
     body = _get_insights(client, user["token"], cid).get_json()
     cmp_ = body["comparisons"]["pumping_volume_ml"]
-    assert cmp_["current"] == 120
-    assert cmp_["previous"] == 80
-    assert cmp_["change"] == 40
+    assert cmp_["current"] is None
+    assert cmp_["previous"] == 100
+    assert cmp_["change"] is None
+    assert cmp_["percent_change"] is None
+
+    # Subtotal yang DITAMPILKAN (metrics.pumping, BUKAN buat
+    # perbandingan) tetap nunjukin jumlah dari yang beneran terukur —
+    # jelas ditandai parsial lewat events_with_volume < session_count.
+    assert body["metrics"]["pumping"]["total_volume_ml"] == 20
     assert body["metrics"]["pumping"]["session_count"] == 2
     assert body["metrics"]["pumping"]["events_with_volume"] == 1
+
+    codes = [c["code"] for c in body["insights"]]
+    assert "pumping_volume_decreased" not in codes
+    assert "pumping_volume_increased" not in codes
+
+
+def test_pumping_volume_comparison_current_complete_previous_partial_is_unavailable(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), volume_ml=200))
+    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 12, 8, 0, 0), volume_ml=30))
+    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 12, 12, 0, 0), volume_ml=None))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    cmp_ = body["comparisons"]["pumping_volume_ml"]
+    assert cmp_["current"] == 200
+    assert cmp_["previous"] is None
+    assert cmp_["change"] is None
+    assert cmp_["percent_change"] is None
+    codes = [c["code"] for c in body["insights"]]
+    assert "pumping_volume_increased" not in codes
+    assert "pumping_volume_decreased" not in codes
 
 
 def test_pumping_volume_zero_is_a_real_measured_value_not_missing_data(client, monkeypatch):
@@ -1054,3 +1102,203 @@ def test_pumping_volume_no_events_at_all_is_a_confirmed_zero_not_unmeasured(clie
     assert cmp_["percent_change"] is None  # previous==0 -> null (aturan lama, bukan bug baru)
     codes = [c["code"] for c in body["insights"]]
     assert "pumping_volume_increased" in codes  # naik dari 0 TETAP observasi valid
+
+
+# --------------------------------------------------------------------------
+# Feeding volume — matriks kelengkapan penuh. `feeding_volume_ml` TIDAK
+# PERNAH menghasilkan kartu insight sendiri (bukan bagian dari
+# INSIGHT_ALLOWLIST), tapi output comparisons-nya WAJIB tetap ikut
+# kebijakan konservatif yang sama kayak pumping/activity.
+# --------------------------------------------------------------------------
+
+
+def test_feeding_volume_comparison_current_partial_previous_complete(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(FeedingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), feed_type="sufor", volume_ml=30))
+    db.session.add(FeedingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 12, 0, 0), feed_type="asi_langsung", volume_ml=None))
+    db.session.add(FeedingLog(child_id=cid, timestamp=datetime(2026, 8, 12, 8, 0, 0), feed_type="sufor", volume_ml=100))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    cmp_ = body["comparisons"]["feeding_volume_ml"]
+    assert cmp_["current"] is None  # parsial (1 dari 2 event keukur)
+    assert cmp_["previous"] == 100
+    assert cmp_["change"] is None
+    assert cmp_["percent_change"] is None
+    assert body["metrics"]["feeding"]["total_volume_ml"] == 30  # subtotal DITAMPILKAN tetap ada
+    assert body["metrics"]["feeding"]["events_with_volume"] == 1
+
+
+def test_feeding_volume_comparison_current_complete_previous_partial(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(FeedingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), feed_type="sufor", volume_ml=120))
+    db.session.add(FeedingLog(child_id=cid, timestamp=datetime(2026, 8, 12, 8, 0, 0), feed_type="sufor", volume_ml=50))
+    db.session.add(FeedingLog(child_id=cid, timestamp=datetime(2026, 8, 12, 12, 0, 0), feed_type="asi_langsung", volume_ml=None))
+    db.session.commit()
+
+    cmp_ = _get_insights(client, user["token"], cid).get_json()["comparisons"]["feeding_volume_ml"]
+    assert cmp_["current"] == 120
+    assert cmp_["previous"] is None  # parsial
+    assert cmp_["change"] is None
+    assert cmp_["percent_change"] is None
+
+
+def test_feeding_volume_comparison_both_periods_partial(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(FeedingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), feed_type="sufor", volume_ml=40))
+    db.session.add(FeedingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 12, 0, 0), feed_type="asi_langsung", volume_ml=None))
+    db.session.add(FeedingLog(child_id=cid, timestamp=datetime(2026, 8, 12, 8, 0, 0), feed_type="sufor", volume_ml=60))
+    db.session.add(FeedingLog(child_id=cid, timestamp=datetime(2026, 8, 12, 12, 0, 0), feed_type="asi_langsung", volume_ml=None))
+    db.session.commit()
+
+    cmp_ = _get_insights(client, user["token"], cid).get_json()["comparisons"]["feeding_volume_ml"]
+    assert cmp_ == {"current": None, "previous": None, "change": None, "percent_change": None}
+
+
+def test_feeding_volume_comparison_both_periods_complete(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(FeedingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), feed_type="sufor", volume_ml=150))
+    db.session.add(FeedingLog(child_id=cid, timestamp=datetime(2026, 8, 12, 8, 0, 0), feed_type="sufor", volume_ml=100))
+    db.session.commit()
+
+    cmp_ = _get_insights(client, user["token"], cid).get_json()["comparisons"]["feeding_volume_ml"]
+    assert cmp_ == {"current": 150, "previous": 100, "change": 50, "percent_change": 50.0}
+
+
+def test_feeding_volume_comparison_no_events_vs_complete_period(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(FeedingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), feed_type="sufor", volume_ml=80))
+    # TIDAK ADA FeedingLog SAMA SEKALI di periode sebelumnya.
+    db.session.commit()
+
+    cmp_ = _get_insights(client, user["token"], cid).get_json()["comparisons"]["feeding_volume_ml"]
+    assert cmp_["current"] == 80
+    assert cmp_["previous"] == 0
+    assert cmp_["change"] == 80
+    assert cmp_["percent_change"] is None
+
+
+def test_feeding_volume_comparison_literal_zero_vs_complete_period(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(FeedingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), feed_type="asi_langsung", volume_ml=0))
+    db.session.add(FeedingLog(child_id=cid, timestamp=datetime(2026, 8, 12, 8, 0, 0), feed_type="sufor", volume_ml=90))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    cmp_ = body["comparisons"]["feeding_volume_ml"]
+    assert cmp_["current"] == 0
+    assert cmp_["previous"] == 90
+    assert cmp_["change"] == -90
+    assert body["metrics"]["feeding"]["events_with_volume"] == 1
+
+
+# --------------------------------------------------------------------------
+# Activity duration — matriks kelengkapan penuh (sama polanya kayak
+# pumping volume di atas), termasuk kartu insight-nya.
+# --------------------------------------------------------------------------
+
+
+def test_activity_duration_comparison_current_partial_previous_complete_no_decreased_card(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(ActivityLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), activity_type="stroll", duration_minutes=10))
+    db.session.add(ActivityLog(child_id=cid, timestamp=datetime(2026, 8, 19, 12, 0, 0), activity_type="bathing", duration_minutes=None))
+    db.session.add(ActivityLog(child_id=cid, timestamp=datetime(2026, 8, 12, 8, 0, 0), activity_type="stroll", duration_minutes=90))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    cmp_ = body["comparisons"]["activity_duration_minutes"]
+    assert cmp_["current"] is None
+    assert cmp_["previous"] == 90
+    assert cmp_["change"] is None
+    assert cmp_["percent_change"] is None
+    assert body["metrics"]["activity"]["total_duration_minutes"] == 10  # subtotal DITAMPILKAN tetap ada
+    codes = [c["code"] for c in body["insights"]]
+    assert "activity_duration_decreased" not in codes
+    assert "activity_duration_increased" not in codes
+
+
+def test_activity_duration_comparison_current_complete_previous_partial(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(ActivityLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), activity_type="stroll", duration_minutes=90))
+    db.session.add(ActivityLog(child_id=cid, timestamp=datetime(2026, 8, 12, 8, 0, 0), activity_type="stroll", duration_minutes=10))
+    db.session.add(ActivityLog(child_id=cid, timestamp=datetime(2026, 8, 12, 12, 0, 0), activity_type="bathing", duration_minutes=None))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    cmp_ = body["comparisons"]["activity_duration_minutes"]
+    assert cmp_["current"] == 90
+    assert cmp_["previous"] is None
+    assert cmp_["change"] is None
+    codes = [c["code"] for c in body["insights"]]
+    assert "activity_duration_increased" not in codes
+    assert "activity_duration_decreased" not in codes
+
+
+def test_activity_duration_comparison_both_periods_complete(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(ActivityLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), activity_type="stroll", duration_minutes=90))
+    db.session.add(ActivityLog(child_id=cid, timestamp=datetime(2026, 8, 12, 8, 0, 0), activity_type="stroll", duration_minutes=10))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    assert body["comparisons"]["activity_duration_minutes"] == {
+        "current": 90, "previous": 10, "change": 80, "percent_change": 800.0,
+    }
+    codes = [c["code"] for c in body["insights"]]
+    assert "activity_duration_increased" in codes
+
+
+def test_activity_duration_comparison_no_events_and_literal_zero(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    # literal 0 -- 1 dari 1 event di periode ini keukur (LENGKAP, bukan
+    # parsial), jadi tetap sah dipakai buat perbandingan.
+    db.session.add(ActivityLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), activity_type="stroll", duration_minutes=0))
+    # TIDAK ADA ActivityLog SAMA SEKALI di periode sebelumnya.
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    cmp_ = body["comparisons"]["activity_duration_minutes"]
+    assert cmp_["current"] == 0
+    assert cmp_["previous"] == 0
+    assert cmp_["change"] == 0
+    assert body["metrics"]["activity"]["events_with_duration"] == 1

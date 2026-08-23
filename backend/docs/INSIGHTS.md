@@ -110,44 +110,63 @@ tempat yang salah).
   kalau **kedua** pengukuran pembanding punya nilai field itu — kalau
   salah satu `null`, hasilnya `null` (bukan menebak/menganggap 0).
 
-### Total opsional (volume/durasi) di `comparisons` — kebijakan 3 keadaan
+### Total opsional (volume/durasi) — subtotal ditampilkan vs total layak-dibandingkan
 
-**(Perbaikan pasca-review Phase 1.)** Untuk 3 metrik "total opsional" di
-`comparisons` — `feeding_volume_ml`, `pumping_volume_ml`,
-`activity_duration_minutes` — nilai `total_volume_ml`/
-`total_duration_minutes` mentah dari `metrics.*` **tidak langsung**
-dipakai sebagai `current`/`previous` di `comparisons`. Sebelum masuk ke
-`build_comparison()`, tiap sisi (periode sekarang & sebelumnya) melewati
-`utils/insights_engine.py:_measured_total_or_none()` dulu, yang
-membedakan **3 keadaan** per periode:
+**(Perbaikan pasca-review Phase 1, dua putaran.)** Untuk 3 metrik "total
+opsional" — `feeding_volume_ml`, `pumping_volume_ml`,
+`activity_duration_minutes` — ada **DUA angka yang beda kegunaannya**,
+dan modul ini SENGAJA tidak pernah mencampur keduanya:
 
-1. **Tidak ada event sama sekali** (`total_events`/`session_count == 0`)
-   → dikembalikan sebagai **`0` yang sah** (total dari nol event
-   memang genuinely nol) — SAMA kebijakannya kayak `feeding_count`/
-   `diaper_count` yang sudah ada (0 event = 0 valid, bukan "data
-   hilang").
-2. **Ada event, TAPI TIDAK SATU PUN punya nilai tercatat** (mis. sesi
-   pumping dicatat tanpa isi volume) → dikembalikan sebagai **`null`**
-   ("kita nggak tau totalnya", BUKAN 0) — inilah perbaikan intinya: versi
-   sebelum perbaikan ini memakai `sum([])` mentah (= 0) buat kasus ini,
-   yang di layer perbandingan KELIRU keukur seolah "beneran nol" dan
-   bisa memicu `-100%`/kartu "menurun" palsu kalau periode sebelumnya
-   punya volume terukur.
-3. **Sebagian atau semua event punya nilai** (`events_with_volume`/
-   `events_with_duration > 0`) → dikembalikan **jumlah dari yang
-   BENERAN terukur** apa adanya (kebijakan **konservatif**: data
-   parsial yang nyata tetap dipakai, TIDAK di-null-kan semua cuma
-   gara-gara ada 1 event yang bolong — lihat
-   `test_pumping_volume_comparison_mixed_measured_and_unmeasured_uses_conservative_partial_sum`
-   di `backend/tests/test_insights.py`).
+- **`metrics.<domain>.total_volume_ml`/`total_duration_minutes`** (mis.
+  `metrics.pumping.total_volume_ml`) — **subtotal yang DITAMPILKAN**,
+  SELALU jumlah dari event yang BENERAN punya nilai (`sum` non-null) —
+  TIDAK PERNAH berubah oleh logika di bawah ini. Bisa jadi PARSIAL
+  (cuma menjumlah sebagian event kalau sebagian lainnya nggak punya
+  nilai) — kelengkapannya WAJIB dibaca lewat `events_with_volume`/
+  `events_with_duration` VS `total_events`/`session_count` yang selalu
+  ikut disertakan di objek yang sama (`events_with_volume <
+  total_events` = subtotal ini parsial).
+- **`comparisons.<metrik>.current`/`.previous`** — **total yang LAYAK
+  DIBANDINGKAN**, dihitung dari subtotal di atas TAPI cuma dipakai kalau
+  memang LENGKAP untuk periode itu. Sebelum masuk ke `build_comparison()`,
+  tiap sisi (periode sekarang & sebelumnya) melewati
+  `utils/insights_engine.py:_measured_total_or_none(total, event_count,
+  events_with_measured_value)` dulu.
+
+Tabel kebenaran `_measured_total_or_none()` per periode (`N` = jumlah
+event di periode itu, `M` = jumlah event yang BENERAN punya nilai):
+
+| Keadaan | Kondisi | Hasil buat `comparisons` | Alasan |
+|---|---|---|---|
+| Tidak ada event | `N == 0` | **`0`** (sah) | 0 event = total memang genuinely nol — SAMA kebijakannya kayak `feeding_count`/`diaper_count` yang sudah ada. |
+| Semua event terukur | `M == N` (`N > 0`) | **`total`** apa adanya | Total LENGKAP, aman dibandingkan. |
+| Tidak ada yang terukur | `M == 0` (`N > 0`) | **`null`** | Nggak tau totalnya sama sekali. |
+| **Sebagian terukur (parsial)** | `0 < M < N` | **`null`** | Subtotal yang ada cuma "PALING SEDIKIT segini" — event yang nilainya hilang BISA SAJA cukup besar buat membalik kesimpulan naik/turun, jadi TIDAK PERNAH dianggap total lengkap buat perbandingan, walau `metrics.*` tetap menampilkan subtotal parsialnya. |
+
+**Revisi putaran ke-2 (round ini)**: putaran perbaikan SEBELUMNYA
+sempat memperbolehkan baris ke-4 di atas (parsial) tetap dipakai buat
+`comparisons` ("data parsial lebih berguna daripada di-null-kan") — itu
+SENDIRI ternyata masih bisa menyesatkan: contoh nyata dari laporan
+review — periode sekarang 1 event 20 ml + 1 event `volume_ml=null`,
+periode sebelumnya 100 ml lengkap. Subtotal 20 ml itu BUKAN "totalnya
+20 ml", cuma "minimal 20 ml" — event yang nilainya hilang bisa aja
+sebenarnya 150 ml, yang bakal membalik kesimpulan dari "turun" jadi
+"naik". Sekarang baris ke-4 JUGA `null`, konsisten sama baris ke-3 —
+**hanya** "tidak ada event" dan "semua event terukur" yang dianggap
+total layak-dibandingkan. Lihat
+`test_pumping_volume_comparison_current_partial_previous_complete_is_unavailable_not_a_false_total`
+di `backend/tests/test_insights.py` buat regresi eksplisit contoh di
+atas.
 
 Nilai **literal 0** yang BENERAN dicatat di 1 event (mis. `volume_ml=0`,
-valid — model tidak melarangnya) **selalu** masuk keadaan 3 (`events_with_volume
->= 1`), **tidak pernah** disamakan dengan keadaan 2 — jadi "beneran
-ketercatat nol" tetap bisa dibedakan dari "belum sempat diisi".
+valid — model tidak melarangnya) **selalu** ikut dihitung sebagai
+"event yang punya nilai" (menambah `M`) — jadi 1 event dengan
+`volume_ml=0` di periode yang cuma punya 1 event = `M == N == 1` =
+LENGKAP (baris ke-2), **tidak pernah** disamakan dengan "tidak
+terukur"/"parsial".
 
 `feeding_count`, `diaper_count`, dan `sleep_duration_minutes`
-**tidak tersentuh** perubahan ini — ketiganya tetap count/total murni
+**tidak tersentuh** kebijakan ini — ketiganya tetap count/total murni
 tanpa kemungkinan `null` (event opsional dengan nilai yang bisa hilang
 cuma ada di volume/durasi, bukan di hitungan kejadiannya sendiri).
 
@@ -166,9 +185,10 @@ dihitung dari `utils/insights_engine.py:build_comparison()`:
    (`feeding_count`, `diaper_count`) dan `sleep_duration_minutes`,
    keduanya **selalu** angka mentah (0 kalau genuinely nol event). Buat
    3 metrik "total opsional" di atas, salah satu (atau kedua) sisi BISA
-   `null` kalau periode itu punya event tapi tidak satu pun terukur
-   (lihat bagian sebelumnya). Kalau salah satu sisi `null`,
-   `change`/`percent_change` **SAMA-SAMA `null`** — tidak pernah
+   `null` kalau periode itu TIDAK punya total LENGKAP — baik karena
+   tidak satu pun event terukur, MAUPUN cuma SEBAGIAN event yang terukur
+   (lihat tabel kebenaran di bagian sebelumnya). Kalau salah satu sisi
+   `null`, `change`/`percent_change` **SAMA-SAMA `null`** — tidak pernah
    dihitung dari angka yang sebagian "mengarang", tidak pernah crash.
 4. **Tidak pernah** ada `-100%`/`+100%`/persentase lain yang
    di-fabrikasi dari data yang sebenarnya hilang (bukan beneran nol) —

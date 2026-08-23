@@ -601,46 +601,58 @@ def compute_milestone_metrics(child_id, start_date, end_date):
 
 def _measured_total_or_none(total, event_count, events_with_measured_value):
     """
-    Buat metrik "total opsional" (volume/durasi yang nggak semua event
-    pasti punya nilainya — feeding/pumping volume, activity duration).
-    Membedakan 3 keadaan (requirement review #2 — "distinguish among:
-    no events / events exist but none measured / partially measured"):
+    Balikin total yang BOLEH dipakai buat PERBANDINGAN periode (`current`/
+    `previous` di `comparisons.feeding_volume_ml`/`pumping_volume_ml`/
+    `activity_duration_minutes`) — BUKAN nilai yang ditampilkan di
+    `metrics.*.total_volume_ml`/`total_duration_minutes` (itu TETAP
+    subtotal dari yang terukur apa adanya, TIDAK PERNAH berubah gara-gara
+    fungsi ini — lihat compute_feeding_metrics/compute_pumping_metrics/
+    compute_activity_metrics, TIDAK dipanggil dari sana sama sekali).
+
+    Kebijakan KELENGKAPAN yang KONSERVATIF (perbaikan review #2 lanjutan
+    — total PARSIAL sekarang TIDAK LAGI dianggap "lengkap" buat
+    perbandingan, beda dari revisi sebelumnya): cuma ada 2 keadaan yang
+    boleh dipakai buat bandingin periode, sisanya `None`.
 
       1. `event_count == 0` (nggak ada event SAMA SEKALI di periode
-         itu) -> `total` dikembalikan APA ADANYA, yaitu 0 — ini
-         KETERCATAT NOL YANG BENERAN VALID (persis kayak feeding_count/
-         diaper_count=0 dipercaya penuh sebagai "nggak ada event"),
-         BUKAN data yang hilang. Nilai 0 di sini SAH dipakai buat
-         perbandingan "naik dari 0" (konsisten sama kebijakan
-         feeding_count/diaper_count yang sudah ada — previous=0 TETAP
-         bikin `change` valid, cuma `percent_change`-nya yang null,
+         itu) -> `total` (= 0) dikembalikan APA ADANYA — ini KETERCATAT
+         NOL YANG BENERAN VALID (persis kayak feeding_count/diaper_count
+         = 0 dipercaya penuh sebagai "nggak ada event"), BUKAN data yang
+         hilang. Sah dipakai buat perbandingan "naik dari 0" (previous=0
+         TETAP bikin `change` valid, cuma `percent_change`-nya null,
          lihat `build_comparison`).
-      2. `event_count > 0` TAPI `events_with_measured_value == 0` (ADA
-         event, tapi TIDAK SATU PUN punya nilai tercatat — mis.
-         caregiver nyatet sesi pumping tapi lupa isi volume) -> `None`.
-         Ini yang BEDA dari kasus 1: kita GENUINELY nggak tau berapa
-         totalnya, jadi TIDAK PERNAH dianggap 0 (yang bakal keliru
-         diartiin "beneran nggak ada" pas dibandingin — inilah akar
-         bug review: total 0 dari `sum([])` kepakai seolah "beneran
-         nol" padahal cuma "belum sempat diisi").
-      3. `events_with_measured_value > 0` (SEBAGIAN atau SEMUA event
-         punya nilai) -> `total` (jumlah dari yang BENERAN terukur)
-         dikembalikan apa adanya — kebijakan KONSERVATIF: data parsial
-         yang nyata tetap lebih berguna daripada di-null-kan semua
-         cuma gara-gara ada 1 event yang bolong.
+      2. `events_with_measured_value == event_count` (SEMUA event di
+         periode itu punya nilai tercatat — total-nya LENGKAP, bukan
+         cuma sebagian) -> `total` dikembalikan apa adanya, SAH dipakai
+         buat perbandingan.
+      3. SELAIN dua kasus di atas — baik `events_with_measured_value ==
+         0` (TIDAK SATU PUN event punya nilai) MAUPUN
+         `0 < events_with_measured_value < event_count` (CUMA SEBAGIAN
+         event punya nilai, "parsial") -> `None`. Total parsial TIDAK
+         PERNAH dianggap total lengkap buat perbandingan — 1 event
+         `volume_ml=20` + 1 event `volume_ml=null` di periode yang sama
+         cuma "PALING SEDIKIT 20", bukan "total-nya 20" — event yang
+         nilainya hilang itu BISA SAJA bikin total sebenarnya lebih
+         besar dari periode pembanding, jadi ngebandingin subtotal
+         parsial seolah lengkap bisa ngasilin kenaikan/penurunan yang
+         KELIRU (akar bug: revisi sebelumnya salah nganggep "ada
+         sebagian data" cukup buat dipercaya penuh sebagai total).
 
     Nilai literal 0 yang BENERAN tercatat di 1 event (mis. volume_ml=0)
-    SUDAH bikin `events_with_measured_value >= 1` (lihat
+    SUDAH bikin event itu terhitung "punya nilai" (lihat
     compute_feeding_metrics/compute_pumping_metrics/
     compute_activity_metrics: `volume_ml is not None`/`duration_minutes
     is not None` menghitung 0 literal sebagai "punya nilai") — jadi
-    kasus itu otomatis masuk poin 3 di atas, TIDAK PERNAH disamakan
-    sama poin 2. Lihat backend/docs/INSIGHTS.md bagian "Kebijakan nilai
-    yang hilang" buat detail lengkapnya.
+    kasus itu ikut normal ke perhitungan `events_with_measured_value`,
+    TIDAK PERNAH disamakan sama "nilai hilang". Lihat
+    backend/docs/INSIGHTS.md bagian "Kebijakan nilai yang hilang" buat
+    detail + tabel kebenaran lengkapnya.
     """
-    if event_count > 0 and events_with_measured_value == 0:
-        return None
-    return total
+    if event_count == 0:
+        return total
+    if events_with_measured_value == event_count:
+        return total
+    return None
 
 
 def build_comparison(current, previous):
@@ -654,12 +666,15 @@ def build_comparison(current, previous):
          diaper_count, dst.) current/previous di sini SELALU angka asli
          (0 kalau genuinely nggak ada event). Buat metrik "total
          opsional" (feeding_volume_ml/pumping_volume_ml/
-         activity_duration_minutes), pemanggil BOLEH ngirim `None`
-         lewat `_measured_total_or_none()` kalau periode itu nggak
-         punya SATU PUN event dengan nilai terukur — kalau salah satu
-         (atau kedua) sisi `None`, `change`/`percent_change` SAMA-SAMA
-         `None` (nggak pernah dihitung dari angka yang sebagian
-         "ngarang"), TIDAK PERNAH crash.
+         activity_duration_minutes), pemanggil BOLEH ngirim `None` lewat
+         `_measured_total_or_none()` kalau periode itu TIDAK punya total
+         yang LENGKAP — baik karena TIDAK SATU PUN event dengan nilai
+         terukur, MAUPUN karena cuma SEBAGIAN event yang terukur (total
+         parsial TIDAK PERNAH dianggap cukup buat perbandingan, cuma
+         "nggak ada event sama sekali" yang tetap sah sebagai 0) — kalau
+         salah satu (atau kedua) sisi `None`, `change`/`percent_change`
+         SAMA-SAMA `None` (nggak pernah dihitung dari angka yang
+         sebagian "ngarang"), TIDAK PERNAH crash.
       4. change/percent_change dibulatkan 1 desimal (`_round1`), current/
          previous dikembalikan APA ADANYA (integer/float asli ATAU
          `None`, TIDAK diformat).
@@ -734,13 +749,17 @@ def build_insights(metrics, comparisons, data_quality):
             candidates.append(_card("diaper_count_decreased", "diaper_count", "down", abs(delta)))
 
     # pumping_volume_ml/activity_duration_minutes BISA `None` di kedua
-    # sisi (lihat _measured_total_or_none) kalau periode itu nggak
-    # punya SATU PUN event dengan nilai terukur — `delta is not None`
-    # jadi gate WAJIB di sini (bukan cuma penghias): tanpa ini,
-    # `delta >= AMBANG` bakal TypeError begitu salah satu sisi `None`
-    # (mis. periode sekarang keukur tapi periode sebelumnya nggak sama
-    # sekali). Kartu kenaikan/penurunan CUMA digenerate kalau KEDUA
-    # periode punya nilai terukur beneran (requirement review #2).
+    # sisi (lihat _measured_total_or_none) kalau periode itu TIDAK
+    # punya total LENGKAP — nggak ada event dengan nilai terukur SAMA
+    # SEKALI, ATAUPUN cuma SEBAGIAN event yang terukur (parsial) —
+    # `delta is not None` jadi gate WAJIB di sini (bukan cuma penghias):
+    # tanpa ini, `delta >= AMBANG` bakal TypeError begitu salah satu
+    # sisi `None`. Kartu kenaikan/penurunan CUMA digenerate kalau KEDUA
+    # periode punya total LENGKAP (nggak ada event, ATAU semua event
+    # punya nilai) — total parsial TIDAK PERNAH cukup buat memicu kartu
+    # (requirement review lanjutan: subtotal parsial bisa aja
+    # ngilangin/membalik kesimpulan naik/turun kalau event yang nilainya
+    # hilang itu ternyata gede).
     pumping_cmp = comparisons["pumping_volume_ml"]
     delta = pumping_cmp["change"]
     if delta is not None:
