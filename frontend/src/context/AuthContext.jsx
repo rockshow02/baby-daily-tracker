@@ -11,6 +11,7 @@ import {
 } from "../api/client";
 import { cacheUserProfile, getCachedUserProfile, clearUserCache } from "../utils/sessionCache";
 import { clearLastSyncedAt } from "../utils/syncMetadata";
+import { clearAllInsightSnapshotsForUser } from "../utils/insightCache";
 
 const AuthContext = createContext(null);
 
@@ -57,6 +58,12 @@ export function AuthProvider({ children }) {
       // (utils/offlineQueue.js) TIDAK disentuh di sini — logout nggak
       // pernah menghapus catatan yang masih nunggu disinkron.
       clearLastSyncedAt(uid);
+      // Snapshot insight (utils/insightCache.js) SAMA — nggak sensitif
+      // (payload-nya sendiri sudah privacy-minimal, lihat
+      // backend/docs/INSIGHTS.md), tapi tetap dibersihkan biar akun lain
+      // yang login di device yang sama nggak pernah kebetulan lihat
+      // snapshot akun sebelumnya.
+      clearAllInsightSnapshotsForUser(uid);
     }
     setIsOfflineSession(false);
   }, []);

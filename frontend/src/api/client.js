@@ -396,6 +396,11 @@ export const api = {
   getStats: (childId, days = 7) =>
     request(`/children/${childId}/stats?days=${days}`),
 
+  // Smart Insights & Weekly Summary (Phase 1) — BACA SAJA, `period`
+  // cuma "7d" | "30d" (server menolak nilai lain dengan 400).
+  getInsights: (childId, period = "7d") =>
+    request(`/children/${childId}/insights?period=${period}`),
+
   // multi-caregiver (Caregiver Roles & Permissions Phase 1 — lihat
   // backend/docs/ROLES_PERMISSIONS.md)
   listCaregivers: (childId) => request(`/children/${childId}/caregivers`),

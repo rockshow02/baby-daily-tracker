@@ -23,6 +23,18 @@ vi.mock("./components/MotorActivityCard", () => ({ default: () => null }));
 vi.mock("./pages/OnboardingWizard", () => ({
   default: () => <div data-testid="onboarding-wizard-stub">onboarding</div>,
 }));
+// InsightsScreen (Smart Insights & Weekly Summary Phase 1) di-stub SAMA
+// alasannya — test di file ini cuma perlu mbuktiin App.jsx NAVIGASI ke
+// layar ini dengan child/currentUserId yang benar, bukan nge-ulang detail
+// perilaku InsightsScreen sendiri (itu sudah dites penuh di
+// src/pages/InsightsScreen.test.jsx).
+vi.mock("./pages/InsightsScreen", () => ({
+  default: ({ child, currentUserId }) => (
+    <div data-testid="insights-screen-stub">
+      insights for child {child.id} / user {currentUserId}
+    </div>
+  ),
+}));
 
 const { apiMock } = vi.hoisted(() => ({
   apiMock: {
@@ -536,5 +548,71 @@ describe("App — Caregiver Roles & Permissions Phase 1: owner-only caregiver-ma
     fireEvent.click(screen.getByText("☰"));
     await screen.findByText("Status Sinkronisasi");
     expect(screen.queryByText("Pengasuh")).not.toBeInTheDocument();
+  });
+});
+
+describe("App — '✨ Insight' nav entry (Smart Insights & Weekly Summary Phase 1)", () => {
+  async function renderAuthenticatedWithRole(role) {
+    setToken("tok-5");
+    setCurrentUser(5);
+    apiMock.me.mockResolvedValue(testUser);
+    apiMock.listChildren.mockResolvedValue([{ ...testChild, role }]);
+    setOnline(true);
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByText("Dedek").length).toBeGreaterThan(0));
+  }
+
+  it("shows the 'Insight' entry to the owner", async () => {
+    await renderAuthenticatedWithRole("owner");
+    fireEvent.click(screen.getByText("☰"));
+    expect(await screen.findByText("Insight")).toBeInTheDocument();
+  });
+
+  it("shows the 'Insight' entry to an editor (read-only insights are not owner-only)", async () => {
+    await renderAuthenticatedWithRole("editor");
+    fireEvent.click(screen.getByText("☰"));
+    expect(await screen.findByText("Insight")).toBeInTheDocument();
+  });
+
+  it("shows the 'Insight' entry to a viewer (viewer is never hidden from insights)", async () => {
+    await renderAuthenticatedWithRole("viewer");
+    fireEvent.click(screen.getByText("☰"));
+    expect(await screen.findByText("Insight")).toBeInTheDocument();
+  });
+
+  it("navigates to the Insight screen with the correct child and user when clicked", async () => {
+    await renderAuthenticatedWithRole("owner");
+    fireEvent.click(screen.getByText("☰"));
+    fireEvent.click(await screen.findByText("Insight"));
+    expect(await screen.findByTestId("insights-screen-stub")).toHaveTextContent(
+      `insights for child ${testChild.id} / user ${testUser.id}`,
+    );
+  });
+});
+
+describe("App — revoked child access removes cached insight snapshots on revalidation", () => {
+  it("prunes insight cache entries for children no longer in the accessible list after a successful online revalidation", async () => {
+    setToken("tok-5");
+    setCurrentUser(5);
+    apiMock.me.mockResolvedValue(testUser);
+    apiMock.listChildren.mockResolvedValue([testChild]); // server cuma balikin testChild — akses anak lain (999) udah dicabut
+    setOnline(true);
+
+    const revokedKey = `babytracker_insight_cache_v1:${testUser.id}:999`;
+    const stillAccessibleKey = `babytracker_insight_cache_v1:${testUser.id}:${testChild.id}`;
+    const snapshot = JSON.stringify({
+      schemaVersion: 1, userId: testUser.id, childId: 999, cachedAt: new Date().toISOString(), data: {},
+    });
+    localStorage.setItem(revokedKey, snapshot);
+    localStorage.setItem(
+      stillAccessibleKey,
+      JSON.stringify({ schemaVersion: 1, userId: testUser.id, childId: testChild.id, cachedAt: new Date().toISOString(), data: {} }),
+    );
+
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByText("Dedek").length).toBeGreaterThan(0));
+
+    await waitFor(() => expect(localStorage.getItem(revokedKey)).toBeNull());
+    expect(localStorage.getItem(stillAccessibleKey)).not.toBeNull();
   });
 });

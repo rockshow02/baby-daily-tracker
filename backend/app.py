@@ -98,6 +98,7 @@ def create_app(config_overrides=None):
     from routes.article_routes import article_bp
     from routes.admin_routes import admin_bp
     from routes.audit_routes import audit_bp
+    from routes.insights_routes import insights_bp
 
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(children_bp, url_prefix="/api")
@@ -112,6 +113,7 @@ def create_app(config_overrides=None):
     app.register_blueprint(article_bp, url_prefix="/api")
     app.register_blueprint(admin_bp, url_prefix="/api")
     app.register_blueprint(audit_bp, url_prefix="/api")
+    app.register_blueprint(insights_bp, url_prefix="/api")
 
     with app.app_context():
         db.create_all()

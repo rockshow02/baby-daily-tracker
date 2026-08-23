@@ -10,6 +10,7 @@ import {
   getCachedActiveChildId,
   setCachedActiveChildId,
 } from "./utils/sessionCache";
+import { pruneInsightCacheToAccessibleChildren } from "./utils/insightCache";
 import AuthScreen from "./pages/AuthScreen";
 import OnboardingWizard from "./pages/OnboardingWizard";
 import Dashboard from "./pages/Dashboard";
@@ -17,6 +18,7 @@ import GrowthScreen from "./pages/GrowthScreen";
 import HealthScreen from "./pages/HealthScreen";
 import MomentsScreen from "./pages/MomentsScreen";
 import StatsScreen from "./pages/StatsScreen";
+import InsightsScreen from "./pages/InsightsScreen";
 import ChildProfileScreen from "./pages/ChildProfileScreen";
 import UserProfileScreen from "./pages/UserProfileScreen";
 import CaregiverModal from "./components/CaregiverModal";
@@ -30,6 +32,7 @@ const NAV_ITEMS = [
   { key: "health", label: "Kesehatan", icon: "🩺" },
   { key: "moments", label: "Momen", icon: "✨" },
   { key: "stats", label: "Statistik", icon: "📊" },
+  { key: "insights", label: "Insight", icon: "✨" },
 ];
 
 const EXTRA_LABELS = {
@@ -71,6 +74,11 @@ function AppContent() {
       const list = await api.listChildren();
       setChildren(list);
       cacheChildren(user.id, list);
+      // Revalidasi ONLINE yang berhasil = kesempatan buat mbuang snapshot
+      // insight anak mana pun yang aksesnya udah dicabut (caregiver lain
+      // ngeluarin kita, atau anaknya dihapus) — snapshot lama nggak boleh
+      // nyangkut jadi "hantu" yang masih keliatan pas offline nanti.
+      pruneInsightCacheToAccessibleChildren(user.id, list.map((c) => c.id));
       const cachedActiveId = getCachedActiveChildId(user.id);
       const next = list.find((c) => c.id === cachedActiveId) || list[0] || null;
       setActiveChild(next);
@@ -278,6 +286,7 @@ function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, s
       {activeView === "health" && <HealthScreen child={activeChild} />}
       {activeView === "moments" && <MomentsScreen child={activeChild} />}
       {activeView === "stats" && <StatsScreen child={activeChild} />}
+      {activeView === "insights" && <InsightsScreen child={activeChild} currentUserId={user.id} />}
       {activeView === "childProfile" && (
         <ChildProfileScreen child={activeChild} currentUserId={user.id} onUpdated={handleChildUpdated} />
       )}
