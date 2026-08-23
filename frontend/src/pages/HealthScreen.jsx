@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import VaccinationScreen from "../components/VaccinationScreen";
 import SteppedDateTimeInput from "../components/SteppedDateTimeInput";
 import RelatedArticles from "../components/RelatedArticles";
+import DoctorConsultationScreen from "../components/DoctorConsultationScreen";
 import { todayWIB } from "../utils/date";
 
 const SUB_TABS = [
@@ -38,6 +39,7 @@ export default function HealthScreen({ child }) {
   const [medicationForIllness, setMedicationForIllness] = useState(null); // illness id kalau nambah obat dari kartu sakit
   const [editingLog, setEditingLog] = useState(null);
   const [editingKind, setEditingKind] = useState(null);
+  const [showConsultation, setShowConsultation] = useState(false);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -108,6 +110,13 @@ export default function HealthScreen({ child }) {
         <>
           {activeTab === "doctor" && (
             <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => setShowConsultation(true)}
+                className="w-full py-2.5 mb-1 rounded-xl2 border border-feed text-feed text-sm font-semibold"
+              >
+                🩺 Siapkan Konsultasi
+              </button>
               {visits.length === 0 && <p className="text-ink-faint text-sm">Belum ada catatan kunjungan.</p>}
               {visits.map((v) => (
                 <div
@@ -319,6 +328,17 @@ export default function HealthScreen({ child }) {
             setEditingKind(null);
           }}
           onSaved={loadAll}
+        />
+      )}
+
+      {showConsultation && (
+        <DoctorConsultationScreen
+          child={child}
+          onClose={() => setShowConsultation(false)}
+          onRecordVisit={() => {
+            setShowConsultation(false);
+            openAdd();
+          }}
         />
       )}
     </div>

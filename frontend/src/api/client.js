@@ -322,6 +322,55 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  // Doctor Consultation Workflow — Phase 1. POST (bukan GET) SENGAJA
+  // dipakai buat preview juga (bukan cuma PDF) — payload-nya bisa
+  // memuat pilihan section + teks transien questions/additional_note
+  // yang nggak boleh nongol di query string/riwayat browser/log proxy.
+  previewDoctorConsultation: (childId, payload) =>
+    request(`/children/${childId}/doctor-consultation/preview`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  doctorConsultationPdfUrl: (childId) => `${BASE_URL}/children/${childId}/doctor-consultation/pdf`,
+
+  /**
+   * Sama seperti `downloadAuthenticated` di atas, TAPI POST + JSON body
+   * (endpoint PDF konsultasi butuh payload periode/section/teks
+   * transien, jadi nggak bisa GET biasa). PDF export SENGAJA online-only
+   * — nggak pernah masuk antrean offline (lihat utils/offlineQueue.js).
+   */
+  downloadAuthenticatedPost: async (url, body, filename) => {
+    const token = getToken();
+    const res = await fetch(url, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      let message = `Gagal download (${res.status})`;
+      try {
+        const data = await res.json();
+        if (data?.error) message = data.error;
+      } catch (_) {
+        // body bukan JSON, biarin pesan default
+      }
+      throw new Error(message);
+    }
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objectUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(objectUrl);
+  },
+
   // health: suhu tubuh
   listTemperature: (childId) =>
     request(`/children/${childId}/temperature-logs`),

@@ -155,6 +155,26 @@ MEMBERSHIP_ENTITY_TYPE = "caregiver_membership"
 REMINDER_OCCURRENCE_COMPLETED_ENTITY_TYPE = "reminder_occurrence_completed"
 REMINDER_OCCURRENCE_SKIPPED_ENTITY_TYPE = "reminder_occurrence_skipped"
 
+# --- Doctor Consultation Workflow — Phase 1 (lihat
+# backend/docs/DOCTOR_CONSULTATION.md) ---
+#
+# CUMA export PDF yang diaudit, BUKAN preview (preview itu baca doang,
+# dipanggil berkali-kali tiap section/tanggal di-ganti sebelum caregiver
+# mantap — mengaudit itu bakal jadi noise besar tanpa nilai keamanan
+# tambahan, mirip kenapa GET /reminders atau GET /insights juga nggak
+# diaudit). `action` SELALU 'create' (1 kejadian "PDF ini pernah
+# dibuat", bukan mutasi record apa pun). `entity_id` SELALU 0 — TIDAK
+# ADA baris database yang jadi acuan PDF ini (laporan konsultasi Phase 1
+# SENGAJA nggak pernah disimpan permanen, lihat utils/consultation_pdf.py),
+# beda dari 12 tipe record lain yang entity_id-nya id baris asli.
+# `changed_fields` SELALU None (masuk NO_FIELD_DIFF_ENTITY_TYPES di
+# bawah) — rentang tanggal & section yang dipilih TIDAK disimpan di
+# baris audit ini sama sekali (kolom changed_fields_json SECARA
+# ARSITEKTUR cuma buat NAMA field yang berubah di event 'update', bukan
+# wadah nilai/metadata bebas — menyimpan tanggal/kode section di situ
+# bakal melanggar invarian itu, lihat docstring record_audit_event).
+DOCTOR_CONSULTATION_PDF_EXPORT_ENTITY_TYPE = "doctor_consultation_pdf_export"
+
 # Entity_type yang SENGAJA nggak punya entry SAFE_CHANGED_FIELDS sama
 # sekali — `changed_fields` buat SEMUANYA SELALU dipaksa None (lihat
 # record_audit_event di bawah), TIDAK PEDULI apa pun yang dikirim
@@ -163,6 +183,7 @@ NO_FIELD_DIFF_ENTITY_TYPES = (
     MEMBERSHIP_ENTITY_TYPE,
     REMINDER_OCCURRENCE_COMPLETED_ENTITY_TYPE,
     REMINDER_OCCURRENCE_SKIPPED_ENTITY_TYPE,
+    DOCTOR_CONSULTATION_PDF_EXPORT_ENTITY_TYPE,
 )
 
 # Dipakai endpoint baca (routes/audit_routes.py) buat validasi query
