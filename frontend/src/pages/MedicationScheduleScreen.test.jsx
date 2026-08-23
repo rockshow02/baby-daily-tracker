@@ -761,12 +761,14 @@ describe("MedicationScheduleScreen — silent refresh failures preserve displaye
     expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(2);
   });
 
-  it("14. a response belonging to an obsolete child does not overwrite the new child's data", async () => {
+  it("14. discards child A's late response and then loads and displays child B", async () => {
     const childB = { ...testChild, id: 20 };
     let resolveSilentA;
+    let resolveChildB;
     apiMock.listMedicationSchedules
       .mockResolvedValueOnce(makeScheduleResponse()) // mount anak A
-      .mockImplementationOnce(() => new Promise((resolve) => { resolveSilentA = resolve; })); // refresh silent anak A -- sengaja digantung
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveSilentA = resolve; })) // refresh silent anak A -- sengaja digantung
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveChildB = resolve; }));
 
     const { rerender } = render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
     await screen.findAllByText(/Paracetamol/);
@@ -775,12 +777,47 @@ describe("MedicationScheduleScreen — silent refresh failures preserve displaye
     await waitFor(() => expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(2));
 
     rerender(<MedicationScheduleScreen child={childB} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await waitFor(() => expect(screen.queryByText(/Paracetamol/)).not.toBeInTheDocument());
 
     // Respons TELAT buat anak A akhirnya datang -- HARUS dibuang, TIDAK
-    // PERNAH menimpa tampilan yang sekarang mewakili anak B.
+    // PERNAH menimpa tampilan yang sekarang mewakili anak B. Setelah
+    // request A selesai, foreground load B yang sempat menunggu WAJIB
+    // benar-benar dijalankan.
     resolveSilentA(makeScheduleResponse({ schedules: [makeSchedule({ medication_name: "Obat Basi Anak A" })] }));
-    await new Promise((r) => setTimeout(r, 0));
+    await waitFor(() => expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(3));
+    expect(apiMock.listMedicationSchedules).toHaveBeenNthCalledWith(3, childB.id);
+
+    resolveChildB(makeScheduleResponse({
+      child_id: childB.id,
+      schedules: [makeSchedule({ id: 2, child_id: childB.id, medication_name: "Amoxicillin Anak B", can_act: false })],
+    }));
+    expect(await screen.findAllByText(/Amoxicillin Anak B/)).not.toHaveLength(0);
     expect(screen.queryByText(/Obat Basi Anak A/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Paracetamol/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sudah diberikan" })).not.toBeInTheDocument();
+  });
+
+  it("coalesces A -> B -> C changes to one eventual request for the latest child", async () => {
+    const childB = { ...testChild, id: 20, name: "Anak Dua" };
+    const childC = { ...testChild, id: 30, name: "Anak Tiga" };
+    let resolveA;
+    apiMock.listMedicationSchedules
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveA = resolve; }))
+      .mockResolvedValueOnce(makeScheduleResponse({
+        child_id: childC.id,
+        schedules: [makeSchedule({ id: 3, child_id: childC.id, medication_name: "Obat Anak C" })],
+      }));
+
+    const { rerender } = render(<MedicationScheduleScreen child={testChild} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    await waitFor(() => expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(1));
+    rerender(<MedicationScheduleScreen child={childB} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+    rerender(<MedicationScheduleScreen child={childC} currentUserId={CURRENT_USER_ID} onClose={() => {}} />);
+
+    resolveA(makeScheduleResponse());
+    await waitFor(() => expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(2));
+    expect(apiMock.listMedicationSchedules).toHaveBeenNthCalledWith(2, childC.id);
+    expect(await screen.findAllByText(/Obat Anak C/)).not.toHaveLength(0);
+    expect(apiMock.listMedicationSchedules).toHaveBeenCalledTimes(2);
   });
 
   it("15. no state update occurs after unmount where practical", async () => {

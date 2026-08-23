@@ -465,6 +465,12 @@ export default function MedicationScheduleScreen({ child, currentUserId, onClose
   // supaya nggak pernah ada 2 request `GET .../medication-schedules`
   // yang beneran jalan bersamaan buat komponen ini.
   const loadInFlightRef = useRef(false);
+  // Kalau request foreground (terutama pergantian anak) datang saat
+  // request lama masih berjalan, jangan hilangkan request baru itu.
+  // Simpan SATU request terbaru dan jalankan setelah request aktif
+  // selesai. Foreground selalu mengalahkan refresh silent; beberapa
+  // pergantian anak cepat otomatis terkoales menjadi anak terakhir.
+  const pendingLoadRef = useRef(null);
 
   // Penjaga respons buat anak yang SUDAH BUKAN anak aktif lagi (defect
   // review) -- SENGAJA diikat ke identitas `child.id`, BUKAN "nomor
@@ -480,7 +486,22 @@ export default function MedicationScheduleScreen({ child, currentUserId, onClose
   // respons dibuang diam-diam (nggak pernah menimpa tampilan anak yang
   // baru).
   const activeChildIdRef = useRef(child.id);
-  useEffect(() => { activeChildIdRef.current = child.id; }, [child.id]);
+  useEffect(() => {
+    activeChildIdRef.current = child.id;
+
+    // Jangan pernah menampilkan snapshot/capability anak lama dengan
+    // nama anak baru sementara request baru menunggu giliran.
+    setData(null);
+    setCachedAt(null);
+    setStatus("loading");
+    setErrorMessage("");
+    setBackgroundWarning("");
+    setPendingSyncKeys(new Set());
+    setPendingActionKeys(new Set());
+    setShowForm(false);
+    setEditingSchedule(null);
+    setFormError("");
+  }, [child.id]);
 
   // Nggak pernah setState lagi setelah unmount (praktis buat request
   // monitor latar belakang yang jawabannya baru datang setelah layar
@@ -488,7 +509,10 @@ export default function MedicationScheduleScreen({ child, currentUserId, onClose
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
-    return () => { mountedRef.current = false; };
+    return () => {
+      mountedRef.current = false;
+      pendingLoadRef.current = null;
+    };
   }, []);
 
   const loadFromCache = useCallback(() => {
@@ -527,7 +551,16 @@ export default function MedicationScheduleScreen({ child, currentUserId, onClose
       loadFromCache();
       return;
     }
-    if (loadInFlightRef.current) return; // request lain (silent ATAUPUN foreground) masih jalan -- lihat komentar loadInFlightRef di atas
+    if (loadInFlightRef.current) {
+      const pending = { silent, run: () => load(opts) };
+      // Foreground (silent=false) tidak boleh digeser oleh polling.
+      // Untuk kelas yang sama, simpan closure terbaru supaya A->B->C
+      // akhirnya memuat C, bukan B.
+      if (!silent || !pendingLoadRef.current || pendingLoadRef.current.silent) {
+        pendingLoadRef.current = pending;
+      }
+      return;
+    }
     loadInFlightRef.current = true;
 
     const hadTrustedData = statusRef.current === "ready" || statusRef.current === "offline_cached";
@@ -575,6 +608,9 @@ export default function MedicationScheduleScreen({ child, currentUserId, onClose
       setErrorMessage(err?.message || "Gagal memuat jadwal obat.");
     } finally {
       loadInFlightRef.current = false;
+      const pending = pendingLoadRef.current;
+      pendingLoadRef.current = null;
+      if (mountedRef.current && pending) pending.run();
     }
   }, [child.id, isOnline, currentUserId, loadFromCache]);
 
