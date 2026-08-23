@@ -10,10 +10,12 @@ SETIAP test yang bergantung ke tanggal — endpoint ini manggil
 `today_wib()`/`now_wib()` di layer route (bukan di utils/consultation_report.py),
 persis pola test_reminders.py/test_insights.py.
 """
+import json
 import os
 from datetime import date, datetime, timedelta
 
 import pytest
+from werkzeug.test import EnvironBuilder
 
 import routes.doctor_consultation_routes as consultation_routes_module
 from extensions import db
@@ -23,7 +25,9 @@ from models import (
 )
 from tests.conftest import auth_headers, create_child, register
 from tests.test_roles_permissions import invite_and_join
-from utils.consultation_report import INSIGHT_CODE_DESCRIPTIONS, SENSITIVE_SECTIONS
+from utils.consultation_report import (
+    INSIGHT_CODE_DESCRIPTIONS, MAX_CONSULTATION_BODY_BYTES, SENSITIVE_SECTIONS,
+)
 
 FAKE_TODAY = date(2026, 8, 23)
 FAKE_NOW = datetime(2026, 8, 23, 10, 0, 0)
@@ -673,3 +677,321 @@ def test_unexpected_top_level_fields_are_silently_ignored_consistent_with_other_
         headers=auth_headers(user["token"]),
     )
     assert resp.status_code == 200
+
+
+# --------------------------------------------------------------------------
+# 11. Bypass ukuran body lewat Content-Length yang hilang/chunked (bug
+# review Agustus 2026) -- lihat backend/docs/DOCTOR_CONSULTATION.md
+# bagian "Request validation & size limits" buat penjelasan lengkap.
+# --------------------------------------------------------------------------
+
+
+def _json_body_of_exact_size(target_bytes, extra=None):
+    """
+    Body JSON VALID {"period": {...}, ..., "padding": "xxx"} yang
+    di-encode UTF-8 PERSIS `target_bytes` byte -- `padding` sengaja
+    field TAK DIKENAL (diabaikan endpoint, lihat test kebijakan di
+    atas) biar bisa dipakai ngatur ukuran body TANPA kesenggol
+    validator panjang questions/note (1000 karakter) yang jalan
+    BELAKANGAN, SETELAH lapis ukuran ini.
+    """
+    base = {"period": {"preset": "7d"}}
+    if extra:
+        base.update(extra)
+    base["padding"] = ""
+    base_len = len(json.dumps(base).encode("utf-8"))
+    pad_len = target_bytes - base_len
+    assert pad_len >= 0, f"target_bytes {target_bytes} terlalu kecil buat base payload ({base_len} byte)"
+    base["padding"] = "x" * pad_len
+    body = json.dumps(base).encode("utf-8")
+    assert len(body) == target_bytes, (len(body), target_bytes)
+    return body
+
+
+def _post_without_content_length(client, path, token, body_bytes):
+    """
+    Bangun environ WSGI ASLI TANPA header Content-Length sama sekali
+    (mensimulasikan request chunked/transfer tanpa panjang terdeklarasi)
+    -- BUKAN cuma nyoba `content_length=None` ke test client biasa,
+    yang diam-diam DIHITUNG ULANG dari `data=` yang dikasih
+    (`EnvironBuilder.get_environ()`, lihat werkzeug/test.py) dan bakal
+    bikin test ini LOLOS PALSU (kayak nggak ngetes apa-apa). Environ
+    dibangun sekali lewat `EnvironBuilder` (buat header/auth/method yang
+    benar), lalu `CONTENT_LENGTH` DIHAPUS MANUAL dan `wsgi.input_terminated`
+    DIPASANG MANUAL (server yang declare dia sendiri yang nge-terminate
+    stream-nya, mis. chunked -- lihat werkzeug/wsgi.py:get_input_stream)
+    SEBELUM di-dispatch LANGSUNG lewat `app.wsgi_app` (BUKAN lewat
+    `client.post`, yang bakal nge-reset environ ini lewat jalur
+    EnvironBuilder yang sama lagi).
+    """
+    app = client.application
+    builder = EnvironBuilder(
+        path=path, method="POST", data=body_bytes, content_type="application/json",
+        headers=auth_headers(token),
+    )
+    environ = builder.get_environ()
+    assert "CONTENT_LENGTH" in environ  # EnvironBuilder emang ngitung otomatis -- makanya HARUS dihapus manual di bawah
+    del environ["CONTENT_LENGTH"]
+    environ["wsgi.input_terminated"] = True
+
+    captured = {}
+
+    def start_response(status, headers, exc_info=None):
+        captured["status_code"] = int(status.split(" ", 1)[0])
+
+    body_iter = app.wsgi_app(environ, start_response)
+    response_body = b"".join(body_iter)
+    return captured["status_code"], response_body
+
+
+def test_request_content_length_is_genuinely_none_for_the_missing_content_length_helper(client, monkeypatch):
+    """
+    Verifikasi LANGSUNG (bukan diasumsikan) bahwa teknik simulasi di
+    `_post_without_content_length` beneran bikin `request.content_length
+    is None` di dalam request path -- push request context manual
+    dengan environ yang SAMA (Content-Length dihapus) dan cek atribut
+    ini SEBELUM view function mana pun jalan.
+    """
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+
+    app = client.application
+    builder = EnvironBuilder(
+        path=f"/api/children/{child['id']}/doctor-consultation/preview", method="POST",
+        data=b'{"period": {"preset": "7d"}}', content_type="application/json",
+        headers=auth_headers(user["token"]),
+    )
+    environ = builder.get_environ()
+    del environ["CONTENT_LENGTH"]
+    environ["wsgi.input_terminated"] = True
+
+    with app.test_request_context(environ_overrides=environ):
+        from flask import request
+        assert request.content_length is None
+
+
+def test_declared_content_length_over_limit_is_rejected_before_report_and_pdf_code_runs(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+
+    def _fail_if_called(name):
+        def _inner(*args, **kwargs):
+            raise AssertionError(f"{name} should not be called for an oversized request")
+        return _inner
+
+    monkeypatch.setattr(consultation_routes_module, "build_consultation_report", _fail_if_called("build_consultation_report"))
+    monkeypatch.setattr(consultation_routes_module, "render_consultation_pdf", _fail_if_called("render_consultation_pdf"))
+    monkeypatch.setattr(consultation_routes_module, "record_audit_event", _fail_if_called("record_audit_event"))
+
+    big_body = _json_body_of_exact_size(MAX_CONSULTATION_BODY_BYTES + 5_000)
+    resp = client.post(
+        f"/api/children/{child['id']}/doctor-consultation/preview",
+        data=big_body, content_type="application/json", headers=auth_headers(user["token"]),
+    )
+    assert resp.status_code == 413
+    assert resp.get_json() == {"error": "Ukuran permintaan terlalu besar"}
+    assert CaregiverAuditEvent.query.filter_by(child_id=child["id"]).count() == 0
+
+
+def test_missing_content_length_with_oversized_actual_body_is_rejected(client, monkeypatch):
+    """
+    INI defect yang lagi diperbaiki: request TANPA Content-Length yang
+    body ASLINYA lebih dari MAX_CONSULTATION_BODY_BYTES WAJIB tetap
+    ditolak 413 -- sebelumnya lolos lewat begitu saja sampai batas
+    global 6MB.
+    """
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+
+    def _fail_if_called(name):
+        def _inner(*args, **kwargs):
+            raise AssertionError(f"{name} should not be called for an oversized request")
+        return _inner
+
+    monkeypatch.setattr(consultation_routes_module, "build_consultation_report", _fail_if_called("build_consultation_report"))
+    monkeypatch.setattr(consultation_routes_module, "render_consultation_pdf", _fail_if_called("render_consultation_pdf"))
+    monkeypatch.setattr(consultation_routes_module, "record_audit_event", _fail_if_called("record_audit_event"))
+
+    big_body = _json_body_of_exact_size(MAX_CONSULTATION_BODY_BYTES + 5_000)
+    status_code, body = _post_without_content_length(
+        client, f"/api/children/{child['id']}/doctor-consultation/preview", user["token"], big_body,
+    )
+    assert status_code == 413
+    assert json.loads(body) == {"error": "Ukuran permintaan terlalu besar"}
+    assert CaregiverAuditEvent.query.filter_by(child_id=child["id"]).count() == 0
+
+
+def test_missing_content_length_with_body_at_accepted_boundary_proceeds_normally(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+
+    body = _json_body_of_exact_size(MAX_CONSULTATION_BODY_BYTES)
+    status_code, body_out = _post_without_content_length(
+        client, f"/api/children/{child['id']}/doctor-consultation/preview", user["token"], body,
+    )
+    assert status_code == 200
+    assert json.loads(body_out)["period"]["start_date"]
+
+
+def test_actual_body_exactly_at_limit_is_accepted(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    body = _json_body_of_exact_size(MAX_CONSULTATION_BODY_BYTES)
+    resp = client.post(
+        f"/api/children/{child['id']}/doctor-consultation/preview",
+        data=body, content_type="application/json", headers=auth_headers(user["token"]),
+    )
+    assert resp.status_code == 200
+
+
+def test_actual_body_one_byte_over_limit_is_rejected(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    body = _json_body_of_exact_size(MAX_CONSULTATION_BODY_BYTES + 1)
+    resp = client.post(
+        f"/api/children/{child['id']}/doctor-consultation/preview",
+        data=body, content_type="application/json", headers=auth_headers(user["token"]),
+    )
+    assert resp.status_code == 413
+
+
+def test_declared_and_actual_length_within_bounds_still_works_normally(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    resp = _preview(client, user["token"], child["id"])
+    assert resp.status_code == 200
+    assert resp.get_json()["period"]["preset"] == "7d"
+
+
+def test_multibyte_utf8_payload_measured_by_encoded_bytes_not_character_count(client, monkeypatch):
+    """
+    1 karakter multi-byte (mis. emoji "🩺", 4 byte UTF-8) TIDAK BOLEH
+    dihitung sebagai 1 "karakter" doang buat batas ukuran -- batasnya
+    byte UTF-8 SUNGGUHAN. Body dengan BANYAK karakter tapi masih
+    <=20000 byte encoded harus tetap DITERIMA; body yang python
+    `len(str)`-nya kelihatan kecil tapi ENCODED byte-nya > 20000 harus
+    DITOLAK.
+    """
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+
+    # Emoji 4-byte "🩺" -- tiap karakter Python = 4 byte UTF-8 KALAU
+    # di-encode APA ADANYA (`ensure_ascii=False`, persis kayak
+    # `JSON.stringify()` di browser beneran ngirim byte UTF-8 mentah,
+    # BUKAN escape `\uXXXX` -- `json.dumps` bawaan Python defaultnya
+    # `ensure_ascii=True` yang malah bikin tiap emoji jadi 12 byte ASCII
+    # ter-escape, nggak merepresentasikan body multi-byte UTF-8 asli
+    # yang mau diuji di sini).
+    base = {"period": {"preset": "7d"}}
+    base_len = len(json.dumps(base, ensure_ascii=False).encode("utf-8"))
+    emoji_count = (MAX_CONSULTATION_BODY_BYTES - base_len - 20) // 4  # sisa margin buat kutip JSON dkk
+    base["padding"] = "🩺" * emoji_count
+    body_within = json.dumps(base, ensure_ascii=False).encode("utf-8")
+    assert len(body_within) <= MAX_CONSULTATION_BODY_BYTES
+    resp_within = client.post(
+        f"/api/children/{child['id']}/doctor-consultation/preview",
+        data=body_within, content_type="application/json", headers=auth_headers(user["token"]),
+    )
+    assert resp_within.status_code == 200
+
+    # Sekarang lewatin batas byte-nya (bukan cuma nambah dikit karakter).
+    base["padding"] = "🩺" * (emoji_count + 2000)
+    body_over = json.dumps(base, ensure_ascii=False).encode("utf-8")
+    assert len(body_over) > MAX_CONSULTATION_BODY_BYTES
+    resp_over = client.post(
+        f"/api/children/{child['id']}/doctor-consultation/preview",
+        data=body_over, content_type="application/json", headers=auth_headers(user["token"]),
+    )
+    assert resp_over.status_code == 413
+
+
+def test_malformed_json_below_size_limit_returns_400_not_413(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    resp = client.post(
+        f"/api/children/{child['id']}/doctor-consultation/preview",
+        data=b'{"period": {"preset": "7d"} NOT VALID JSON',
+        content_type="application/json", headers=auth_headers(user["token"]),
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.parametrize("raw_body", [b"[1, 2, 3]", b'"just a string"', b"null", b"42"])
+def test_non_object_json_below_size_limit_returns_400(client, monkeypatch, raw_body):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    resp = client.post(
+        f"/api/children/{child['id']}/doctor-consultation/preview",
+        data=raw_body, content_type="application/json", headers=auth_headers(user["token"]),
+    )
+    assert resp.status_code == 400
+
+
+def test_viewer_oversized_pdf_request_gets_403_not_413(client, monkeypatch):
+    """
+    Keputusan otorisasi-DULUAN yang didokumentasikan (lihat
+    backend/docs/DOCTOR_CONSULTATION.md & komentar di
+    export_consultation_pdf): Viewer ditolak `403` KONSISTEN terlepas
+    ukuran body-nya -- TIDAK PERNAH kebedain (413 vs 403) dari luar
+    berdasarkan seberapa besar body yang dia kirim, dan body-nya SENDIRI
+    nggak pernah kesentuh (nol byte stream dibaca) buat request yang
+    memang bakal ditolak apa pun isinya.
+    """
+    _freeze(monkeypatch)
+    owner = register(client, name="Pemilik", email="owner-oversized-pdf@example.com")
+    child = create_child(client, owner["token"])
+    viewer = register(client, name="Viewer", email="viewer-oversized-pdf@example.com")
+    invite_and_join(client, owner["token"], child["id"], viewer["token"], "viewer")
+
+    big_body = _json_body_of_exact_size(MAX_CONSULTATION_BODY_BYTES + 5_000)
+    resp = client.post(
+        f"/api/children/{child['id']}/doctor-consultation/pdf",
+        data=big_body, content_type="application/json", headers=auth_headers(viewer["token"]),
+    )
+    assert resp.status_code == 403
+    # Filter ke entity_type konsultasi secara spesifik (BUKAN semua
+    # audit event anak ini) -- `invite_and_join` di atas SENDIRI
+    # sudah menghasilkan event `caregiver_membership` yang sah, nggak
+    # ada hubungannya sama request PDF ini.
+    assert CaregiverAuditEvent.query.filter_by(
+        child_id=child["id"], entity_type="doctor_consultation_pdf_export",
+    ).count() == 0
+
+
+def test_owner_valid_sized_pdf_request_still_returns_a_pdf(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    resp = _pdf(client, user["token"], child["id"])
+    assert resp.status_code == 200
+    assert resp.content_type == "application/pdf"
+    assert resp.data.startswith(b"%PDF-")
+
+
+def test_oversized_pdf_request_from_authorized_role_creates_no_audit_event(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    big_body = _json_body_of_exact_size(MAX_CONSULTATION_BODY_BYTES + 5_000)
+    resp = client.post(
+        f"/api/children/{child['id']}/doctor-consultation/pdf",
+        data=big_body, content_type="application/json", headers=auth_headers(user["token"]),
+    )
+    assert resp.status_code == 413
+    assert CaregiverAuditEvent.query.filter_by(
+        child_id=child["id"], entity_type="doctor_consultation_pdf_export",
+    ).count() == 0
+
+
+def test_global_max_content_length_config_is_unchanged(client):
+    assert client.application.config["MAX_CONTENT_LENGTH"] == 6 * 1024 * 1024

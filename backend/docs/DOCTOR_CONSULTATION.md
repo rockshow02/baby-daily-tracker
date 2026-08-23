@@ -168,14 +168,78 @@ Body endpoint konsultasi SEHARUSNYA kecil (≤16 kode section pendek,
 metadata periode, dan 2 field teks yang masing-masing sudah dibatasi
 1000 karakter) — jauh lebih kecil dari `MAX_CONTENT_LENGTH` global
 aplikasi (6MB, `config.py`, dilonggarkan buat upload foto). Endpoint
-ini menambahkan batas KHUSUS yang lebih ketat:
+ini menegakkan batas KHUSUS yang lebih ketat,
 `utils/consultation_report.py:MAX_CONSULTATION_BODY_BYTES = 20_000`
-(20KB), dicek lewat header `Content-Length` **sebelum** body di-parse
-JSON — apalagi sebelum query database/render PDF apa pun dijalankan —
-balas `413` kalau dilampaui (lihat
-`routes/doctor_consultation_routes.py:_parse_request_payload`).
-`MAX_CONTENT_LENGTH` global tetap jadi jaring pengaman kalau
-`Content-Length` kebetulan tidak ada (mis. body chunked).
+(20KB), lewat **2 LAPIS** (lihat
+`routes/doctor_consultation_routes.py:_read_json_body_within_limit`) —
+satu lapis header saja TERBUKTI TIDAK CUKUP (bug review Agustus 2026,
+lihat di bawah):
+
+1. **Penolakan cepat berbasis `Content-Length` terdeklarasi** (kalau
+   header ini ADA) — ditolak `413` SEBELUM stream disentuh sama
+   sekali, nol byte terbaca. Jalur ini murah tapi CUMA berlaku kalau
+   klien/proxy jujur ngirim header ini secara akurat.
+2. **Bounded read AKTUAL dari `request.stream`** — dijalankan SELALU
+   (terlepas ada/tidaknya `Content-Length`), baca PALING BANYAK
+   `MAX_CONSULTATION_BODY_BYTES + 1` byte. Kalau yang KEBACA lebih
+   dari batas, `413` — INI yang menutup celah: body yang dikirim
+   TANPA `Content-Length` (request chunked/WSGI tanpa panjang
+   terdeklarasi) sebelumnya lolos lapis 1 begitu saja dan diproses
+   sampai batas GLOBAL 6MB baru ketauan kegedean (lewat validasi
+   panjang field questions/note yang jalan BELAKANGAN, SETELAH body-nya
+   sempat di-parse JSON penuh) — sekarang tetap kena `413` di lapisan
+   ini, secepat body ASLINYA (bukan cuma klaim header-nya) kelewat 20KB.
+
+**Kenapa cuma cek header nggak cukup:** `request.content_length`
+Flask/Werkzeug HANYA membaca header `Content-Length` yang klien kirim
+— nggak ada jaminan itu akurat. Kalau header ini absen (mis. transfer
+`chunked`, atau WSGI server yang nggak selalu menyertakannya), Werkzeug
+akan (tergantung apakah WSGI server men-declare `wsgi.input_terminated`)
+entah membalikin stream KOSONG (paling umum, aman TAPI berarti lapis 1
+nggak pernah "melihat" body beneran sama sekali) ATAUPUN membungkusnya
+`LimitedStream` sepanjang `MAX_CONTENT_LENGTH` GLOBAL (6MB) — either
+way, lapis 1 TIDAK PERNAH bisa menyimpulkan ukuran body ASLINYA dari
+header semata. Lapis 2 di atas mengatasi ini dengan MEMBACA body-nya
+sendiri (dibatasi ketat), bukan percaya klaim header.
+
+**Cara body yang sudah dibaca lapis 2 dipakai lagi tanpa baca dua
+kali:** byte yang berhasil dibaca (kalau lolos batas) di-cache manual
+ke `request._cached_data` — atribut internal Werkzeug yang JUGA dipakai
+`request.get_data()`/`request.get_json()` sendiri buat "baca-sekali,
+pakai-ulang" (lihat `werkzeug/wrappers/request.py:Request.get_data`) —
+SEBELUM `request.get_json()` dipanggil, jadi ia membaca cache yang
+sama, TIDAK PERNAH mencoba membaca stream lagi (yang di titik itu
+sudah habis/terpakai sebagian — baca ulang bakal dapat body kosong,
+bukan body lengkap).
+
+**Semantik byte, bukan karakter:** batas 20KB diukur dari PANJANG BYTE
+UTF-8 body yang benar-benar di atas kabel (`len(bytes)`), BUKAN
+`len()` string Python setelah decode — 1 karakter emoji 4-byte (mis.
+"🩺") tetap terhitung 4 byte, bukan 1 "karakter". Body dengan banyak
+karakter multi-byte tapi encoded-nya masih ≤20000 byte tetap diterima;
+body yang encoded byte-nya sudah lewat 20000 tetap ditolak walau
+`len()` string Python-nya kelihatan kecil (lihat
+`tests/test_doctor_consultation.py::test_multibyte_utf8_payload_measured_by_encoded_bytes_not_character_count`).
+
+**Buffering yang TIDAK bisa dihindari sepenuhnya:** lapis 2 SELALU
+membaca maksimal `MAX_CONSULTATION_BODY_BYTES + 1` byte ke memori
+(bukan menunggu sampai batas global 6MB seperti sebelumnya) —
+ini SUDAH bounded read yang disukai (bukan `get_data()` penuh yang bisa
+sampai 6MB), jadi TIDAK ADA eksposur memori tak terduga di luar ~20KB
+per request untuk endpoint ini. `MAX_CONTENT_LENGTH` global aplikasi
+(6MB, buat upload foto) TETAP jadi jaring pengaman TERLUAR yang
+independen (ditegakkan Werkzeug sendiri di layer stream) — batas 20KB
+di sini SELALU dicek DULUAN & lebih ketat, TIDAK PERNAH menggantikan
+jaring pengaman global itu; nilai `MAX_CONTENT_LENGTH` itu sendiri
+TIDAK diubah oleh perbaikan ini.
+
+**Otorisasi vs ukuran body — urutan yang disengaja:** untuk endpoint
+PDF, pengecekan `can_export` (peran) TETAP dijalankan SEBELUM body
+(apalagi ukurannya) disentuh — Viewer yang mengirim body raksasa dapat
+`403` yang SAMA PERSIS dengan Viewer yang mengirim body kecil/valid,
+tidak pernah bisa dibedakan dari luar (413 vs 403) berdasarkan ukuran
+body-nya, konsisten dengan pola "cek peran dulu, validasi payload
+belakangan" di SELURUH endpoint lain di app ini.
 
 **Field top-level tak dikenal SENGAJA diabaikan diam-diam** (dibaca
 lewat `data.get(...)`, TIDAK divalidasi allowlist-nya) — ini KONSISTEN

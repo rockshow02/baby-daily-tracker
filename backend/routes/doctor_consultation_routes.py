@@ -66,6 +66,74 @@ def _capabilities(role):
     }
 
 
+_OVERSIZED_RESPONSE = ({"error": "Ukuran permintaan terlalu besar"}, 413)
+
+
+def _read_json_body_within_limit():
+    """
+    Balikin (data, error_response_atau_None) -- baca body request DENGAN
+    batas KETAT `MAX_CONSULTATION_BODY_BYTES`, dua lapis (lihat
+    backend/docs/DOCTOR_CONSULTATION.md bagian "Request validation &
+    size limits" buat penjelasan lengkap kenapa cuma ngecek header
+    Content-Length aja NGGAK CUKUP):
+
+      1. Content-Length TERDEKLARASI (kalau ADA) -- ditolak SEDINI
+         mungkin, SEBELUM stream disentuh sama sekali (jalur tercepat,
+         nol byte terbaca).
+      2. Bounded read AKTUAL dari `request.stream` -- baca PALING BANYAK
+         `MAX_CONSULTATION_BODY_BYTES + 1` byte (BUKAN nunggu sampai
+         limit global `MAX_CONTENT_LENGTH` 6MB aplikasi baru ketauan
+         kegedean). Kalau yang KEBACA lebih dari batas, body-nya
+         SUNGGUHAN kelewat -- apa pun kata Content-Length, TERMASUK
+         kalau headernya nggak ada sama sekali (request chunked/WSGI
+         tanpa panjang terdeklarasi) ATAUPUN kalau headernya ada tapi
+         lebih kecil dari isi beneran (proxy/klien nggak beres).
+
+    Byte yang berhasil dibaca (kalau LOLOS batas) di-cache MANUAL ke
+    `request._cached_data` -- atribut internal Werkzeug (lihat
+    werkzeug/wrappers/request.py:Request.get_data(), method resmi buat
+    "baca body 1x, dipakai ulang" yang sama persis dipakai internal
+    get_data()/get_json() sendiri) -- SEBELUM `request.get_json()`
+    dipanggil, biar dia makein bytes yang SAMA (bukan nyoba baca stream
+    lagi, yang saat ini udah abis/kepake sebagian -- baca ulang bakal
+    dapet kosong, BUKAN body lengkap).
+
+    Bounded-read ini AMAN buat SEMUA kasus `request.stream` yang
+    mungkin (diverifikasi langsung, bukan diasumsikan -- lihat
+    tests/test_doctor_consultation.py):
+      - Content-Length ada & kecil -> stream Werkzeug sendiri sudah
+        dibatasi sepanjang itu, `.read(N+1)` balikin body lengkap apa
+        adanya, nggak nunggu/hang.
+      - Content-Length nggak ada, WSGI server declare
+        `wsgi.input_terminated` (server tau cara nge-terminate stream
+        sendiri, mis. chunked) -> Werkzeug bungkus stream-nya
+        `LimitedStream` sepanjang `MAX_CONTENT_LENGTH` GLOBAL (6MB) --
+        `.read(N+1)` kita STOP JAUH SEBELUM itu, nggak pernah nunggu
+        sampai 6MB kebaca buat nemuin body-nya kegedean.
+      - Content-Length nggak ada, WSGI server TIDAK declare
+        `wsgi.input_terminated` -> Werkzeug SENDIRI (lewat
+        `werkzeug.wsgi.get_input_stream`) udah balikin stream KOSONG
+        demi keamanan (safe_fallback) -- `.read(N+1)` kita balikin
+        b"", lolos batas, lanjut ke `get_json()` yang bakal gagal parse
+        JSON dari body kosong (400, bukan diam-diam nerima apa pun).
+
+    `MAX_CONTENT_LENGTH` global aplikasi (config.py, 6MB, buat upload
+    foto) TETAP jadi jaring pengaman TERLUAR (Werkzeug sendiri yang
+    negakin di layer stream, independen dari kode ini) -- batas 20KB
+    di sini SELALU lebih ketat & selalu dicek DULUAN, TIDAK PERNAH
+    menggantikan jaring pengaman global itu.
+    """
+    if request.content_length is not None and request.content_length > MAX_CONSULTATION_BODY_BYTES:
+        return None, _OVERSIZED_RESPONSE
+
+    raw = request.stream.read(MAX_CONSULTATION_BODY_BYTES + 1)
+    if len(raw) > MAX_CONSULTATION_BODY_BYTES:
+        return None, _OVERSIZED_RESPONSE
+
+    request._cached_data = raw
+    return request.get_json(silent=True), None
+
+
 def _parse_request_payload(role, capabilities):
     """
     Validasi SELURUH body request -- period, sections, questions,
@@ -84,18 +152,10 @@ def _parse_request_payload(role, capabilities):
     konsisten/mengejutkan dibanding endpoint lain, jadi SENGAJA tidak
     ditambahkan di sini juga.
     """
-    # Cek ukuran body SEDINI mungkin -- dari header `Content-Length`
-    # (kalau ada, kasus umum buat POST JSON dari fetch()), SEBELUM body
-    # di-parse JSON apalagi query database/render PDF apa pun
-    # dijalankan. `MAX_CONTENT_LENGTH` global aplikasi (config.py, 6MB)
-    # tetap jadi jaring pengaman kalau header ini kebetulan nggak ada
-    # (mis. body chunked) -- batas di sini SENGAJA jauh lebih ketat,
-    # khusus buat endpoint yang body-nya SEHARUSNYA kecil (lihat
-    # utils/consultation_report.py:MAX_CONSULTATION_BODY_BYTES).
-    if request.content_length is not None and request.content_length > MAX_CONSULTATION_BODY_BYTES:
-        return None, None, None, None, (jsonify({"error": "Ukuran permintaan terlalu besar"}), 413)
-
-    data = request.get_json(silent=True)
+    data, err = _read_json_body_within_limit()
+    if err:
+        payload, status = err
+        return None, None, None, None, (jsonify(payload), status)
     if not isinstance(data, dict):
         return None, None, None, None, (jsonify({"error": "Format data tidak valid"}), 400)
 
@@ -157,6 +217,14 @@ def export_consultation_pdf(child_id):
     role = resolve_role(child, user_id)
     capabilities = _capabilities(role)
 
+    # Otorisasi DULUAN, SEBELUM body (apalagi ukurannya) disentuh sama
+    # sekali -- Viewer yang ngirim body raksasa dapet 403 yang SAMA
+    # PERSIS kayak Viewer yang ngirim body kecil/valid, TIDAK PERNAH
+    # kebedain (413 vs 403) berdasarkan ukuran body-nya -- konsisten
+    # sama pola SELURUH endpoint lain di app ini (cek peran/akses
+    # SEBELUM validasi payload apa pun, lihat health_routes.py dkk),
+    # dan sekalian jadi jalur penolakan TERCEPAT (nol byte stream
+    # kebaca) buat request yang emang bakal ditolak apa pun isinya.
     if not capabilities["can_export"]:
         return jsonify({"error": "Peran Anda tidak bisa mengunduh PDF konsultasi."}), 403
 
