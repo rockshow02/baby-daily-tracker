@@ -71,7 +71,7 @@ describe("DoctorConsultationScreen — period presets & preview", () => {
         10, expect.objectContaining({ period: { preset: "7d" } }),
       ),
     );
-    expect(await screen.findByText(/s\/d 2026-08-23/)).toBeInTheDocument();
+    expect(await screen.findByText(/23 Agu 2026/)).toBeInTheDocument();
   });
 
   it("switches preset to 14 days and 30 days", async () => {
@@ -199,7 +199,7 @@ describe("DoctorConsultationScreen — PDF export & privacy confirmation", () =>
     );
     render(<DoctorConsultationScreen child={testChild} onClose={vi.fn()} onRecordVisit={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Buat Pratinjau" }));
-    await screen.findByText(/s\/d 2026-08-23/);
+    await screen.findByText(/23 Agu 2026/);
 
     expect(screen.queryByRole("button", { name: "Unduh PDF" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Catat Hasil Kunjungan" })).not.toBeInTheDocument();
@@ -410,7 +410,7 @@ describe("DoctorConsultationScreen — preview/PDF snapshot consistency", () => 
     rerender(<DoctorConsultationScreen child={{ ...testChild, id: 99 }} onClose={vi.fn()} onRecordVisit={vi.fn()} />);
 
     expect(screen.queryByRole("button", { name: "Unduh PDF" })).not.toBeInTheDocument();
-    expect(screen.queryByText(/s\/d 2026-08-23/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/23 Agu 2026/)).not.toBeInTheDocument();
   });
 
   it("marks an arriving preview stale immediately if the form was edited while that request was still in flight", async () => {
@@ -430,7 +430,7 @@ describe("DoctorConsultationScreen — preview/PDF snapshot consistency", () => 
     fireEvent.click(screen.getByLabelText("Riwayat Obat")); // edit SELAGI request pertama masih terbang
 
     inFlight.resolve(makeReport({ sensitive_sections_included: [] })); // laporan ini TIDAK mencerminkan "Riwayat Obat" yang baru dicentang
-    await waitFor(() => expect(screen.getByText(/s\/d 2026-08-23/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/23 Agu 2026/)).toBeInTheDocument());
 
     expect(screen.queryByRole("button", { name: "Unduh PDF" })).not.toBeInTheDocument();
     expect(screen.getByText("Pilihan laporan berubah. Buat pratinjau ulang sebelum mengunduh PDF.")).toBeInTheDocument();
@@ -458,7 +458,7 @@ describe("DoctorConsultationScreen — least-privilege capability defaults", () 
     );
     render(<DoctorConsultationScreen child={testChild} onClose={vi.fn()} onRecordVisit={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Buat Pratinjau" }));
-    await screen.findByText(/s\/d 2026-08-23/);
+    await screen.findByText(/23 Agu 2026/);
 
     expect(screen.getByText(/Peran Anda hanya bisa melihat pratinjau/)).toBeInTheDocument();
     expect(screen.queryByLabelText(/Pertanyaan untuk dokter/)).not.toBeInTheDocument();
@@ -539,6 +539,59 @@ describe("DoctorConsultationScreen — least-privilege capability defaults", () 
     // baru ini beneran di-preview.
     expect(screen.queryByRole("button", { name: "Unduh PDF" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/Pertanyaan untuk dokter/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/s\/d 2026-08-23/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/23 Agu 2026/)).not.toBeInTheDocument();
+  });
+});
+
+// --------------------------------------------------------------------------
+// Regression: pratinjau JSON mentah (bug review Agustus 2026) --
+// `JSON.stringify(section, ...)` DIHAPUS TOTAL, diganti
+// components/consultation/ConsultationPreview.jsx.
+// --------------------------------------------------------------------------
+describe("DoctorConsultationScreen — human-readable preview (no raw JSON)", () => {
+  it("never renders a <pre> element or raw technical field names through the full screen flow", async () => {
+    apiMock.previewDoctorConsultation.mockResolvedValue(makeReport({
+      sections: {
+        child_summary: {
+          display_name: "Dedek", birth_date: "2026-01-01", gender: "L", age_as_of_report_end: "7 bulan",
+          medication_event_count_in_period: 2, doctor_visit_count_in_period: 1,
+          illness_record_count_in_period: 0, temperature_record_count_in_period: 3,
+        },
+        feeding: {
+          total_events: 8, avg_events_per_day: 1.1, by_type: { asi_langsung: 5, asi_perah: 2, sufor: 1, mpasi: 0 },
+          total_volume_ml: 300, events_with_volume: 6, avg_volume_ml_per_event: 50,
+        },
+      },
+    }));
+    const { container } = render(<DoctorConsultationScreen child={testChild} onClose={vi.fn()} onRecordVisit={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Buat Pratinjau" }));
+    await screen.findByText(/23 Agu 2026/);
+
+    expect(container.querySelector("pre")).toBeNull();
+    const text = container.textContent;
+    for (const technicalKey of [
+      "total_events", "avg_events_per_day", "events_with_volume",
+      "total_count_in_period", "latest_temperature_celsius", '"truncated":',
+    ]) {
+      expect(text).not.toContain(technicalKey);
+    }
+  });
+
+  it("does not depend on a wide <table> element (mobile-friendly stacked cards instead)", async () => {
+    apiMock.previewDoctorConsultation.mockResolvedValue(makeReport({
+      included_sections: ["medication"],
+      sensitive_sections_included: ["medication"],
+      sections: {
+        medication: {
+          entries: [{ medication_name: "Paracetamol", dosage: "1 sdt", timestamp: "2026-08-20T08:00:00+07:00" }],
+          total_count_in_period: 1, truncated: false,
+        },
+      },
+    }));
+    const { container } = render(<DoctorConsultationScreen child={testChild} onClose={vi.fn()} onRecordVisit={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Buat Pratinjau" }));
+    await screen.findByText("Paracetamol");
+
+    expect(container.querySelector("table")).toBeNull();
   });
 });

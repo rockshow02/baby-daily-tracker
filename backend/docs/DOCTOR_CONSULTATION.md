@@ -261,6 +261,97 @@ N hari TERAKHIR termasuk hari ini. Custom range: `end_date >= start_date`,
 `utils/consultation_report.py:resolve_consultation_period`, raise
 `ConsultationValidationError` → `400`).
 
+## Human-readable preview (frontend presentation)
+
+**JSON tetap format API internal** — respons `POST .../preview` TIDAK
+berubah sama sekali (masih field terstruktur seperti `total_events`,
+`avg_events_per_day`, `truncated`, dst, lihat "Data sources" di atas).
+Yang berubah CUMA cara frontend MERENDER respons itu — sebelumnya
+`DoctorConsultationScreen.jsx` menampilkan tiap section lewat
+`<pre>{JSON.stringify(section, null, 2)}</pre>` (dump JSON mentah,
+nama field teknis kelihatan apa adanya ke caregiver) — sekarang lewat
+`frontend/src/components/consultation/ConsultationPreview.jsx` yang
+memformat & melabeli setiap field jadi Bahasa Indonesia yang bisa
+dibaca orang awam, TIDAK PERNAH menghitung ulang data apa pun (murni
+presentasional — angka/teks yang ditampilkan SELALU berasal langsung
+dari field respons yang sama, cuma diformat ulang).
+
+**Kesetaraan LOGIS preview ↔ PDF**: preview (kartu-kartu di layar) dan
+PDF (`utils/consultation_pdf.py`) TIDAK PERNAH wajib identik secara
+visual/CSS, TAPI keduanya SELALU merender data dari `report` yang
+SAMA PERSIS (periode, section terpilih, entri, nilai ringkasan, status
+pemotongan, teks pertanyaan/catatan, daftar section sensitif,
+disclaimer) — sumber datanya satu (`activeSnapshot.report` di
+frontend), CUMA beda "penerjemah" (komponen React vs `reportlab`).
+
+**Arsitektur komponen** (`frontend/src/components/consultation/`):
+```
+ConsultationPreview        (orkestrator -- iterasi report.included_sections)
+  └── ConsultationSectionCard  (judul + badge "Sensitif" + error boundary per-section)
+        └── sectionRenderers.jsx  (16 renderer eksplisit, dikunci per kode section)
+              ├── SummaryGrid / KeyValueRow   (ringkasan label/nilai)
+              ├── DetailList / DetailListItem (daftar entri sebagai kartu bertumpuk, BUKAN tabel lebar)
+              ├── EmptySectionState
+              ├── PartialDataNotice           ("X dari Y sesi memiliki data ...")
+              └── TruncationNotice            ("Menampilkan X dari Y catatan terbaru ...")
+```
+Kode section yang TIDAK dikenal (belum ada renderer-nya — versi
+frontend lama vs backend baru) balikin pesan generik
+"Bagian ini belum didukung pada versi aplikasi ini.", TIDAK PERNAH
+nampilin object mentah.
+
+**Formatter** (`frontend/src/utils/consultationFormat.js` +
+`consultationLabels.js`): tanggal/waktu SELALU lewat
+`Intl.DateTimeFormat` dengan `timeZone: "Asia/Jakarta"` EKSPLISIT
+(tanggal murni "YYYY-MM-DD" malah di-parse manual sebagai string, sama
+sekali TIDAK lewat `Date`, biar kebal dari reinterpretasi timezone
+device pembaca) — TIDAK PERNAH mengandalkan timezone lokal browser
+buat menampilkan ulang timestamp yang sudah WIB. Angka desimal pakai
+koma (format Indonesia via `Intl.NumberFormat("id-ID", ...)`), durasi
+menit diformat jadi "X jam Y menit" yang bisa dibaca, nilai yang nggak
+ada SELALU jadi `—` (TIDAK PERNAH `null`/`undefined`/`NaN` literal).
+
+**Data parsial/kosong/terpotong**: field opsional yang cuma sebagian
+event punya nilai (mis. volume menyusui/memerah ASI) ditampilkan
+sebagai "Total volume yang tercatat" (BUKAN "Total volume", biar nggak
+kesan lengkap) + notis cakupan "X dari Y sesi memiliki data volume." —
+TIDAK PERNAH menyimpulkan tren dari data yang nggak lengkap. Section
+yang dibatasi baris (illness/medication/growth/milestones/doctor
+visits) menampilkan "Menampilkan X dari Y catatan terbaru pada periode
+ini." (dari `total_count_in_period`/panjang array `entries` yang
+sesungguhnya diterima) — TIDAK PERNAH boolean `truncated` mentah.
+Section yang dipilih tapi kosong SELALU menampilkan pesan kosong yang
+konkret ("Tidak ada catatan obat pada periode ini.", dst), TIDAK PERNAH
+disembunyikan tanpa penjelasan.
+
+**Badge sensitif**: setiap section sensitif (illness/medication/
+doctor_visits/questions/note) menampilkan badge teks "Sensitif" (bukan
+warna doang) di `ConsultationSectionCard`, konsisten dengan checklist
+pemilihan section & daftar konfirmasi privasi sebelum unduh PDF (label
+Indonesia yang SAMA, dari `utils/consultationSections.js`, satu sumber
+dipakai keduanya).
+
+**Aksesibilitas & mobile**: heading section pakai `<h3>` semantik
+berurutan logis (ngikutin `included_sections`), daftar ringkasan pakai
+`<dl>`/`<dt>`/`<dd>` (struktur definisi, bukan tabel div biasa), daftar
+entri (obat/sakit/kunjungan dokter/dst) dirender sebagai KARTU
+BERTUMPUK (BUKAN tabel lebar) — otomatis nggak pernah butuh scroll
+horizontal di layar sempit, teks panjang (nama obat/gejala/alasan
+kunjungan) bebas bungkus multi-baris. `aria-live="polite"` CUMA di
+pembungkus level laporan (bukan tiap section), biar screen reader
+nggak ngumumin ulang seluruh laporan tiap kali render.
+
+**Penahanan error**: `SectionErrorBoundary.jsx` (class component,
+per-section, TERPISAH dari `components/ErrorBoundary.jsx` yang buat
+SELURUH aplikasi) membungkus tiap renderer section — 1 section yang
+gagal render (bentuk data nggak terduga) balikin
+"Bagian ini tidak dapat ditampilkan." TANPA menjatuhkan section lain
+ataupun tombol Unduh PDF/Catat Hasil Kunjungan.
+
+Tidak ada perubahan skema API — perubahan ini murni frontend
+(`frontend/src/components/consultation/`, `frontend/src/utils/
+consultationFormat.js`, `consultationLabels.js`, `consultationSections.js`).
+
 ## PDF generation architecture
 
 Sinkron, DI MEMORI, SETELAH request autentikasi — **tidak ada**
@@ -375,6 +466,12 @@ tambahan.
 
 ## Manual QA checklist
 
+- [ ] Pratinjau menampilkan kartu-kartu terbaca (label Bahasa Indonesia,
+      angka/tanggal/durasi diformat), TIDAK PERNAH JSON mentah/nama
+      field teknis di layar mana pun.
+- [ ] Di layar sempit (mobile), daftar obat/sakit/kunjungan dokter
+      tampil sebagai kartu bertumpuk (bukan tabel yang perlu digeser
+      ke samping), teks panjang bungkus rapi.
 - [ ] Health → tab Dokter menampilkan tombol "Siapkan Konsultasi".
 - [ ] Preset 7/14/30 hari menghasilkan periode yang benar (bandingkan
       `period.start_date`/`end_date` di respons).

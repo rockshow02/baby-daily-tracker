@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
+import ConsultationPreview from "./consultation/ConsultationPreview";
+import { SECTION_DEFS, sectionLabel } from "../utils/consultationSections";
+import { formatDateWIB } from "../utils/consultationFormat";
 
 /**
  * Doctor Consultation Workflow — Phase 1. Alur: pilih periode + section
@@ -43,37 +46,30 @@ import { api } from "../api/client";
  * boleh dia pakai). Backend TETAP satu-satunya sumber kebenaran; nilai
  * di sini CUMA hint UI.
  *
- * Section code DAN status "sensitif"-nya di SECTION_DEFS di bawah HARUS
- * disinkronkan manual sama utils/consultation_report.py:SECTION_CODES/
- * SENSITIVE_SECTIONS di backend (persis pola frontend/src/utils/insightCodes.js
- * vs backend INSIGHT_ALLOWLIST) — backend TETAP validasi otoritatif,
- * daftar ini CUMA buat UI checkbox & urutan section yang deterministik
- * di payload (lihat `buildNormalizedPayload`).
+ * Section code DAN status "sensitif"-nya di utils/consultationSections.js
+ * (SECTION_DEFS, dipakai bareng di sini DAN components/consultation/
+ * ConsultationPreview.jsx) HARUS disinkronkan manual sama
+ * utils/consultation_report.py:SECTION_CODES/SENSITIVE_SECTIONS di
+ * backend (persis pola frontend/src/utils/insightCodes.js vs backend
+ * INSIGHT_ALLOWLIST) — backend TETAP validasi otoritatif, daftar ini
+ * CUMA buat UI checkbox & urutan section yang deterministik di payload
+ * (lihat `buildNormalizedPayload`).
+ *
+ * PRATINJAU MANUSIAWI (bug review Agustus 2026): laporan yang diterima
+ * dari `activeSnapshot.report` dirender lewat
+ * `components/consultation/ConsultationPreview.jsx` — TIDAK PERNAH lagi
+ * `JSON.stringify(section, ...)` mentah. Komponen itu MURNI
+ * presentasional (cuma format+label field yang SUDAH ada di respons,
+ * TIDAK PERNAH menghitung ulang apa pun), jadi kesetaraan LOGIS
+ * preview<->PDF tetap terjaga (data sumbernya SAMA PERSIS, cuma beda
+ * cara render) walau tampilannya sekarang berupa kartu-kartu yang bisa
+ * dibaca, bukan dump JSON.
  */
 const PERIOD_PRESETS = [
   { key: "7d", label: "7 Hari Terakhir" },
   { key: "14d", label: "14 Hari Terakhir" },
   { key: "30d", label: "30 Hari Terakhir" },
   { key: "custom", label: "Rentang Kustom" },
-];
-
-const SECTION_DEFS = [
-  { code: "child_summary", label: "Ringkasan Anak", sensitive: false, defaultOn: true },
-  { code: "feeding", label: "Menyusui / Makan", sensitive: false, defaultOn: true },
-  { code: "sleep", label: "Tidur", sensitive: false, defaultOn: true },
-  { code: "diaper", label: "Popok", sensitive: false, defaultOn: true },
-  { code: "pumping", label: "Memerah ASI", sensitive: false, defaultOn: false },
-  { code: "activity_mood", label: "Aktivitas & Suasana Hati", sensitive: false, defaultOn: false },
-  { code: "growth", label: "Pertumbuhan", sensitive: false, defaultOn: true },
-  { code: "temperature", label: "Ringkasan Suhu", sensitive: false, defaultOn: true },
-  { code: "vaccination", label: "Status Vaksinasi", sensitive: false, defaultOn: true },
-  { code: "milestones", label: "Tumbuh Kembang", sensitive: false, defaultOn: true },
-  { code: "insights", label: "Ringkasan Smart Insights", sensitive: false, defaultOn: false },
-  { code: "illness", label: "Riwayat Sakit", sensitive: true, defaultOn: false },
-  { code: "medication", label: "Riwayat Obat", sensitive: true, defaultOn: false },
-  { code: "doctor_visits", label: "Kunjungan Dokter Sebelumnya", sensitive: true, defaultOn: false },
-  { code: "questions", label: "Pertanyaan untuk Dokter", sensitive: true, defaultOn: false },
-  { code: "note", label: "Catatan Tambahan Caregiver", sensitive: true, defaultOn: false },
 ];
 
 const QUESTIONS_MAX_LEN = 1000;
@@ -100,10 +96,6 @@ function todayWibIsoDate() {
   // menegakkan validasi rentang beneran, lihat docstring modul.
   const wib = new Date(Date.now() + 7 * 60 * 60 * 1000);
   return wib.toISOString().slice(0, 10);
-}
-
-function sectionLabel(code) {
-  return SECTION_DEFS.find((s) => s.code === code)?.label || code;
 }
 
 /**
@@ -461,7 +453,7 @@ export default function DoctorConsultationScreen({ child, onRecordVisit, onClose
           <div aria-live="polite">
             <div className="bg-void-card border border-void-hairline rounded-xl2 px-4 py-3 mb-4">
               <p className="text-sm text-ink font-medium mb-1">
-                {activeSnapshot.report.child_display_name} · {activeSnapshot.report.period.start_date} s/d {activeSnapshot.report.period.end_date}
+                {activeSnapshot.report.child_display_name} · {formatDateWIB(activeSnapshot.report.period.start_date)} s/d {formatDateWIB(activeSnapshot.report.period.end_date)}
               </p>
               <p className="text-[11px] text-ink-faint">{activeSnapshot.report.disclaimer}</p>
             </div>
@@ -478,16 +470,7 @@ export default function DoctorConsultationScreen({ child, onRecordVisit, onClose
               </p>
             )}
 
-            {Object.entries(activeSnapshot.report.sections).map(([code, section]) => (
-              <div key={code} className="mb-3">
-                <p className="text-xs text-ink-faint font-mono uppercase tracking-wider mb-1">
-                  {sectionLabel(code)}
-                </p>
-                <pre className="text-[11px] text-ink-muted bg-void-card border border-void-hairline rounded-lg p-2 overflow-x-auto whitespace-pre-wrap break-words">
-                  {JSON.stringify(section, null, 2)}
-                </pre>
-              </div>
-            ))}
+            <ConsultationPreview report={activeSnapshot.report} />
 
             {!stale && canExport && (
               <>
