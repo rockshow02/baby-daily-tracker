@@ -110,6 +110,47 @@ tempat yang salah).
   kalau **kedua** pengukuran pembanding punya nilai field itu — kalau
   salah satu `null`, hasilnya `null` (bukan menebak/menganggap 0).
 
+### Total opsional (volume/durasi) di `comparisons` — kebijakan 3 keadaan
+
+**(Perbaikan pasca-review Phase 1.)** Untuk 3 metrik "total opsional" di
+`comparisons` — `feeding_volume_ml`, `pumping_volume_ml`,
+`activity_duration_minutes` — nilai `total_volume_ml`/
+`total_duration_minutes` mentah dari `metrics.*` **tidak langsung**
+dipakai sebagai `current`/`previous` di `comparisons`. Sebelum masuk ke
+`build_comparison()`, tiap sisi (periode sekarang & sebelumnya) melewati
+`utils/insights_engine.py:_measured_total_or_none()` dulu, yang
+membedakan **3 keadaan** per periode:
+
+1. **Tidak ada event sama sekali** (`total_events`/`session_count == 0`)
+   → dikembalikan sebagai **`0` yang sah** (total dari nol event
+   memang genuinely nol) — SAMA kebijakannya kayak `feeding_count`/
+   `diaper_count` yang sudah ada (0 event = 0 valid, bukan "data
+   hilang").
+2. **Ada event, TAPI TIDAK SATU PUN punya nilai tercatat** (mis. sesi
+   pumping dicatat tanpa isi volume) → dikembalikan sebagai **`null`**
+   ("kita nggak tau totalnya", BUKAN 0) — inilah perbaikan intinya: versi
+   sebelum perbaikan ini memakai `sum([])` mentah (= 0) buat kasus ini,
+   yang di layer perbandingan KELIRU keukur seolah "beneran nol" dan
+   bisa memicu `-100%`/kartu "menurun" palsu kalau periode sebelumnya
+   punya volume terukur.
+3. **Sebagian atau semua event punya nilai** (`events_with_volume`/
+   `events_with_duration > 0`) → dikembalikan **jumlah dari yang
+   BENERAN terukur** apa adanya (kebijakan **konservatif**: data
+   parsial yang nyata tetap dipakai, TIDAK di-null-kan semua cuma
+   gara-gara ada 1 event yang bolong — lihat
+   `test_pumping_volume_comparison_mixed_measured_and_unmeasured_uses_conservative_partial_sum`
+   di `backend/tests/test_insights.py`).
+
+Nilai **literal 0** yang BENERAN dicatat di 1 event (mis. `volume_ml=0`,
+valid — model tidak melarangnya) **selalu** masuk keadaan 3 (`events_with_volume
+>= 1`), **tidak pernah** disamakan dengan keadaan 2 — jadi "beneran
+ketercatat nol" tetap bisa dibedakan dari "belum sempat diisi".
+
+`feeding_count`, `diaper_count`, dan `sleep_duration_minutes`
+**tidak tersentuh** perubahan ini — ketiganya tetap count/total murni
+tanpa kemungkinan `null` (event opsional dengan nilai yang bisa hilang
+cuma ada di volume/durasi, bukan di hitungan kejadiannya sendiri).
+
 ## Formula perbandingan periode
 
 `comparisons.<metrik>` = `{current, previous, change, percent_change}`,
@@ -121,27 +162,45 @@ dihitung dari `utils/insights_engine.py:build_comparison()`:
    (tidak pernah bagi dengan nol, dan tidak pernah direpresentasikan
    sebagai "turun 100%" untuk kasus "belum pernah ada data
    pembanding").
-3. `current`/`previous` **selalu** angka mentah (count/sum asli),
-   **tidak pernah** placeholder untuk "data hilang" — 0 di sini artinya
-   genuinely nol event tercatat pada periode itu.
+3. **`current`/`previous` BOLEH `null`** — buat metrik count-based
+   (`feeding_count`, `diaper_count`) dan `sleep_duration_minutes`,
+   keduanya **selalu** angka mentah (0 kalau genuinely nol event). Buat
+   3 metrik "total opsional" di atas, salah satu (atau kedua) sisi BISA
+   `null` kalau periode itu punya event tapi tidak satu pun terukur
+   (lihat bagian sebelumnya). Kalau salah satu sisi `null`,
+   `change`/`percent_change` **SAMA-SAMA `null`** — tidak pernah
+   dihitung dari angka yang sebagian "mengarang", tidak pernah crash.
+4. **Tidak pernah** ada `-100%`/`+100%`/persentase lain yang
+   di-fabrikasi dari data yang sebenarnya hilang (bukan beneran nol) —
+   baik di `comparisons` mentah MAUPUN di kartu insight (lihat di
+   bawah, kedua rule pumping/aktivitas men-gate lewat
+   `delta is not None`).
 
 Metrik yang dibandingkan (dipilih karena "reliable" — total/count murni,
 bukan rata-rata yang sebagian datanya bisa hilang):
 `feeding_count`, `feeding_volume_ml`, `sleep_duration_minutes`,
 `diaper_count`, `pumping_volume_ml`, `activity_duration_minutes`.
 
-**Catatan penting soal "jangan representasikan data hilang sebagai
-penurunan 100%"**: aturan ini ditegakkan di **layer kartu insight**
-(lihat di bawah — semua rule "menurun" mensyaratkan periode SEKARANG
-punya data > 0 buat metrik itu), bukan dengan menyembunyikan angka
-mentah di `comparisons`. Kalau periode sekarang genuinely 0 dan periode
-sebelumnya > 0, `comparisons.<metrik>.percent_change` tetap menghitung
-`-100.0` apa adanya (itu statistik yang benar), TAPI **tidak pernah** ada
-kartu `*_decreased` yang digenerate dari situ — jadi tidak ada KLAIM
-prosa yang menyesatkan, walau angka mentahnya tetap tersedia buat
-tabel/grafik yang ingin menampilkannya secara netral. Frontend Phase 1
-**tidak** menyusun kalimat sendiri dari `comparisons` mentah di luar
-kartu insight yang sudah di-gate ini.
+**Catatan soal "jangan representasikan data hilang sebagai penurunan
+100%"**: ada DUA lapis pertahanan sekarang. Lapis pertama (metrik
+count-based seperti `feeding_count`/`diaper_count`) — aturan ini
+ditegakkan di **layer kartu insight** (semua rule "menurun" mensyaratkan
+periode SEKARANG punya data > 0 buat metrik itu): kalau periode sekarang
+genuinely 0 dan periode sebelumnya > 0, `comparisons.<metrik>.percent_change`
+tetap menghitung `-100.0` apa adanya (itu statistik yang benar buat
+metrik count-based, di mana 0 SELALU berarti "beneran nggak ada
+event"), TAPI **tidak pernah** ada kartu `*_decreased` yang digenerate
+dari situ. Lapis kedua (3 metrik total opsional di atas) — ditegakkan
+LEBIH AWAL, di layer `comparisons` itu sendiri lewat
+`_measured_total_or_none()`, karena buat metrik ini 0 **tidak selalu**
+berarti "beneran nol" (bisa juga "belum terukur") — jadi `null`
+di-propagate dari `comparisons` sampai ke kartu insight, bukan cuma
+di-gate di kartu insight-nya doang. Frontend Phase 1 **tidak** menyusun
+kalimat sendiri dari `comparisons` mentah di luar kartu insight yang
+sudah di-gate ini, dan **wajib** menangani `current`/`previous`/`change`
+yang `null` dengan aman (lihat `frontend/src/pages/InsightsScreen.jsx:
+ComparisonRow` — placeholder "Data pembanding belum cukup", tidak pernah
+teks `"null"` mentah).
 
 ## Rounding
 
@@ -291,10 +350,41 @@ GET /api/children/<child_id>/insights?period=7d
 - Periode tidak didukung → `400`.
 
 `data_quality.days_with_records` = jumlah tanggal unik dalam periode
-yang punya minimal 1 catatan dari salah satu domain harian (feeding/
-sleep/diaper/pumping/activity/mood — growth/health/milestones tidak
-ikut dihitung di sini karena bukan catatan harian). `missing_volume_count`
-= `feeding.total_events - feeding.events_with_volume`.
+yang punya minimal 1 catatan dari **SEMUA** kategori record yang
+didukung Smart Insights — feeding, sleep, diaper, pumping, activity,
+mood, **dan** growth, temperature, medication, doctor visit, illness,
+milestone. `has_any_data = days_with_records > 0`.
+
+**(Perbaikan pasca-review Phase 1.)** Versi sebelum perbaikan ini cuma
+menyatukan tanggal dari 6 domain "harian" (feeding/sleep/diaper/pumping/
+activity/mood) — anak yang catatannya di periode itu **cuma** growth/
+health/milestone (mis. cuma ada 1 pengukuran berat badan minggu ini,
+tanpa catatan harian sama sekali) jadi **keliru** dapat
+`has_any_data = false` dan kartu `insufficient_data`, padahal
+`metrics.growth`/`metrics.health`/`metrics.milestones`-nya sendiri
+sudah terisi benar. Sekarang setiap `compute_*` (termasuk
+`compute_growth_metrics`/`compute_health_metrics`/
+`compute_milestone_metrics`) mengembalikan `(metrics, dates)` — `dates`
+KHUSUS query rentang periode yang TERPISAH dari query "terbaru"
+(lifetime) di fungsi yang sama, dan seluruhnya disatukan sebelum
+dihitung. Lihat
+`backend/tests/test_insights.py::test_growth_only_data_in_period_counts_as_has_any_data`
+dkk.
+
+**Penting — "terbaru" (lifetime) vs "kejadian periode ini" TETAP dua hal
+yang berbeda dan TIDAK PERNAH dicampur**: `metrics.growth.latest`,
+`metrics.health.latest_temperature_celsius`/`latest_temperature_at`, dan
+`metrics.milestones.latest_milestone_type`/`latest_milestone_date` TETAP
+**lifetime** (bisa menunjuk record dari kapan pun, bukan cuma periode
+ini — ini kontrak yang SUDAH ada dan sengaja dipertahankan, lihat bagian
+"Metrik per domain" di bawah) — TAPI record lifetime-only itu (measured
+date di luar periode) **tidak pernah** ikut menghitung
+`has_any_data`/`days_with_records`, walaupun dia yang ditunjuk sebagai
+"terbaru". Lihat
+`test_lifetime_only_growth_measurement_does_not_count_as_current_period_activity`
+buat regresi eksplisitnya.
+
+`missing_volume_count` = `feeding.total_events - feeding.events_with_volume`.
 `unfinished_sleep_count` = `sleep.unfinished_session_count`.
 
 ## Migrasi database

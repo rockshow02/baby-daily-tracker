@@ -115,6 +115,33 @@ describe("InsightsScreen — loading/success/empty/error states", () => {
     expect(screen.queryByText("Menyusui tercatat")).not.toBeInTheDocument();
   });
 
+  it("does NOT show the empty state when has_any_data is true even if every 'daily' metric is zero (Issue 1 regression — growth/health/milestone-only period)", async () => {
+    // Skenario yang dulu salah: anak yang catatannya CUMA growth/health/
+    // milestone (bukan feeding/sleep/diaper/pumping/activity/mood)
+    // SEBELUMNYA bikin backend salah balikin has_any_data=false — kalau
+    // backend-nya udah bener (has_any_data=true), layar ini WAJIB nggak
+    // pernah nyembunyiin metrik yang sebenarnya udah keisi di balik
+    // empty state generik.
+    const base = makeInsightResponse();
+    apiMock.getInsights.mockResolvedValue({
+      ...base,
+      metrics: {
+        ...base.metrics,
+        feeding: { ...base.metrics.feeding, total_events: 0, daily_trend: [] },
+        sleep: { ...base.metrics.sleep, completed_session_count: 0, unfinished_session_count: 0, total_completed_minutes: 0, daily_trend: [] },
+        diaper: { ...base.metrics.diaper, total_events: 0, daily_trend: [] },
+        pumping: { ...base.metrics.pumping, session_count: 0, daily_trend: [] },
+        activity: { ...base.metrics.activity, session_count: 0, daily_trend: [] },
+        mood: { counts: { ceria: 0, baik: 0, sedih: 0, menangis: 0 }, total_events: 0 },
+      },
+      data_quality: { has_any_data: true, days_with_records: 1, missing_volume_count: 0, unfinished_sleep_count: 0 },
+    });
+    render(<InsightsScreen child={testChild} currentUserId={CURRENT_USER_ID} />);
+    await waitFor(() => expect(apiMock.getInsights).toHaveBeenCalled());
+    expect(screen.queryByText("Data belum cukup")).not.toBeInTheDocument();
+    expect(await screen.findByText("Tumbuh Kembang")).toBeInTheDocument();
+  });
+
   it("shows a retryable error state on a non-network failure (e.g. server error)", async () => {
     apiMock.getInsights.mockRejectedValue(new ApiError({ kind: "server_error", status: 500, message: "Terjadi kesalahan pada server." }));
     render(<InsightsScreen child={testChild} currentUserId={CURRENT_USER_ID} />);
@@ -291,5 +318,76 @@ describe("InsightsScreen — disclaimer", () => {
     render(<InsightsScreen child={testChild} currentUserId={CURRENT_USER_ID} />);
     await screen.findByText("Belum ada ringkasan tersimpan");
     expect(screen.getByText(DISCLAIMER_TEXT)).toBeInTheDocument();
+  });
+});
+
+// --------------------------------------------------------------------------
+// Review pasca-Phase-1 — Issue 2: comparisons.feeding_volume_ml/
+// pumping_volume_ml/activity_duration_minutes sekarang BISA `current`/
+// `previous`/`change`-nya `null` (bukan cuma `percent_change`), kalau
+// periode itu punya event tapi TIDAK SATU PUN keukur. UI wajib nggak
+// pernah nampilin teks "null"/NaN/undefined ataupun persentase palsu
+// buat kasus ini. Lihat backend/docs/INSIGHTS.md.
+// --------------------------------------------------------------------------
+
+describe("InsightsScreen — nullable/unavailable comparison values (Issue 2 regression)", () => {
+  it("never renders the literal word 'null' when the current side of a comparison is unavailable", async () => {
+    const base = makeInsightResponse();
+    apiMock.getInsights.mockResolvedValue({
+      ...base,
+      comparisons: {
+        ...base.comparisons,
+        pumping_volume_ml: { current: null, previous: 200, change: null, percent_change: null },
+      },
+    });
+    render(<InsightsScreen child={testChild} currentUserId={CURRENT_USER_ID} />);
+    await screen.findByText("Menyusui tercatat");
+    expect(screen.queryByText(/null/i)).not.toBeInTheDocument();
+    expect(screen.getAllByText("Data pembanding belum cukup").length).toBeGreaterThan(0);
+  });
+
+  it("never renders NaN/undefined/null text when both sides of a comparison are unavailable", async () => {
+    const base = makeInsightResponse();
+    apiMock.getInsights.mockResolvedValue({
+      ...base,
+      comparisons: {
+        ...base.comparisons,
+        pumping_volume_ml: { current: null, previous: null, change: null, percent_change: null },
+      },
+    });
+    render(<InsightsScreen child={testChild} currentUserId={CURRENT_USER_ID} />);
+    await screen.findByText("Menyusui tercatat");
+    expect(screen.queryByText(/NaN/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/undefined/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/null/i)).not.toBeInTheDocument();
+  });
+
+  it("never shows a fabricated percentage (e.g. -100%/+100%) when the comparison is unavailable", async () => {
+    const base = makeInsightResponse();
+    apiMock.getInsights.mockResolvedValue({
+      ...base,
+      comparisons: {
+        ...base.comparisons,
+        activity_duration_minutes: { current: null, previous: 60, change: null, percent_change: null },
+      },
+    });
+    render(<InsightsScreen child={testChild} currentUserId={CURRENT_USER_ID} />);
+    await screen.findByText("Menyusui tercatat");
+    expect(screen.queryByText("+100%")).not.toBeInTheDocument();
+    expect(screen.queryByText("-100%")).not.toBeInTheDocument();
+  });
+
+  it("stays usable with an older-shaped cached response where every comparison value is a plain number (no nulls)", async () => {
+    // Bentuk snapshot yang di-cache SEBELUM fix ini ada -- comparisons-nya
+    // SELALU angka (nggak pernah null), soalnya bug lama justru bikin
+    // total 0 palsu, bukan null. Snapshot lama ini WAJIB tetap kebaca
+    // normal (tidak crash, tidak nampilin teks aneh) tanpa perlu migrasi.
+    const legacyShapedResponse = makeInsightResponse();
+    cacheInsightSnapshot(CURRENT_USER_ID, testChild.id, legacyShapedResponse);
+    setOnline(false);
+    render(<InsightsScreen child={testChild} currentUserId={CURRENT_USER_ID} />);
+    expect(await screen.findByText("Menyusui tercatat")).toBeInTheDocument();
+    expect(screen.queryByText(/null/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Menampilkan ringkasan terakhir saat offline/)).toBeInTheDocument();
   });
 });

@@ -99,9 +99,20 @@ function SectionCard({ title, children }) {
   );
 }
 
+/**
+ * `comparison.current`/`comparison.previous`/`comparison.change` BISA
+ * `null` (bukan cuma `percent_change`) buat metrik "total opsional"
+ * (feeding_volume_ml/pumping_volume_ml/activity_duration_minutes) kalau
+ * periode itu punya event tapi TIDAK SATU PUN punya nilai terukur --
+ * lihat backend/docs/INSIGHTS.md. `formatValue` custom (mis.
+ * `fmtMinutesAsHours`) SUDAH nangani `null` sendiri, tapi fallback
+ * default di sini WAJIB juga nangani biar nggak pernah nampilin teks
+ * "null" mentah buat pemanggil yang nggak ngasih `formatValue`.
+ */
 function ComparisonRow({ label, comparison, unit, formatValue }) {
   if (!comparison) return null;
-  const fmt = formatValue || ((v) => `${v}${unit || ""}`);
+  const fmt = formatValue || ((v) => (v == null ? "—" : `${v}${unit || ""}`));
+  const hasBothValues = comparison.current != null && comparison.previous != null;
   return (
     <div className="flex items-center justify-between py-2 border-b border-void-hairline last:border-b-0">
       <div>
@@ -111,7 +122,7 @@ function ComparisonRow({ label, comparison, unit, formatValue }) {
         </p>
       </div>
       <p className={`text-sm font-semibold ${comparison.change > 0 ? "text-feed" : comparison.change < 0 ? "text-warn" : "text-ink-muted"}`}>
-        {fmtPercent(comparison.percent_change)}
+        {hasBothValues ? fmtPercent(comparison.percent_change) : "Data pembanding belum cukup"}
       </p>
     </div>
   );

@@ -692,3 +692,365 @@ def test_existing_stats_endpoint_still_works(client, monkeypatch):
     resp = client.get(f"/api/children/{child['id']}/stats?days=7", headers=auth_headers(user["token"]))
     assert resp.status_code == 200
     assert "averages" in resp.get_json()
+
+
+# ============================================================================
+# Review pasca-Phase-1 — Issue 1: health/growth/milestone-only data
+# SEBELUMNYA salah dianggap "belum ada data sama sekali" karena
+# `all_dates` cuma nyatuin 6 kategori "harian" (feeding/sleep/diaper/
+# pumping/activity/mood), nggak pernah nyertain growth/temperature/
+# medication/doctor-visit/illness/milestone. Lihat
+# utils/insights_engine.py:build_insight_response().
+# ============================================================================
+
+
+def test_growth_only_data_in_period_counts_as_has_any_data(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(GrowthMeasurement(child_id=cid, measured_date=date(2026, 8, 19), weight_kg=5.0))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    assert body["data_quality"]["has_any_data"] is True
+    assert body["data_quality"]["days_with_records"] == 1
+    assert body["metrics"]["growth"]["latest"]["measured_date"] == "2026-08-19"
+    assert body["insights"] != [
+        {"code": "insufficient_data", "severity": "info", "metric": None, "direction": None, "value": None}
+    ]
+
+
+def test_temperature_only_data_in_period_counts_as_has_any_data(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(TemperatureLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), temperature_celsius=37.2, method="ketiak"))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    assert body["data_quality"]["has_any_data"] is True
+    assert body["data_quality"]["days_with_records"] == 1
+    assert body["metrics"]["health"]["temperature_record_count"] == 1
+    assert body["insights"] != [
+        {"code": "insufficient_data", "severity": "info", "metric": None, "direction": None, "value": None}
+    ]
+
+
+def test_medication_only_data_in_period_counts_as_has_any_data(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(MedicationLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), medication_name="Obat", dosage="5ml"))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    assert body["data_quality"]["has_any_data"] is True
+    assert body["data_quality"]["days_with_records"] == 1
+    assert body["metrics"]["health"]["medication_event_count"] == 1
+    assert body["insights"] != [
+        {"code": "insufficient_data", "severity": "info", "metric": None, "direction": None, "value": None}
+    ]
+
+
+def test_doctor_visit_only_data_in_period_counts_as_has_any_data(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(DoctorVisitLog(child_id=cid, visit_date=date(2026, 8, 19), doctor_name="Dr. Test"))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    assert body["data_quality"]["has_any_data"] is True
+    assert body["data_quality"]["days_with_records"] == 1
+    assert body["metrics"]["health"]["doctor_visit_count"] == 1
+    assert body["insights"] != [
+        {"code": "insufficient_data", "severity": "info", "metric": None, "direction": None, "value": None}
+    ]
+
+
+def test_illness_only_data_in_period_counts_as_has_any_data(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(IllnessLog(child_id=cid, illness_name="Flu", start_date=date(2026, 8, 19)))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    assert body["data_quality"]["has_any_data"] is True
+    assert body["data_quality"]["days_with_records"] == 1
+    assert body["metrics"]["health"]["illness_record_count"] == 1
+    assert body["insights"] != [
+        {"code": "insufficient_data", "severity": "info", "metric": None, "direction": None, "value": None}
+    ]
+
+
+def test_milestone_only_data_in_period_counts_as_has_any_data(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(MilestoneLog(child_id=cid, milestone_type="bisa_duduk", achieved_date=date(2026, 8, 19)))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    assert body["data_quality"]["has_any_data"] is True
+    assert body["data_quality"]["days_with_records"] == 1
+    assert body["metrics"]["milestones"]["count_in_period"] == 1
+    assert body["insights"] != [
+        {"code": "insufficient_data", "severity": "info", "metric": None, "direction": None, "value": None}
+    ]
+
+
+def test_lifetime_only_growth_measurement_does_not_count_as_current_period_activity(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    # measured_date JAUH sebelum periode sekarang (08-17..08-23) --
+    # "terbaru" secara lifetime, TAPI BUKAN kejadian periode ini.
+    db.session.add(GrowthMeasurement(child_id=cid, measured_date=date(2026, 6, 1), weight_kg=4.0))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    # `latest` TETAP nunjuk measurement lama ini (kontrak lifetime yang
+    # sudah didokumentasikan, requirement #4) ...
+    assert body["metrics"]["growth"]["latest"]["measured_date"] == "2026-06-01"
+    # ...TAPI has_any_data TETAP false -- measurement ini cuma "kebetulan
+    # jadi yang terbaru", BUKAN aktivitas periode sekarang (requirement #3).
+    assert body["data_quality"]["has_any_data"] is False
+    assert body["data_quality"]["days_with_records"] == 0
+    assert body["insights"] == [
+        {"code": "insufficient_data", "severity": "info", "metric": None, "direction": None, "value": None}
+    ]
+
+
+def test_lifetime_only_temperature_and_milestone_do_not_count_as_current_period_activity(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(TemperatureLog(child_id=cid, timestamp=datetime(2026, 6, 1, 8, 0, 0), temperature_celsius=37.0, method="ketiak"))
+    db.session.add(MilestoneLog(child_id=cid, milestone_type="bisa_duduk", achieved_date=date(2026, 6, 1)))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    assert body["metrics"]["health"]["latest_temperature_celsius"] == 37.0  # lifetime tetap ditampilkan
+    assert body["metrics"]["milestones"]["latest_milestone_type"] == "bisa_duduk"
+    assert body["data_quality"]["has_any_data"] is False
+    assert body["insights"] == [
+        {"code": "insufficient_data", "severity": "info", "metric": None, "direction": None, "value": None}
+    ]
+
+
+def test_days_with_records_unions_all_supported_categories_on_the_same_day(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    same_day = date(2026, 8, 19)
+    db.session.add(GrowthMeasurement(child_id=cid, measured_date=same_day, weight_kg=5.0))
+    db.session.add(TemperatureLog(child_id=cid, timestamp=datetime(2026, 8, 19, 9, 0, 0), temperature_celsius=37.0, method="ketiak"))
+    db.session.add(MilestoneLog(child_id=cid, milestone_type="bisa_duduk", achieved_date=same_day))
+    db.session.add(IllnessLog(child_id=cid, illness_name="Flu", start_date=date(2026, 8, 20)))  # hari lain
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    assert body["data_quality"]["days_with_records"] == 2
+    assert body["data_quality"]["has_any_data"] is True
+
+
+# ============================================================================
+# Review pasca-Phase-1 — Issue 2: feeding_volume_ml/pumping_volume_ml/
+# activity_duration_minutes SEBELUMNYA memakai total mentah (sum of
+# non-null, yang jadi 0 kalau semua event nggak punya nilai) langsung di
+# perbandingan periode -- bikin -100%/+100% palsu pas 1 periode punya
+# event tapi TIDAK SATU PUN keukur. Lihat
+# utils/insights_engine.py:_measured_total_or_none()/build_comparison().
+# ============================================================================
+
+
+def test_feeding_volume_comparison_current_missing_previous_measured_produces_null_not_false_decrease(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(FeedingLog(child_id=cid, timestamp=datetime(2026, 8, 12, 8, 0, 0), feed_type="sufor", volume_ml=100))
+    db.session.add(FeedingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), feed_type="asi_langsung", volume_ml=None))
+    db.session.commit()
+
+    cmp_ = _get_insights(client, user["token"], cid).get_json()["comparisons"]["feeding_volume_ml"]
+    assert cmp_["current"] is None
+    assert cmp_["previous"] == 100
+    assert cmp_["change"] is None
+    assert cmp_["percent_change"] is None
+
+
+def test_pumping_volume_comparison_current_missing_previous_measured_no_false_decrease_card(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 12, 8, 0, 0), volume_ml=200))
+    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), volume_ml=None))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    cmp_ = body["comparisons"]["pumping_volume_ml"]
+    assert cmp_["current"] is None
+    assert cmp_["previous"] == 200
+    assert cmp_["change"] is None
+    assert cmp_["percent_change"] is None
+    codes = [c["code"] for c in body["insights"]]
+    assert "pumping_volume_decreased" not in codes
+    assert "pumping_volume_increased" not in codes
+
+
+def test_activity_duration_comparison_current_missing_previous_measured_no_false_decrease_card(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(ActivityLog(child_id=cid, timestamp=datetime(2026, 8, 12, 8, 0, 0), activity_type="stroll", duration_minutes=60))
+    db.session.add(ActivityLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), activity_type="bathing", duration_minutes=None))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    cmp_ = body["comparisons"]["activity_duration_minutes"]
+    assert cmp_["current"] is None
+    assert cmp_["previous"] == 60
+    assert cmp_["change"] is None
+    codes = [c["code"] for c in body["insights"]]
+    assert "activity_duration_decreased" not in codes
+    assert "activity_duration_increased" not in codes
+
+
+def test_pumping_volume_comparison_current_measured_previous_unmeasured_produces_null_not_fabricated(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 12, 8, 0, 0), volume_ml=None))
+    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), volume_ml=250))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    cmp_ = body["comparisons"]["pumping_volume_ml"]
+    assert cmp_["current"] == 250
+    assert cmp_["previous"] is None
+    assert cmp_["change"] is None
+    assert cmp_["percent_change"] is None
+    codes = [c["code"] for c in body["insights"]]
+    assert "pumping_volume_increased" not in codes
+    assert "pumping_volume_decreased" not in codes
+
+
+def test_pumping_volume_comparison_both_periods_unmeasured(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 12, 8, 0, 0), volume_ml=None))
+    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), volume_ml=None))
+    db.session.commit()
+
+    cmp_ = _get_insights(client, user["token"], cid).get_json()["comparisons"]["pumping_volume_ml"]
+    assert cmp_ == {"current": None, "previous": None, "change": None, "percent_change": None}
+
+
+def test_pumping_volume_comparison_both_periods_measured_computes_a_real_change(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 12, 8, 0, 0), volume_ml=100))
+    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), volume_ml=250))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    assert body["comparisons"]["pumping_volume_ml"] == {
+        "current": 250, "previous": 100, "change": 150, "percent_change": 150.0,
+    }
+    codes = [c["code"] for c in body["insights"]]
+    assert "pumping_volume_increased" in codes
+
+
+def test_pumping_volume_comparison_mixed_measured_and_unmeasured_uses_conservative_partial_sum(client, monkeypatch):
+    """Kebijakan konservatif (didokumentasikan di INSIGHTS.md): data PARSIAL (sebagian event keukur) tetap dipakai apa adanya, TIDAK di-null-kan semua."""
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), volume_ml=120))
+    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 12, 0, 0), volume_ml=None))
+    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 12, 8, 0, 0), volume_ml=80))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    cmp_ = body["comparisons"]["pumping_volume_ml"]
+    assert cmp_["current"] == 120
+    assert cmp_["previous"] == 80
+    assert cmp_["change"] == 40
+    assert body["metrics"]["pumping"]["session_count"] == 2
+    assert body["metrics"]["pumping"]["events_with_volume"] == 1
+
+
+def test_pumping_volume_zero_is_a_real_measured_value_not_missing_data(client, monkeypatch):
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    # DICATAT sebagai 0 literal (bukan None) -- model nggak melarang 0,
+    # dan 0 di sini WAJIB diperlakukan beda dari "nggak ada nilai".
+    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), volume_ml=0))
+    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 12, 8, 0, 0), volume_ml=50))
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    cmp_ = body["comparisons"]["pumping_volume_ml"]
+    assert cmp_["current"] == 0
+    assert cmp_["previous"] == 50
+    assert cmp_["change"] == -50
+    assert body["metrics"]["pumping"]["events_with_volume"] == 1
+
+
+def test_pumping_volume_no_events_at_all_is_a_confirmed_zero_not_unmeasured(client, monkeypatch):
+    """'Nggak ada event sama sekali' TETAP angka 0 yang sah (beda dari 'ada event tapi nggak keukur', yang jadi None)."""
+    _freeze_today(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    cid = child["id"]
+
+    db.session.add(PumpingLog(child_id=cid, timestamp=datetime(2026, 8, 19, 8, 0, 0), volume_ml=150))
+    # TIDAK ADA PumpingLog SAMA SEKALI di periode sebelumnya.
+    db.session.commit()
+
+    body = _get_insights(client, user["token"], cid).get_json()
+    cmp_ = body["comparisons"]["pumping_volume_ml"]
+    assert cmp_["current"] == 150
+    assert cmp_["previous"] == 0
+    assert cmp_["change"] == 150
+    assert cmp_["percent_change"] is None  # previous==0 -> null (aturan lama, bukan bug baru)
+    codes = [c["code"] for c in body["insights"]]
+    assert "pumping_volume_increased" in codes  # naik dari 0 TETAP observasi valid

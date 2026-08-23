@@ -34,6 +34,26 @@ PRINSIP UTAMA (ditegakkan di seluruh modul ini):
     manusia ada di frontend) — rounding di sini CUMA buat presisi
     (rata-rata & persentase dibulatkan 1 desimal; total/count tetap
     integer apa adanya — lihat `_round1`).
+  - `data_quality.has_any_data`/`days_with_records` memperhitungkan
+    SEMUA kategori record yang didukung Smart Insights (feeding, sleep,
+    diaper, pumping, activity, mood, growth, temperature, medication,
+    doctor visit, illness, milestone) — BUKAN cuma 6 kategori "harian"
+    (bug review pasca-Phase-1: anak yang catatannya CUMA growth/health/
+    milestone di periode ini sebelumnya salah dianggap "belum ada data
+    sama sekali"). Metrik "terakhir tercatat" yang TIDAK di-scope
+    periode (growth/temperature/milestone terbaru) TETAP TIDAK PERNAH
+    ikut menentukan has_any_data HANYA karena statusnya "terbaru" — ada
+    query TERPISAH yang KHUSUS mengecek kejadian di DALAM periode untuk
+    keperluan ini (lihat `compute_growth_metrics`/`compute_health_metrics`/
+    `compute_milestone_metrics`).
+  - Perbandingan periode (`comparisons.feeding_volume_ml`/
+    `pumping_volume_ml`/`activity_duration_minutes`) membedakan "nggak
+    ada event sama sekali" dan "ada event tapi TIDAK SATU PUN punya
+    nilai terukur" dari "beneran ketercatat nol" — kedua kasus pertama
+    bikin sisi periode itu `null` di comparisons (BUKAN 0), biar nggak
+    ada penurunan/kenaikan palsu 100% yang keluar cuma karena caregiver
+    belum sempat isi volume/durasi (bug review pasca-Phase-1). Lihat
+    `_measured_total_or_none`/`build_comparison`.
 """
 from datetime import datetime, time, timedelta
 
@@ -361,7 +381,17 @@ def compute_pumping_metrics(child_id, start_date, end_date, days):
 # riwayat pengukurannya panjang.
 # --------------------------------------------------------------------------
 
-def compute_growth_metrics(child_id, today):
+def compute_growth_metrics(child_id, today, start_date, end_date):
+    """
+    `latest`/`previous` TETAP lifetime (BUKAN di-scope periode — lihat
+    komentar di atas modul ini soal kenapa), TAPI dates yang dibalikin
+    (elemen ke-2 tuple) KHUSUS pengukuran yang measured_date-nya BENERAN
+    jatuh di [start_date, end_date] periode ini — query TERPISAH dari
+    "2 terakhir" di atas, biar pengukuran lama yang kebetulan jadi
+    "terbaru" TIDAK PERNAH keitung sebagai aktivitas periode ini
+    (requirement #3 review: jangan anggap record lifetime-only sebagai
+    aktivitas periode sekarang cuma gara-gara dia "terbaru").
+    """
     measurements = (
         GrowthMeasurement.query.filter_by(child_id=child_id)
         .order_by(GrowthMeasurement.measured_date.desc())
@@ -392,7 +422,14 @@ def compute_growth_metrics(child_id, today):
             return None
         return round(a - b, 2)
 
-    return {
+    period_rows = GrowthMeasurement.query.filter(
+        GrowthMeasurement.child_id == child_id,
+        GrowthMeasurement.measured_date >= start_date,
+        GrowthMeasurement.measured_date <= end_date,
+    ).all()
+    dates = {m.measured_date.isoformat() for m in period_rows}
+
+    metrics = {
         "latest": _entry(latest),
         "previous": _entry(previous),
         "weight_change_kg": _delta("weight_kg"),
@@ -400,6 +437,7 @@ def compute_growth_metrics(child_id, today):
         "head_circumference_change_cm": _delta("head_circumference_cm"),
         "days_since_latest_measurement": (today - latest.measured_date).days if latest else None,
     }
+    return metrics, dates
 
 
 # --------------------------------------------------------------------------
@@ -409,51 +447,71 @@ def compute_growth_metrics(child_id, today):
 # --------------------------------------------------------------------------
 
 def compute_health_metrics(child_id, start_date, end_date):
+    """
+    Balikin `(metrics, dates)` — `dates` KHUSUS kejadian yang BENERAN
+    jatuh di periode ini (dipakai `data_quality.has_any_data`/
+    `days_with_records`), TERPISAH dari `latest_temperature_*` yang
+    SENGAJA lifetime (bukan di-scope periode — lihat komentar di
+    fungsinya). Query diubah dari `.count()` jadi `.all()` biar count
+    DAN tanggalnya didapat dari 1 query yang sama (bukan query
+    tambahan) — jumlah query total ke database TIDAK bertambah.
+    """
     start_dt, end_dt = _range_bounds(start_date, end_date)
+    dates = set()
 
-    temp_count = TemperatureLog.query.filter(
+    temp_rows = TemperatureLog.query.filter(
         TemperatureLog.child_id == child_id,
         TemperatureLog.timestamp >= start_dt,
         TemperatureLog.timestamp < end_dt,
-    ).count()
+    ).all()
+    for r in temp_rows:
+        dates.add(r.timestamp.date().isoformat())
 
     # Suhu TERAKHIR TERCATAT (bukan di-scope periode) — lebih informatif
     # daripada "terakhir DALAM periode" yang sering kosong; mirror pola
-    # "pengukuran pertumbuhan terakhir" di atas.
+    # "pengukuran pertumbuhan terakhir" di atas. TIDAK PERNAH ikut nambah
+    # ke `dates` di atas — itu KHUSUS kejadian di dalam periode ini.
     latest_temp = (
         TemperatureLog.query.filter_by(child_id=child_id)
         .order_by(TemperatureLog.timestamp.desc())
         .first()
     )
 
-    med_count = MedicationLog.query.filter(
+    med_rows = MedicationLog.query.filter(
         MedicationLog.child_id == child_id,
         MedicationLog.timestamp >= start_dt,
         MedicationLog.timestamp < end_dt,
-    ).count()
+    ).all()
+    for r in med_rows:
+        dates.add(r.timestamp.date().isoformat())
 
-    visit_count = DoctorVisitLog.query.filter(
+    visit_rows = DoctorVisitLog.query.filter(
         DoctorVisitLog.child_id == child_id,
         DoctorVisitLog.visit_date >= start_date,
         DoctorVisitLog.visit_date <= end_date,
-    ).count()
+    ).all()
+    for r in visit_rows:
+        dates.add(r.visit_date.isoformat())
 
-    illness_count = IllnessLog.query.filter(
+    illness_rows = IllnessLog.query.filter(
         IllnessLog.child_id == child_id,
         IllnessLog.start_date >= start_date,
         IllnessLog.start_date <= end_date,
-    ).count()
+    ).all()
+    for r in illness_rows:
+        dates.add(r.start_date.isoformat())
 
-    return {
-        "temperature_record_count": temp_count,
+    metrics = {
+        "temperature_record_count": len(temp_rows),
         "latest_temperature_celsius": latest_temp.temperature_celsius if latest_temp else None,
         "latest_temperature_at": (
             (latest_temp.timestamp.isoformat() + "+07:00") if latest_temp else None
         ),
-        "medication_event_count": med_count,
-        "doctor_visit_count": visit_count,
-        "illness_record_count": illness_count,
+        "medication_event_count": len(med_rows),
+        "doctor_visit_count": len(visit_rows),
+        "illness_record_count": len(illness_rows),
     }
+    return metrics, dates
 
 
 # --------------------------------------------------------------------------
@@ -508,27 +566,31 @@ def compute_mood_metrics(child_id, start_date, end_date):
 
 
 def compute_milestone_metrics(child_id, start_date, end_date):
-    period_count = MilestoneLog.query.filter(
+    """Balikin `(metrics, dates)` — sama polanya kayak compute_health_metrics di atas."""
+    period_rows = MilestoneLog.query.filter(
         MilestoneLog.child_id == child_id,
         MilestoneLog.achieved_date >= start_date,
         MilestoneLog.achieved_date <= end_date,
-    ).count()
+    ).all()
+    dates = {m.achieved_date.isoformat() for m in period_rows}
 
     # Milestone TERAKHIR TERCATAT (bukan di-scope periode, sama alasan
     # kayak growth/temperature di atas) — CUMA `milestone_type` +
     # tanggal, TIDAK PERNAH `custom_label` (bisa berisi teks bebas apa
-    # pun yang orang tua ketik sendiri).
+    # pun yang orang tua ketik sendiri). TIDAK PERNAH ikut nambah ke
+    # `dates` di atas kalau achieved_date-nya di luar periode ini.
     latest = (
         MilestoneLog.query.filter_by(child_id=child_id)
         .order_by(MilestoneLog.achieved_date.desc())
         .first()
     )
 
-    return {
-        "count_in_period": period_count,
+    metrics = {
+        "count_in_period": len(period_rows),
         "latest_milestone_type": latest.milestone_type if latest else None,
         "latest_milestone_date": latest.achieved_date.isoformat() if latest else None,
     }
+    return metrics, dates
 
 
 # --------------------------------------------------------------------------
@@ -537,6 +599,50 @@ def compute_milestone_metrics(child_id, start_date, end_date):
 # sebagian datanya hilang, sesuai instruksi produk).
 # --------------------------------------------------------------------------
 
+def _measured_total_or_none(total, event_count, events_with_measured_value):
+    """
+    Buat metrik "total opsional" (volume/durasi yang nggak semua event
+    pasti punya nilainya — feeding/pumping volume, activity duration).
+    Membedakan 3 keadaan (requirement review #2 — "distinguish among:
+    no events / events exist but none measured / partially measured"):
+
+      1. `event_count == 0` (nggak ada event SAMA SEKALI di periode
+         itu) -> `total` dikembalikan APA ADANYA, yaitu 0 — ini
+         KETERCATAT NOL YANG BENERAN VALID (persis kayak feeding_count/
+         diaper_count=0 dipercaya penuh sebagai "nggak ada event"),
+         BUKAN data yang hilang. Nilai 0 di sini SAH dipakai buat
+         perbandingan "naik dari 0" (konsisten sama kebijakan
+         feeding_count/diaper_count yang sudah ada — previous=0 TETAP
+         bikin `change` valid, cuma `percent_change`-nya yang null,
+         lihat `build_comparison`).
+      2. `event_count > 0` TAPI `events_with_measured_value == 0` (ADA
+         event, tapi TIDAK SATU PUN punya nilai tercatat — mis.
+         caregiver nyatet sesi pumping tapi lupa isi volume) -> `None`.
+         Ini yang BEDA dari kasus 1: kita GENUINELY nggak tau berapa
+         totalnya, jadi TIDAK PERNAH dianggap 0 (yang bakal keliru
+         diartiin "beneran nggak ada" pas dibandingin — inilah akar
+         bug review: total 0 dari `sum([])` kepakai seolah "beneran
+         nol" padahal cuma "belum sempat diisi").
+      3. `events_with_measured_value > 0` (SEBAGIAN atau SEMUA event
+         punya nilai) -> `total` (jumlah dari yang BENERAN terukur)
+         dikembalikan apa adanya — kebijakan KONSERVATIF: data parsial
+         yang nyata tetap lebih berguna daripada di-null-kan semua
+         cuma gara-gara ada 1 event yang bolong.
+
+    Nilai literal 0 yang BENERAN tercatat di 1 event (mis. volume_ml=0)
+    SUDAH bikin `events_with_measured_value >= 1` (lihat
+    compute_feeding_metrics/compute_pumping_metrics/
+    compute_activity_metrics: `volume_ml is not None`/`duration_minutes
+    is not None` menghitung 0 literal sebagai "punya nilai") — jadi
+    kasus itu otomatis masuk poin 3 di atas, TIDAK PERNAH disamakan
+    sama poin 2. Lihat backend/docs/INSIGHTS.md bagian "Kebijakan nilai
+    yang hilang" buat detail lengkapnya.
+    """
+    if event_count > 0 and events_with_measured_value == 0:
+        return None
+    return total
+
+
 def build_comparison(current, previous):
     """
     Aturan (didokumentasikan juga di backend/docs/INSIGHTS.md):
@@ -544,13 +650,22 @@ def build_comparison(current, previous):
       2. `previous == 0` -> percent_change = null (BUKAN 100%/None-as-0),
          berlaku SAMA baik current-nya 0 ATAUPUN positif.
       3. Nilai yang hilang TIDAK PERNAH direpresentasikan sebagai
-         "penurunan 100%" — current/previous di sini SELALU angka asli
-         (0 kalau genuinely nggak ada event), bukan placeholder buat
-         "data hilang".
+         "penurunan 100%" — buat metrik count-based (feeding_count,
+         diaper_count, dst.) current/previous di sini SELALU angka asli
+         (0 kalau genuinely nggak ada event). Buat metrik "total
+         opsional" (feeding_volume_ml/pumping_volume_ml/
+         activity_duration_minutes), pemanggil BOLEH ngirim `None`
+         lewat `_measured_total_or_none()` kalau periode itu nggak
+         punya SATU PUN event dengan nilai terukur — kalau salah satu
+         (atau kedua) sisi `None`, `change`/`percent_change` SAMA-SAMA
+         `None` (nggak pernah dihitung dari angka yang sebagian
+         "ngarang"), TIDAK PERNAH crash.
       4. change/percent_change dibulatkan 1 desimal (`_round1`), current/
-         previous dikembalikan APA ADANYA (integer/float asli, TIDAK
-         diformat).
+         previous dikembalikan APA ADANYA (integer/float asli ATAU
+         `None`, TIDAK diformat).
     """
+    if current is None or previous is None:
+        return {"current": current, "previous": previous, "change": None, "percent_change": None}
     change = current - previous
     if previous == 0:
         percent_change = None
@@ -618,17 +733,25 @@ def build_insights(metrics, comparisons, data_quality):
         elif delta <= -DIAPER_COUNT_THRESHOLD and diaper_cmp["previous"] > 0:
             candidates.append(_card("diaper_count_decreased", "diaper_count", "down", abs(delta)))
 
+    # pumping_volume_ml/activity_duration_minutes BISA `None` di kedua
+    # sisi (lihat _measured_total_or_none) kalau periode itu nggak
+    # punya SATU PUN event dengan nilai terukur — `delta is not None`
+    # jadi gate WAJIB di sini (bukan cuma penghias): tanpa ini,
+    # `delta >= AMBANG` bakal TypeError begitu salah satu sisi `None`
+    # (mis. periode sekarang keukur tapi periode sebelumnya nggak sama
+    # sekali). Kartu kenaikan/penurunan CUMA digenerate kalau KEDUA
+    # periode punya nilai terukur beneran (requirement review #2).
     pumping_cmp = comparisons["pumping_volume_ml"]
-    if metrics["pumping"]["events_with_volume"] > 0:
-        delta = pumping_cmp["change"]
+    delta = pumping_cmp["change"]
+    if delta is not None:
         if delta >= PUMPING_VOLUME_THRESHOLD_ML:
             candidates.append(_card("pumping_volume_increased", "pumping_volume_ml", "up", delta))
         elif delta <= -PUMPING_VOLUME_THRESHOLD_ML and pumping_cmp["previous"] > 0:
             candidates.append(_card("pumping_volume_decreased", "pumping_volume_ml", "down", abs(delta)))
 
     activity_cmp = comparisons["activity_duration_minutes"]
-    if metrics["activity"]["session_count"] > 0:
-        delta = activity_cmp["change"]
+    delta = activity_cmp["change"]
+    if delta is not None:
         if delta >= ACTIVITY_DURATION_THRESHOLD_MINUTES:
             candidates.append(_card("activity_duration_increased", "activity_duration_minutes", "up", delta))
         elif delta <= -ACTIVITY_DURATION_THRESHOLD_MINUTES and activity_cmp["previous"] > 0:
@@ -662,9 +785,9 @@ def build_insight_response(child_id, period_key, today):
     pumping, pumping_dates = compute_pumping_metrics(child_id, period["start_date"], period["end_date"], days)
     activity, activity_dates = compute_activity_metrics(child_id, period["start_date"], period["end_date"], days)
     mood, mood_dates = compute_mood_metrics(child_id, period["start_date"], period["end_date"])
-    growth = compute_growth_metrics(child_id, today)
-    health = compute_health_metrics(child_id, period["start_date"], period["end_date"])
-    milestones = compute_milestone_metrics(child_id, period["start_date"], period["end_date"])
+    growth, growth_dates = compute_growth_metrics(child_id, today, period["start_date"], period["end_date"])
+    health, health_dates = compute_health_metrics(child_id, period["start_date"], period["end_date"])
+    milestones, milestone_dates = compute_milestone_metrics(child_id, period["start_date"], period["end_date"])
 
     # Periode SEBELUMNYA — CUMA buat comparisons (metrik penuhnya nggak
     # ikut dikembalikan ke klien, biar payload nggak dobel-besar tanpa
@@ -677,18 +800,47 @@ def build_insight_response(child_id, period_key, today):
 
     comparisons = {
         "feeding_count": build_comparison(feeding["total_events"], prev_feeding["total_events"]),
-        "feeding_volume_ml": build_comparison(feeding["total_volume_ml"], prev_feeding["total_volume_ml"]),
+        # feeding_volume_ml/pumping_volume_ml/activity_duration_minutes:
+        # `None` di salah satu sisi (lewat _measured_total_or_none) kalau
+        # periode itu punya event tapi TIDAK SATU PUN punya nilai
+        # terukur — biar nggak ada penurunan/kenaikan palsu (mis. -100%)
+        # yang keluar cuma karena volume/durasinya belum sempat diisi,
+        # BUKAN karena beneran turun jadi nol (requirement review #2).
+        "feeding_volume_ml": build_comparison(
+            _measured_total_or_none(feeding["total_volume_ml"], feeding["total_events"], feeding["events_with_volume"]),
+            _measured_total_or_none(
+                prev_feeding["total_volume_ml"], prev_feeding["total_events"], prev_feeding["events_with_volume"]
+            ),
+        ),
         "sleep_duration_minutes": build_comparison(
             sleep["total_completed_minutes"], prev_sleep["total_completed_minutes"]
         ),
         "diaper_count": build_comparison(diaper["total_events"], prev_diaper["total_events"]),
-        "pumping_volume_ml": build_comparison(pumping["total_volume_ml"], prev_pumping["total_volume_ml"]),
+        "pumping_volume_ml": build_comparison(
+            _measured_total_or_none(pumping["total_volume_ml"], pumping["session_count"], pumping["events_with_volume"]),
+            _measured_total_or_none(
+                prev_pumping["total_volume_ml"], prev_pumping["session_count"], prev_pumping["events_with_volume"]
+            ),
+        ),
         "activity_duration_minutes": build_comparison(
-            activity["total_duration_minutes"], prev_activity["total_duration_minutes"]
+            _measured_total_or_none(
+                activity["total_duration_minutes"], activity["session_count"], activity["events_with_duration"]
+            ),
+            _measured_total_or_none(
+                prev_activity["total_duration_minutes"], prev_activity["session_count"], prev_activity["events_with_duration"]
+            ),
         ),
     }
 
-    all_dates = feeding_dates | sleep_dates | diaper_dates | pumping_dates | activity_dates | mood_dates
+    # SEMUA kategori record yang didukung Smart Insights ikut menentukan
+    # has_any_data/days_with_records — BUKAN cuma 6 kategori "harian"
+    # (bug review pasca-Phase-1: anak yang catatannya CUMA growth/health/
+    # milestone di periode ini sebelumnya salah dianggap "belum ada data
+    # sama sekali", lihat backend/tests/test_insights.py).
+    all_dates = (
+        feeding_dates | sleep_dates | diaper_dates | pumping_dates | activity_dates | mood_dates
+        | growth_dates | health_dates | milestone_dates
+    )
     data_quality = {
         "has_any_data": len(all_dates) > 0,
         "days_with_records": len(all_dates),
