@@ -1,5 +1,6 @@
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import MedicalProfileScreen from "./MedicalProfileScreen";
 
 function deferred() {
@@ -60,8 +61,15 @@ function makeEmergencyCard(overrides = {}) {
     emergency_instructions: null, last_reviewed_at: null, last_reviewed_by_name: null,
     disclaimer: "Kartu ini dibuat dari data yang dimasukkan caregiver, bukan diagnosis medis.",
     privacy_note: "Data ini sangat pribadi — jangan sebarkan tanpa alasan yang jelas.",
+    snapshot_token: "signed-token-1",
     ...overrides,
   };
+}
+
+function apiError(status, message) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
 }
 
 beforeEach(() => {
@@ -255,9 +263,9 @@ describe("MedicalProfileScreen — online-only behavior", () => {
 });
 
 describe("MedicalProfileScreen — Emergency Card preview & PDF snapshot consistency", () => {
-  it("opens the card, fetches a preview, and downloads the exact previewed snapshot after confirmation", async () => {
+  it("sends exactly the snapshot_token returned with the active preview (no empty-body request)", async () => {
     apiMock.getMedicalProfile.mockResolvedValue({ profile: makeProfile(), capabilities: FULL_CAPS });
-    apiMock.previewEmergencyCard.mockResolvedValue(makeEmergencyCard());
+    apiMock.previewEmergencyCard.mockResolvedValue(makeEmergencyCard({ snapshot_token: "tok-abc-123" }));
     apiMock.downloadAuthenticatedPost.mockResolvedValue();
     vi.spyOn(window, "confirm").mockReturnValue(true);
 
@@ -270,10 +278,27 @@ describe("MedicalProfileScreen — Emergency Card preview & PDF snapshot consist
     fireEvent.click(downloadButton);
 
     await waitFor(() => expect(apiMock.downloadAuthenticatedPost).toHaveBeenCalledTimes(1));
+    // Body sekarang WAJIB berisi snapshot_token yang PERSIS sama dari preview
+    // -- body kosong `{}` yang dipakai SEBELUM perbaikan defect ini TIDAK PERNAH dikirim lagi.
     expect(apiMock.downloadAuthenticatedPost).toHaveBeenCalledWith(
-      "http://x/api/children/10/emergency-card/pdf", {}, expect.stringContaining("kartu-darurat"),
+      "http://x/api/children/10/emergency-card/pdf",
+      { snapshot_token: "tok-abc-123" },
+      expect.stringContaining("kartu-darurat"),
     );
+    const [, sentBody] = apiMock.downloadAuthenticatedPost.mock.calls[0];
+    expect(sentBody).not.toEqual({});
     expect(window.confirm).toHaveBeenCalled();
+  });
+
+  it("disables download when the preview response is missing a snapshot token", async () => {
+    apiMock.getMedicalProfile.mockResolvedValue({ profile: makeProfile(), capabilities: FULL_CAPS });
+    const { snapshot_token, ...cardWithoutToken } = makeEmergencyCard();
+    apiMock.previewEmergencyCard.mockResolvedValue(cardWithoutToken);
+
+    render(<MedicalProfileScreen child={ownerChild} currentUserId={CURRENT_USER_ID} onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "🚑 Lihat Kartu Darurat" }));
+
+    expect(await screen.findByRole("button", { name: "Unduh PDF" })).toBeDisabled();
   });
 
   it("cancelling the privacy confirmation never triggers a download", async () => {
@@ -306,7 +331,7 @@ describe("MedicalProfileScreen — Emergency Card preview & PDF snapshot consist
     resolve();
   });
 
-  it("disables the PDF button and shows a warning once the profile is edited after the preview was taken", async () => {
+  it("disables the PDF button and shows local-edit guidance once the profile is edited after the preview was taken", async () => {
     apiMock.getMedicalProfile.mockResolvedValue({ profile: makeProfile(), capabilities: FULL_CAPS });
     apiMock.previewEmergencyCard.mockResolvedValue(makeEmergencyCard());
     apiMock.updateMedicalProfile.mockResolvedValue({ profile: makeProfile({ blood_type: "O+" }), capabilities: FULL_CAPS });
@@ -321,6 +346,111 @@ describe("MedicalProfileScreen — Emergency Card preview & PDF snapshot consist
 
     expect(await screen.findByText(/Profil medis sudah diubah sejak pratinjau ini dibuat/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Unduh PDF" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Muat ulang pratinjau" })).toBeInTheDocument();
+  });
+
+  it("on a 409 stale response: keeps the preview visible, disables download, and shows the safe refresh guidance", async () => {
+    apiMock.getMedicalProfile.mockResolvedValue({ profile: makeProfile(), capabilities: FULL_CAPS });
+    apiMock.previewEmergencyCard.mockResolvedValue(makeEmergencyCard());
+    apiMock.downloadAuthenticatedPost.mockRejectedValue(
+      apiError(409, "Data Kartu Darurat berubah sejak pratinjau dibuat. Muat ulang pratinjau sebelum mengunduh PDF."),
+    );
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<MedicalProfileScreen child={ownerChild} currentUserId={CURRENT_USER_ID} onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "🚑 Lihat Kartu Darurat" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Unduh PDF" }));
+
+    expect(await screen.findByText(
+      "Data Kartu Darurat berubah sejak pratinjau dibuat. Muat ulang pratinjau sebelum mengunduh PDF.",
+    )).toBeInTheDocument();
+    // Preview yang SUDAH ditampilkan TETAP kelihatan (buat perbandingan) -- TIDAK dibuang.
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText("Dedek")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Unduh PDF" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Muat ulang pratinjau" })).toBeInTheDocument();
+  });
+
+  it("reloading the preview after a 409 replaces both the report and the token atomically, clearing the stale state", async () => {
+    apiMock.getMedicalProfile.mockResolvedValue({ profile: makeProfile(), capabilities: FULL_CAPS });
+    apiMock.previewEmergencyCard.mockResolvedValueOnce(makeEmergencyCard({ snapshot_token: "tok-old" }));
+    apiMock.downloadAuthenticatedPost.mockRejectedValueOnce(apiError(409, "basi"));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<MedicalProfileScreen child={ownerChild} currentUserId={CURRENT_USER_ID} onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "🚑 Lihat Kartu Darurat" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Unduh PDF" }));
+    expect(await screen.findByText("basi")).toBeInTheDocument();
+
+    apiMock.previewEmergencyCard.mockResolvedValueOnce(
+      makeEmergencyCard({ snapshot_token: "tok-new", primary_doctor_name: "dr. Baru" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Muat ulang pratinjau" }));
+
+    expect(await screen.findByText("Dokter: dr. Baru")).toBeInTheDocument();
+    expect(screen.queryByText("basi")).not.toBeInTheDocument();
+    const downloadButton = screen.getByRole("button", { name: "Unduh PDF" });
+    expect(downloadButton).not.toBeDisabled();
+
+    apiMock.downloadAuthenticatedPost.mockResolvedValueOnce();
+    fireEvent.click(downloadButton);
+    await waitFor(() => expect(apiMock.downloadAuthenticatedPost).toHaveBeenCalledTimes(2));
+    expect(apiMock.downloadAuthenticatedPost).toHaveBeenLastCalledWith(
+      expect.any(String), { snapshot_token: "tok-new" }, expect.any(String),
+    );
+  });
+
+  it("an expired or invalid-token error (400) also requires a fresh preview, same as a 409", async () => {
+    apiMock.getMedicalProfile.mockResolvedValue({ profile: makeProfile(), capabilities: FULL_CAPS });
+    apiMock.previewEmergencyCard.mockResolvedValue(makeEmergencyCard());
+    apiMock.downloadAuthenticatedPost.mockRejectedValue(
+      apiError(400, "Token pratinjau tidak valid atau sudah kedaluwarsa. Muat ulang pratinjau Kartu Darurat."),
+    );
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<MedicalProfileScreen child={ownerChild} currentUserId={CURRENT_USER_ID} onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "🚑 Lihat Kartu Darurat" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Unduh PDF" }));
+
+    expect(await screen.findByText(
+      "Token pratinjau tidak valid atau sudah kedaluwarsa. Muat ulang pratinjau Kartu Darurat.",
+    )).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Unduh PDF" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Muat ulang pratinjau" })).toBeInTheDocument();
+  });
+
+  it("out-of-order preview responses cannot replace the newest snapshot", async () => {
+    // React StrictMode dengan sengaja meng-invoke effect mount 2x (mount
+    // -> cleanup -> mount lagi) -- ini cara STANDAR & andal buat memicu
+    // 2 panggilan runPreview() yang beneran overlap dari 1 instance
+    // komponen yang sama (skenario NYATA di React 18, bukan cuma
+    // rekayasa test), buat membuktikan requestSeqRef beneran menolak
+    // hasil dari request yang lebih AWAL dimulai, TERLEPAS urutan
+    // SELESAI-nya (di sini yang belakangan dimulai SENGAJA di-resolve
+    // duluan, yang lebih awal dimulai di-resolve BELAKANGAN -- kasus
+    // out-of-order yang paling ketat).
+    apiMock.getMedicalProfile.mockResolvedValue({ profile: makeProfile(), capabilities: FULL_CAPS });
+    const first = deferred();
+    const second = deferred();
+    apiMock.previewEmergencyCard.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+
+    render(
+      <StrictMode>
+        <MedicalProfileScreen child={ownerChild} currentUserId={CURRENT_USER_ID} onClose={vi.fn()} />
+      </StrictMode>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "🚑 Lihat Kartu Darurat" }));
+    await waitFor(() => expect(apiMock.previewEmergencyCard).toHaveBeenCalledTimes(2));
+
+    // Yang DIMULAI belakangan (request ke-2) selesai LEBIH DULU.
+    second.resolve(makeEmergencyCard({ snapshot_token: "tok-second", primary_doctor_name: "dr. Kedua (terbaru)" }));
+    expect(await screen.findByText("Dokter: dr. Kedua (terbaru)")).toBeInTheDocument();
+
+    // Yang DIMULAI lebih awal (request ke-1, basi) baru selesai BELAKANGAN -- HARUS diabaikan.
+    first.resolve(makeEmergencyCard({ snapshot_token: "tok-first-stale", primary_doctor_name: "dr. Pertama (basi)" }));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByText("Dokter: dr. Pertama (basi)")).not.toBeInTheDocument();
+    expect(screen.getByText("Dokter: dr. Kedua (terbaru)")).toBeInTheDocument();
   });
 
   it("shows a retryable error state when the preview fails, without a raw stack trace", async () => {
@@ -334,6 +464,21 @@ describe("MedicalProfileScreen — Emergency Card preview & PDF snapshot consist
     expect(await screen.findByText("Gagal memuat pratinjau.")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Coba lagi" }));
     expect(await screen.findByText("Dedek")).toBeInTheDocument();
+  });
+
+  it("never writes the snapshot token or card data to any browser storage", async () => {
+    const setItemSpy = vi.spyOn(Storage.prototype, "setItem");
+    apiMock.getMedicalProfile.mockResolvedValue({ profile: makeProfile(), capabilities: FULL_CAPS });
+    apiMock.previewEmergencyCard.mockResolvedValue(makeEmergencyCard({ snapshot_token: "tok-secret" }));
+    apiMock.downloadAuthenticatedPost.mockResolvedValue();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<MedicalProfileScreen child={ownerChild} currentUserId={CURRENT_USER_ID} onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "🚑 Lihat Kartu Darurat" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Unduh PDF" }));
+    await waitFor(() => expect(apiMock.downloadAuthenticatedPost).toHaveBeenCalled());
+
+    expect(setItemSpy).not.toHaveBeenCalled();
   });
 
   it("never renders the download button when export capability is false", async () => {

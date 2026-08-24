@@ -364,7 +364,17 @@ export const api = {
       } catch (_) {
         // body bukan JSON, biarin pesan default
       }
-      throw new Error(message);
+      // `.status` ditempel di error (BUKAN cuma di pesan teks) biar
+      // caller (mis. MedicalProfileScreen.jsx:EmergencyCardModal) bisa
+      // membedakan SECARA ANDAL kode status tertentu (409 "snapshot
+      // Kartu Darurat basi", 400/403 token pratinjau tidak valid) dari
+      // error lain, tanpa perlu menebak dari isi pesan Indonesia yang
+      // bisa berubah kapan saja -- purely additive, caller lama yang
+      // cuma baca `.message` (mis. DoctorConsultationScreen.jsx) tetap
+      // jalan tanpa perubahan.
+      const err = new Error(message);
+      err.status = res.status;
+      throw err;
     }
     const blob = await res.blob();
     const objectUrl = URL.createObjectURL(blob);

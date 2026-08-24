@@ -225,18 +225,55 @@ function ConditionEditor({ conditions, onChange }) {
   );
 }
 
+// Pesan Indonesia AMAN dipakai persis sama saat backend balas 409
+// ("digest snapshot beda dari yang barusan dibangun ulang" --
+// utils/emergency_card_snapshot.py) -- dipakai sebagai FALLBACK kalau
+// karena suatu alasan respons error tidak menyertakan pesan sendiri;
+// backend SELALU menyertakan pesannya sendiri di praktiknya, ini murni
+// jaring pengaman.
+const STALE_SNAPSHOT_MESSAGE =
+  "Data Kartu Darurat berubah sejak pratinjau dibuat. Muat ulang pratinjau sebelum mengunduh PDF.";
+const LOCAL_STALE_MESSAGE =
+  "Profil medis sudah diubah sejak pratinjau ini dibuat. Muat ulang pratinjau sebelum mengunduh PDF.";
+// Status HTTP yang SEMUANYA berarti "token pratinjau/snapshot ini tidak
+// bisa lagi dipercaya buat mengunduh PDF -- WAJIB pratinjau ulang":
+// 409 = digest cocok tapi datanya sudah berubah (kasus utama defect
+// ini), 400/403 = token hilang/rusak/kedaluwarsa/salah anak/salah user
+// (lihat backend/routes/medical_profile_routes.py). SEMUANYA dapat
+// perlakuan UI yang SAMA (bukan error generik biasa) -- requirement:
+// "Expired/invalid snapshot responses also require a fresh preview."
+const STATUSES_REQUIRING_FRESH_PREVIEW = new Set([400, 403, 409]);
+
 /**
- * Emergency Card -- preview manusiawi + unduh PDF. Pola snapshot SAMA
- * PERSIS DoctorConsultationScreen.jsx: `activeSnapshot` CUMA valid
- * selama `editGenerationRef` (dinaikkan tiap PUT/review profil sukses)
- * belum berubah sejak preview itu diambil -- edit profil apa pun
- * SETELAH preview langsung membatalkannya, tombol Unduh PDF
- * disembunyikan sampai preview diulang.
+ * Emergency Card -- preview manusiawi + unduh PDF. DUA lapis proteksi
+ * konsistensi preview<->PDF (lihat backend/docs/MEDICAL_PROFILE.md
+ * bagian "Konsistensi snapshot preview -> PDF (token bertanda tangan)"
+ * buat detail lengkap kenapa 1 lapis frontend SAJA tidak cukup -- bug
+ * review Agustus 2026):
+ *
+ *   1. LOKAL (cepat, UX doang): `editGenerationRef` (dinaikkan tiap
+ *      PUT/review profil sukses LEWAT INSTANCE FRONTEND INI) --
+ *      `snapshotIsFresh` jadi false SEKETIKA tanpa perlu bolak-balik ke
+ *      server kalau user SENDIRI baru saja mengedit profil.
+ *   2. SERVER (otoritatif, wajib): `activeSnapshot.snapshotToken` --
+ *      token bertanda tangan dari preview, WAJIB dikirim balik ke
+ *      endpoint PDF apa adanya. Server yang MEMBUKTIKAN kecocokan
+ *      lewat digest (BUKAN cuma dipercaya klien) -- melindungi dari
+ *      perubahan yang TIDAK BISA diketahui frontend ini sama sekali
+ *      (caregiver LAIN mengedit/mereview profil, jadwal obat berubah)
+ *      -- respons 409/400/403 dari lapis ini ditangani sebagai "harus
+ *      pratinjau ulang", TIDAK PERNAH diam-diam merender PDF yang beda
+ *      dari yang sudah dilihat & dikonfirmasi user.
+ *
+ * Kedua snapshot (report + token) SELALU diperbarui BERSAMAAN, atomik,
+ * 1 `setState` (lihat `runPreview`) -- tidak pernah ada state di mana
+ * report baru tapi token lama (atau sebaliknya).
  */
 function EmergencyCardModal({ child, capabilities, editGenerationRef, onClose }) {
   const [status, setStatus] = useState("idle"); // idle|loading|ready|error
   const [errorMessage, setErrorMessage] = useState("");
-  const [activeSnapshot, setActiveSnapshot] = useState(null); // { report, editGeneration }
+  const [activeSnapshot, setActiveSnapshot] = useState(null); // { report, snapshotToken, editGeneration }
+  const [serverStaleMessage, setServerStaleMessage] = useState(null);
   const [pdfSubmitting, setPdfSubmitting] = useState(false);
   const requestSeqRef = useRef(0);
   const mountedRef = useRef(true);
@@ -251,9 +288,11 @@ function EmergencyCardModal({ child, capabilities, editGenerationRef, onClose })
     setStatus("loading");
     setErrorMessage("");
     try {
-      const report = await api.previewEmergencyCard(child.id);
-      if (!mountedRef.current || mySeq !== requestSeqRef.current) return;
-      setActiveSnapshot({ report, editGeneration: editGenerationRef.current });
+      const { snapshot_token: snapshotToken, ...report } = await api.previewEmergencyCard(child.id);
+      if (!mountedRef.current || mySeq !== requestSeqRef.current) return; // respons basi (out-of-order) -- BUKAN yang terbaru, dibuang
+      // Report + token diganti BERSAMAAN, 1 setState -- "atomik" (requirement: "Reloading preview replaces both report and token atomically").
+      setActiveSnapshot({ report, snapshotToken, editGeneration: editGenerationRef.current });
+      setServerStaleMessage(null);
       setStatus("ready");
     } catch (err) {
       if (!mountedRef.current || mySeq !== requestSeqRef.current) return;
@@ -273,7 +312,10 @@ function EmergencyCardModal({ child, capabilities, editGenerationRef, onClose })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [child.id]);
 
-  const snapshotIsFresh = activeSnapshot && activeSnapshot.editGeneration === editGenerationRef.current;
+  const snapshotIsFresh =
+    !!activeSnapshot?.snapshotToken && activeSnapshot.editGeneration === editGenerationRef.current;
+  const isStale = !snapshotIsFresh || !!serverStaleMessage;
+  const staleMessage = serverStaleMessage || (!snapshotIsFresh ? LOCAL_STALE_MESSAGE : null);
 
   const handleDownload = async () => {
     if (!snapshotIsFresh || pdfSubmitting) return;
@@ -286,11 +328,24 @@ function EmergencyCardModal({ child, capabilities, editGenerationRef, onClose })
     setErrorMessage("");
     try {
       const filename = `kartu-darurat-${(child.nickname || child.name || "anak").toLowerCase().replace(/\s+/g, "-")}.pdf`;
-      await api.downloadAuthenticatedPost(api.emergencyCardPdfUrl(child.id), {}, filename);
+      // `snapshot_token` APA ADANYA dari preview yang aktif -- endpoint
+      // PDF membangun ulang laporan pakai TIMESTAMP di dalam token itu
+      // sendiri dan membandingkan digest-nya server-side; body JAMAK
+      // KOSONG (`{}`) yang dipakai SEBELUM perbaikan ini TIDAK PERNAH
+      // dikirim lagi -- lihat backend/docs/MEDICAL_PROFILE.md.
+      await api.downloadAuthenticatedPost(
+        api.emergencyCardPdfUrl(child.id), { snapshot_token: activeSnapshot.snapshotToken }, filename,
+      );
+      if (!mountedRef.current) return;
     } catch (err) {
-      setErrorMessage(err?.message || "Gagal mengunduh PDF Kartu Darurat.");
+      if (!mountedRef.current) return;
+      if (STATUSES_REQUIRING_FRESH_PREVIEW.has(err?.status)) {
+        setServerStaleMessage(err.message || STALE_SNAPSHOT_MESSAGE);
+      } else {
+        setErrorMessage(err?.message || "Gagal mengunduh PDF Kartu Darurat.");
+      }
     } finally {
-      setPdfSubmitting(false);
+      if (mountedRef.current) setPdfSubmitting(false);
     }
   };
 
@@ -323,10 +378,17 @@ function EmergencyCardModal({ child, capabilities, editGenerationRef, onClose })
 
         {status === "ready" && report && (
           <div className="space-y-4">
-            {!snapshotIsFresh && (
-              <p className="text-[11px] text-warn bg-warn/10 border border-warn/30 rounded-lg px-3 py-2">
-                Profil medis sudah diubah sejak pratinjau ini dibuat. Muat ulang pratinjau sebelum mengunduh PDF.
-              </p>
+            {isStale && (
+              <div className="text-[11px] text-warn bg-warn/10 border border-warn/30 rounded-lg px-3 py-2 space-y-1.5">
+                <p>{staleMessage}</p>
+                <button
+                  type="button"
+                  onClick={runPreview}
+                  className="text-warn font-semibold underline underline-offset-2"
+                >
+                  Muat ulang pratinjau
+                </button>
+              </div>
             )}
             <div className="bg-void border border-void-hairline rounded-xl2 px-4 py-3">
               <p className="text-sm text-ink font-semibold">{report.child_display_name}</p>
@@ -408,7 +470,7 @@ function EmergencyCardModal({ child, capabilities, editGenerationRef, onClose })
               <button
                 type="button"
                 onClick={handleDownload}
-                disabled={!snapshotIsFresh || pdfSubmitting}
+                disabled={isStale || pdfSubmitting}
                 className="w-full py-3 rounded-xl2 bg-feed text-white text-sm font-semibold disabled:opacity-50"
               >
                 {pdfSubmitting ? "Menyiapkan PDF..." : "Unduh PDF"}

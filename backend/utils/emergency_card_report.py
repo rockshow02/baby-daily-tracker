@@ -68,7 +68,15 @@ def _regular_medications(child_id, today):
         MedicationSchedule.start_date <= today,
     ).filter(
         (MedicationSchedule.end_date.is_(None)) | (MedicationSchedule.end_date >= today)
-    ).order_by(MedicationSchedule.medication_name.asc()).all()
+    ).order_by(
+        # `id` sebagai tie-breaker SEKUNDER -- 2 jadwal dengan
+        # `medication_name` PERSIS sama urutannya TIDAK BOLEH bergantung
+        # ke urutan penyimpanan internal SQLite yang tidak dijamin
+        # (requirement: "avoid unstable ORM ordering", krusial buat
+        # digest snapshot preview->PDF di utils/emergency_card_snapshot.py
+        # tetap deterministik antara 2 request yang membaca data SAMA).
+        MedicationSchedule.medication_name.asc(), MedicationSchedule.id.asc(),
+    ).all()
 
     result = []
     for s in schedules:

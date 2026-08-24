@@ -81,14 +81,21 @@ yang bisa berbeda.
 | `/children/<id>/medical-profile` | `GET` | Baca profil + `capabilities` |
 | `/children/<id>/medical-profile` | `PUT` | Snapshot atomik — 1 request ganti SEMUA field sekaligus, bukan patch parsial |
 | `/children/<id>/medical-profile/review` | `POST` | Tandai "sudah diperiksa ulang" TANPA wajib mengubah field lain |
-| `/children/<id>/emergency-card/preview` | `POST` | Kartu Darurat manusiawi (body kosong) |
-| `/children/<id>/emergency-card/pdf` | `POST` | PDF Kartu Darurat (body kosong) |
+| `/children/<id>/emergency-card/preview` | `POST` | Kartu Darurat manusiawi (body kosong); respons menyertakan `snapshot_token` (lihat "Konsistensi snapshot preview → PDF") |
+| `/children/<id>/emergency-card/pdf` | `POST` | PDF Kartu Darurat — body **WAJIB** `{"snapshot_token": "..."}` dari preview terakhir (lihat bagian sama) |
 
 Body JSON malformed ditolak. Batas ukuran body **lebih ketat** dari batas
-global — `MAX_MEDICAL_PROFILE_BODY_BYTES = 20_000`, ditegakkan lewat
-bounded-stream read (pola SAMA `_read_json_body_within_limit` dari
-`doctor_consultation_routes.py`, aman walau `Content-Length` hilang/salah
-— lihat `backend/docs/DOCTOR_CONSULTATION.md` buat rasionalnya lengkap).
+global, ditegakkan lewat bounded-stream read (pola SAMA
+`_read_json_body_within_limit` dari `doctor_consultation_routes.py`,
+aman walau `Content-Length` hilang/salah — lihat
+`backend/docs/DOCTOR_CONSULTATION.md` buat rasionalnya lengkap), DUA
+konstanta terpisah karena bentuk body-nya beda jauh:
+
+| Endpoint | Batas | Alasan |
+|---|---|---|
+| `PUT .../medical-profile` | `MAX_MEDICAL_PROFILE_BODY_BYTES = 20_000` (20KB) | ≤30 entri alergi + ≤30 kondisi + beberapa field kontak/teks pendek |
+| `POST .../emergency-card/pdf` | `MAX_EMERGENCY_CARD_PDF_BODY_BYTES = 4_096` (4KB) | Body cuma 1 field (`snapshot_token`) — token terpanjang pun jauh di bawah 2KB, 4KB margin sangat longgar |
+
 Field top-level tak dikenal di body **diabaikan diam-diam** (konsisten
 konvensi seluruh endpoint lain di app ini). Error terstruktur Bahasa
 Indonesia — **tidak pernah** stack trace mentah/detail skema internal.
@@ -147,30 +154,161 @@ PDF (`utils/emergency_card_pdf.py`) sinkron, di memori (`io.BytesIO`),
 sebelum masuk `Paragraph`, nama file disanitasi
 (`safe_filename_component`, copy dari pola `doctor_consultation_routes.py`).
 
-## Konsistensi snapshot preview ↔ PDF
+## Konsistensi snapshot preview → PDF
 
-Pola **SAMA PERSIS** `activeSnapshot` immutable dari Doctor Consultation,
-tapi mekanisme invalidasinya beda karena Kartu Darurat **tidak punya**
-parameter request dari caregiver buat di-fingerprint (preview Doctor
-Consultation berubah tiap kombinasi periode/section; preview Kartu
-Darurat cuma berubah kalau PROFIL-nya sendiri berubah):
+### Defect yang diperbaiki (bug review Agustus 2026)
 
-`editGenerationRef` (ref, bukan state — hindari closure basi) dinaikkan
-tiap `PUT`/`review` sukses. Saat preview diambil, `editGeneration` snapshot
-saat itu disimpan berpasangan dengan hasil laporan
-(`{ report, editGeneration }`). Tombol Unduh PDF cuma aktif kalau
-`activeSnapshot.editGeneration === editGenerationRef.current` — perubahan
-profil apa pun setelah preview (bahkan lewat form edit yang secara visual
-tertutup modal Kartu Darurat) langsung menandainya basi, pesan "Profil
-medis sudah diubah sejak pratinjau ini dibuat" tampil, tombol Unduh PDF
-disabled sampai preview diulang. `handleDownload` mengirim body kosong ke
-endpoint PDF (endpoint itu sendiri membaca profil TERKINI dari database
-saat generate — **bukan** payload dari frontend) TAPI baru bisa dipanggil
-kalau snapshot preview masih segar, konfirmasi privasi (`window.confirm`)
-WAJIB dulu, dan `pdfSubmitting` mencegah klik ganda memicu unduhan dobel.
-`requestSeqRef` + `mountedRef` di `EmergencyCardModal` mencegah respons
-preview basi (out-of-order) menimpa state, sama pola `MedicalProfileScreen`
-level induk (`activeChildIdRef` + `mountedRef`) buat request `GET` profil.
+Versi AWAL fitur ini mengandalkan `editGenerationRef` frontend (ref
+dinaikkan tiap `PUT`/`review` SUKSES lewat instance frontend yang sama)
+sebagai **satu-satunya** mekanisme invalidasi, dan endpoint PDF meng-query
+ULANG profil + jadwal obat TERKINI dari database saat request PDF
+datang. **Ini cacat**: `editGenerationRef` cuma tahu perubahan yang
+lewat instance frontend ITU SENDIRI — kalau (1) caregiver LAIN
+mengedit/mereview profil, ATAUPUN (2) jadwal obat dibuat/diubah/
+dinonaktifkan/dihapus/expired di antara waktu preview & unduh PDF,
+frontend TIDAK PERNAH tahu, dan endpoint PDF akan diam-diam merender
+PDF yang **berbeda** dari apa yang caregiver sudah lihat & konfirmasi
+privasinya di layar preview.
+
+### Arsitektur perbaikan: token snapshot bertanda tangan (STATELESS)
+
+PythonAnywhere Free **tidak mendukung** Redis/Celery/worker persisten/
+cron/cache lintas-request — solusinya **bukan** menyimpan state
+sementara di server (baik di memori maupun tabel DB baru), tapi
+menandatangani snapshot-nya SENDIRI ke dalam sebuah token opaque yang
+frontend bawa balik. Lihat `utils/emergency_card_snapshot.py` (modul
+baru, "SATU shared backend helper" buat kanonikalisasi/digest — dipakai
+BAIK oleh endpoint preview MAUPUN endpoint PDF, requirement eksplisit).
+
+**Alur preview** (`POST .../emergency-card/preview`):
+1. `now_wib()` di-sample **SEKALI** (`preview_at`).
+2. Laporan dibangun (`build_emergency_card_summary(child, profile, preview_at)`) —
+   sama seperti sebelumnya.
+3. Representasi KANONIK laporan itu dihitung
+   (`canonicalize_emergency_card_report`, lihat "Kebijakan
+   kanonikalisasi" di bawah), lalu di-hash SHA-256
+   (`digest_emergency_card_report`).
+4. Token opaque ditandatangani (`itsdangerous.URLSafeTimedSerializer`,
+   `SECRET_KEY` Flask yang **sudah ada** — **tidak ada** kriptografi
+   custom) berisi claims MINIMAL: `child_id`, `user_id` (dari sesi
+   terautentikasi), `preview_at` (ISO string), `digest` (hex SHA-256),
+   `v` (versi skema token). **TIDAK PERNAH** golongan darah/alergi/
+   kondisi/kontak/instruksi darurat/nilai medis APA PUN di dalam token
+   (diverifikasi test `test_snapshot_token_claims_never_contain_medical_or_contact_values`).
+5. Token dikembalikan sebagai `snapshot_token` di respons JSON preview,
+   BERSAMA laporan yang sama seperti sebelumnya.
+
+**Alur PDF** (`POST .../emergency-card/pdf`), urutan pengecekan
+SENGAJA (lihat `routes/medical_profile_routes.py:export_emergency_card_pdf`):
+1. Login + akses anak.
+2. Otorisasi export Owner/Editor (Viewer ditolak `403` di sini, SEBELUM
+   body/token disentuh sama sekali — lihat "Peran & kapabilitas").
+3. Bounded body read (`MAX_EMERGENCY_CARD_PDF_BODY_BYTES = 4_096` — lihat tabel batas ukuran di "Kontrak API" di atas).
+4. Body harus objek JSON.
+5. Tanda tangan + masa berlaku token diverifikasi
+   (`decode_snapshot_token`) — token hilang/rusak/kedaluwarsa/versi
+   skema tidak cocok → `400`.
+6. Claims token harus `child_id`+`user_id` **PERSIS** sama dengan
+   request SEKARANG → kalau tidak, `403` (token curian/salah tempel
+   dari anak/sesi lain SELALU ditolak walau tanda tangannya sah).
+7. Laporan DIBANGUN ULANG memakai `preview_at` **DARI TOKEN**
+   (`datetime.fromisoformat(claims["preview_at"])`) — **BUKAN**
+   `now_wib()` baru. Ini yang membuat `generated_at`/usia/pilihan obat
+   rutin aktif ikut **IDENTIK** dengan preview, tanpa perlu menyimpan
+   laporan itu sendiri di mana pun.
+8. Digest laporan yang BARU dibangun ulang dihitung pakai **helper
+   kanonikalisasi yang SAMA PERSIS** dipakai preview.
+9. Dibandingkan dengan digest di dalam token pakai **`hmac.compare_digest`**
+   (timing-safe — bukan `==` biasa).
+10. **Cocok** → PDF dirender & diaudit. **Tidak cocok** → `409` dengan
+    pesan `"Data Kartu Darurat berubah sejak pratinjau dibuat. Muat
+    ulang pratinjau sebelum mengunduh PDF."` — **TIDAK PERNAH** merender
+    PDF ATAUPUN menulis baris audit buat request yang ditolak di
+    langkah manapun (5–10).
+
+Waktu EKSPOR sebenarnya (`export_now = now_wib()`, disample TERPISAH
+dari `preview_at`) dipakai **CUMA** buat `recorded_at` baris audit &
+nama file unduhan — dua hal ini **BUKAN** bagian dari digest, jadi
+wall-clock yang lebih belakangan **TIDAK PERNAH** membuat snapshot yang
+sebenarnya masih valid ditolak keliru (diverifikasi test
+`test_unchanged_data_with_later_wall_clock_still_exports_previewed_snapshot`).
+
+**Masa berlaku token**: `SNAPSHOT_TOKEN_MAX_AGE_SECONDS = 15 * 60` (15
+menit) — cukup buat caregiver membaca preview & memutuskan unduh,
+cukup pendek biar token lama tidak jadi risiko praktis. Token yang
+kedaluwarsa WAJIB pratinjau ulang (frontend menampilkan pesan &
+tombol "Muat ulang pratinjau" yang sama seperti kasus `409`).
+
+### Kebijakan kanonikalisasi (`canonicalize_emergency_card_report`)
+
+**DIMASUKKAN** (semua field yang tampil di preview JSON MAUPUN PDF):
+`child_display_name`, `birth_date`, `age_now`, `blood_type`,
+`blood_type_label`, `allergies` (lengkap tiap entri), `conditions`
+(lengkap tiap entri), `regular_medications` (lengkap tiap entri —
+daftar obat rutin AKTIF yang DIDERIVASI, requirement eksplisit "include
+the derived regular medication list"), `primary_doctor_name`,
+`primary_clinic_name`, `primary_clinic_phone`, `emergency_contact_name`,
+`emergency_contact_relationship`, `emergency_contact_phone`,
+`emergency_instructions`, `last_reviewed_at`, `last_reviewed_by_name`
+(jadi aksi "review" IKUT membatalkan snapshot lama, walau tidak
+mengubah field profil lain), `has_profile`, `generated_at` (= `preview_at`,
+dipakai ulang APA ADANYA saat rebuild), `disclaimer`, `privacy_note`.
+
+**DIKECUALIKAN**: `capabilities` (response-only, tergantung ROLE
+pemanggil SAAT ITU — bukan bagian isi laporan; secara struktural TIDAK
+PERNAH tersentuh fungsi kanonikalisasi karena field ini ditambahkan
+route SETELAH `build_emergency_card_summary()` selesai) dan
+`snapshot_token` itu sendiri.
+
+Deterministik: `json.dumps(..., sort_keys=True, ensure_ascii=False,
+separators=(",", ":"))` menormalkan urutan KEY di semua level (nested
+dict alergi/kondisi/obat termasuk) — urutan insersi dict Python di
+kode TIDAK memengaruhi digest (diverifikasi
+`test_canonicalization_is_stable_regardless_of_dict_key_order`).
+`None`/`[]`/`""`/angka/boolean dibedakan APA ADANYA (encoder JSON
+bawaan Python, tidak dinormalisasi manual). Urutan LIST alergi/kondisi
+sudah deterministik dari sumbernya (`_sorted_allergies`/`_sorted_conditions`,
+diurut berdasar severity/status rank, BUKAN diacak ulang fungsi ini);
+daftar obat rutin diurutkan `medication_name` + `id` SEKUNDER (bukan
+cuma `medication_name`) — tie-breaker ini krusial menghindari urutan
+ORM yang tidak stabil untuk 2 jadwal dengan nama identik (requirement:
+"avoid unstable ORM ordering").
+
+### Perilaku frontend (`MedicalProfileScreen.jsx:EmergencyCardModal`)
+
+**DUA lapis** proteksi konsistensi, saling melengkapi (bukan salah satu
+saja):
+
+1. **LOKAL (cepat, UX doang)**: `editGenerationRef` (dinaikkan tiap
+   `PUT`/`review` SUKSES lewat instance frontend ini) — `snapshotIsFresh`
+   jadi `false` SEKETIKA (tanpa bolak-balik server) begitu USER SENDIRI
+   baru saja mengedit profil, bahkan kalau editnya terjadi lewat form
+   yang secara visual tertutup modal Kartu Darurat (modal & layar utama
+   berbagi 1 pohon komponen, keduanya tetap "hidup" di DOM).
+2. **SERVER (otoritatif, wajib)**: `activeSnapshot.snapshotToken` — token
+   dari preview, dikirim APA ADANYA ke endpoint PDF
+   (`{ snapshot_token }`, **bukan** body kosong seperti sebelumnya).
+   Respons `409`/`400`/`403` dari endpoint PDF (lihat urutan pengecekan
+   di atas) **SEMUANYA** ditangani dengan perlakuan UI yang SAMA:
+   `activeSnapshot.report` yang SUDAH ditampilkan **tetap kelihatan**
+   (buat perbandingan, TIDAK dibuang), tombol Unduh PDF **dinonaktifkan**,
+   pesan aman Bahasa Indonesia ditampilkan (dari server kalau ada,
+   fallback lokal kalau tidak), dan tombol **"Muat ulang pratinjau"**
+   yang eksplisit memanggil `runPreview()` ulang.
+
+`runPreview()` mengganti `report` + `snapshotToken` **BERSAMAAN, 1
+`setState`** (destructuring `{ snapshot_token, ...report }` dari
+respons) — **atomik**, tidak pernah ada state antara di mana report
+baru tapi token lama (atau sebaliknya), dan otomatis membersihkan
+`serverStaleMessage` lama. `requestSeqRef` + `mountedRef` di
+`EmergencyCardModal` (plus `activeChildIdRef` + `mountedRef` level
+`MedicalProfileScreen` buat request `GET` profil) mencegah respons
+preview basi (out-of-order — mis. React StrictMode yang meng-invoke
+efek mount 2×) menimpa snapshot yang lebih baru. `handleDownload` WAJIB
+`activeSnapshot.snapshotToken` ada (token hilang → tombol disabled),
+konfirmasi privasi (`window.confirm`) WAJIB dulu, dan `pdfSubmitting`
+mencegah klik ganda memicu unduhan dobel — kedua proteksi ini
+**dipertahankan** dari versi sebelumnya, tidak berubah.
 
 ## Kebijakan offline — ONLINE-ONLY (Fase 1)
 
@@ -341,7 +479,15 @@ Karena migrasi ini cuma menambah 1 tabel baru:
       tampil benar.
 - [ ] Edit profil SAAT modal Kartu Darurat masih terbuka dengan preview
       lama — setelah simpan, tombol Unduh PDF nonaktif + pesan "Profil
-      medis sudah diubah..." tampil, sampai preview diulang.
+      medis sudah diubah..." + tombol "Muat ulang pratinjau" tampil,
+      sampai preview diulang.
+- [ ] Buka Kartu Darurat di 2 tab/perangkat berbeda sebagai 2 caregiver
+      (Owner+Editor) untuk anak yang SAMA — di tab pertama, preview dulu;
+      di tab KEDUA, edit profil (atau tambah jadwal obat baru) SETELAH
+      preview tab pertama diambil; kembali ke tab pertama, klik Unduh
+      PDF → **409**, pesan "Data Kartu Darurat berubah sejak pratinjau
+      dibuat...", preview lama TETAP kelihatan (bukan hilang), tombol
+      "Muat ulang pratinjau" berfungsi & memulihkan alur normal.
 - [ ] Klik Unduh PDF → konfirmasi privasi muncul dulu; batalkan → tidak
       ada unduhan; konfirmasi → 1 PDF terunduh, klik cepat berkali-kali
       tidak memicu unduhan ganda.
@@ -378,3 +524,10 @@ Karena migrasi ini cuma menambah 1 tabel baru:
 - **Golongan darah/alergi/kondisi murni entri caregiver** — sistem
   **tidak pernah** memvalidasi kebenaran medisnya (mis. interaksi
   alergen-obat), sesuai batas cakupan Fase 1 yang eksplisit diminta.
+- **Token snapshot preview → PDF kedaluwarsa dalam 15 menit** — kalau
+  caregiver membiarkan modal Kartu Darurat terbuka lebih lama dari itu
+  sebelum klik Unduh PDF, mereka akan diminta pratinjau ulang (`400`,
+  ditangani sama seperti kasus `409` di frontend) — trade-off sadar
+  antara keamanan (token lama tidak menumpuk jadi risiko) dan
+  kenyamanan; 15 menit dianggap lebih dari cukup buat alur baca-lalu-
+  putuskan-unduh yang biasa.

@@ -8,12 +8,18 @@ SEMUA test pakai fixture `client` (SQLite in-memory), TIDAK PERNAH
 menyentuh instance/tracker.db asli.
 """
 import json
+import time
+from datetime import datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 
+import routes.medical_profile_routes as medical_profile_routes_module
 from models import CaregiverAuditEvent, Child, ChildMedicalProfile, MedicationSchedule
 from tests.conftest import auth_headers, create_child, register
+from tests.test_doctor_consultation import _post_without_content_length
 from tests.test_roles_permissions import invite_and_join
+from utils.emergency_card_snapshot import decode_snapshot_token, digest_emergency_card_report
 
 SAMPLE_PAYLOAD = {
     "blood_type": "O+",
@@ -46,12 +52,34 @@ def _review_profile(client, token, child_id):
     return client.post(f"/api/children/{child_id}/medical-profile/review", json={}, headers=auth_headers(token))
 
 
+_AUTO_TOKEN = object()  # sentinel: "belum dikasih eksplisit -- ambil token segar dari preview"
+
+
 def _preview_card(client, token, child_id):
     return client.post(f"/api/children/{child_id}/emergency-card/preview", json={}, headers=auth_headers(token))
 
 
-def _pdf_card(client, token, child_id):
-    return client.post(f"/api/children/{child_id}/emergency-card/pdf", json={}, headers=auth_headers(token))
+def _snapshot_token_from_preview(client, token, child_id):
+    return _preview_card(client, token, child_id).get_json().get("snapshot_token")
+
+
+def _pdf_card(client, token, child_id, snapshot_token=_AUTO_TOKEN):
+    """
+    Kalau `snapshot_token` TIDAK dikasih eksplisit, ambil token SEGAR
+    dulu lewat preview memakai `token` (user) yang SAMA -- kasus umum
+    buat test yang cuma mau membuktikan alur PDF berhasil BIASA, tanpa
+    perlu mengulang boilerplate preview->token di tiap test. Test yang
+    mau menguji token itu SENDIRI (hilang/salah/kedaluwarsa/anak lain/
+    user lain) mengirim `snapshot_token` eksplisit -- termasuk `None`
+    buat kasus "field tidak dikirim sama sekali" (backend memperlakukan
+    field absen & `null` SAMA PERSIS lewat `data.get(...)`).
+    """
+    if snapshot_token is _AUTO_TOKEN:
+        snapshot_token = _snapshot_token_from_preview(client, token, child_id)
+    return client.post(
+        f"/api/children/{child_id}/emergency-card/pdf",
+        json={"snapshot_token": snapshot_token}, headers=auth_headers(token),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -611,3 +639,483 @@ def test_deleting_a_child_cascades_the_medical_profile(client):
     db.session.delete(Child.query.get(child["id"]))
     db.session.commit()
     assert ChildMedicalProfile.query.filter_by(child_id=child["id"]).count() == 0
+
+
+# --------------------------------------------------------------------------
+# 10. Konsistensi snapshot preview -> PDF (token bertanda tangan) -- bug
+# review Agustus 2026, lihat backend/docs/MEDICAL_PROFILE.md bagian
+# "Konsistensi snapshot preview -> PDF (token bertanda tangan)" +
+# utils/emergency_card_snapshot.py.
+# --------------------------------------------------------------------------
+
+
+def _pdf_body_of_exact_size(target_bytes):
+    """Body JSON VALID {"snapshot_token": "xxx..."} yang di-encode UTF-8 PERSIS `target_bytes` byte -- pola sama persis test_doctor_consultation.py:_json_body_of_exact_size."""
+    base = {"snapshot_token": ""}
+    base_len = len(json.dumps(base).encode("utf-8"))
+    pad_len = target_bytes - base_len
+    assert pad_len >= 0, f"target_bytes {target_bytes} terlalu kecil"
+    base["snapshot_token"] = "x" * pad_len
+    body = json.dumps(base).encode("utf-8")
+    assert len(body) == target_bytes, (len(body), target_bytes)
+    return body
+
+
+def _sample_summary(**overrides):
+    """Ringkasan kartu darurat minimal buat test murni fungsi kanonikalisasi/digest -- TIDAK butuh app context/database sama sekali."""
+    base = {
+        "child_display_name": "Dedek", "birth_date": "2024-01-01", "age_now": "1 tahun",
+        "blood_type": "O+", "blood_type_label": "O+",
+        "allergies": [{
+            "type": "drug", "allergen": "Amoxicillin", "reaction": None,
+            "severity": "severe", "confirmed_by_professional": True,
+        }],
+        "conditions": [], "regular_medications": [],
+        "primary_doctor_name": None, "primary_clinic_name": None, "primary_clinic_phone": None,
+        "emergency_contact_name": None, "emergency_contact_relationship": None, "emergency_contact_phone": None,
+        "emergency_instructions": None, "last_reviewed_at": None, "last_reviewed_by_name": None,
+        "has_profile": True, "generated_at": "2026-08-24T10:00:00+07:00",
+        "disclaimer": "d", "privacy_note": "p",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_preview_returns_a_signed_snapshot_token(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+
+    body = _preview_card(client, user["token"], child["id"]).get_json()
+    assert isinstance(body.get("snapshot_token"), str)
+    assert len(body["snapshot_token"]) > 20
+
+
+def test_valid_unchanged_snapshot_produces_a_pdf(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+
+    token = _snapshot_token_from_preview(client, user["token"], child["id"])
+    resp = _pdf_card(client, user["token"], child["id"], snapshot_token=token)
+    assert resp.status_code == 200
+    assert resp.data.startswith(b"%PDF-")
+
+
+def test_pdf_content_matches_the_previewed_report(client):
+    """
+    Requirement: 'PDF content corresponds to the previewed data.' TANPA
+    dependency ekstraksi teks PDF pihak ketiga (pola sama persis
+    test_consultation_pdf.py -- diverifikasi lewat flowable reportlab
+    yang SAMA PERSIS dipakai render_emergency_card_pdf, bukan lewat
+    parsing PDF akhir). Laporan di-rebuild pakai `preview_at` PERSIS
+    dari token yang diterbitkan preview -- membuktikan endpoint PDF
+    beneran merender data yang SAMA, bukan cuma "berhasil 200 apa pun
+    isinya".
+    """
+    from utils.emergency_card_pdf import render_medical_profile_flowables
+    from utils.emergency_card_report import build_emergency_card_summary
+    from utils.pdf_common import BaseStyles
+
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+
+    preview_body = _preview_card(client, user["token"], child["id"]).get_json()
+    token = preview_body["snapshot_token"]
+    assert _pdf_card(client, user["token"], child["id"], snapshot_token=token).status_code == 200
+
+    with client.application.app_context():
+        claims = decode_snapshot_token(token, child_id=child["id"], user_id=user["id"])
+        preview_at = datetime.fromisoformat(claims["preview_at"])
+        child_row = Child.query.get(child["id"])
+        profile_row = ChildMedicalProfile.query.filter_by(child_id=child["id"]).first()
+        summary = build_emergency_card_summary(child_row, profile_row, preview_at)
+        flows = render_medical_profile_flowables(summary, BaseStyles())
+
+    texts = []
+    for f in flows:
+        if hasattr(f, "text"):
+            texts.append(f.text)
+        elif hasattr(f, "_cellvalues"):
+            for row in f._cellvalues:
+                for cell in row:
+                    if hasattr(cell, "text"):
+                        texts.append(cell.text)
+    joined = "\n".join(texts)
+    assert "Amoxicillin" in joined
+    assert preview_body["allergies"][0]["allergen"] in joined
+    assert preview_body["primary_doctor_name"] in joined
+
+
+def test_profile_edit_by_another_caregiver_after_preview_causes_409(client):
+    owner = register(client, name="Pemilik", email="owner-snap1@example.com")
+    child = create_child(client, owner["token"])
+    editor = register(client, name="Editor", email="editor-snap1@example.com")
+    invite_and_join(client, owner["token"], child["id"], editor["token"], "editor")
+    _put_profile(client, owner["token"], child["id"], SAMPLE_PAYLOAD)
+
+    token = _snapshot_token_from_preview(client, owner["token"], child["id"])
+    _put_profile(client, editor["token"], child["id"], {**SAMPLE_PAYLOAD, "blood_type": "A-"})
+
+    resp = _pdf_card(client, owner["token"], child["id"], snapshot_token=token)
+    assert resp.status_code == 409
+    assert "Muat ulang pratinjau" in resp.get_json()["error"]
+
+
+def test_review_after_preview_causes_409(client):
+    """Field `last_reviewed_at`/`last_reviewed_by_name` ikut termasuk di bentuk kanonik (lihat utils/emergency_card_snapshot.py) -- aksi 'review' SENGAJA ikut membatalkan snapshot lama walau tidak mengubah field profil lain."""
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+
+    token = _snapshot_token_from_preview(client, user["token"], child["id"])
+    _review_profile(client, user["token"], child["id"])
+
+    resp = _pdf_card(client, user["token"], child["id"], snapshot_token=token)
+    assert resp.status_code == 409
+
+
+def test_medication_schedule_creation_after_preview_causes_409(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+
+    token = _snapshot_token_from_preview(client, user["token"], child["id"])
+    client.post(
+        f"/api/children/{child['id']}/medication-schedules",
+        json={"medication_name": "Obat Baru", "times_of_day": ["08:00"], "start_date": "2020-01-01"},
+        headers=auth_headers(user["token"]),
+    )
+
+    resp = _pdf_card(client, user["token"], child["id"], snapshot_token=token)
+    assert resp.status_code == 409
+
+
+def test_medication_schedule_edit_after_preview_causes_409(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+    sched = client.post(
+        f"/api/children/{child['id']}/medication-schedules",
+        json={"medication_name": "Obat Rutin", "times_of_day": ["08:00"], "start_date": "2020-01-01"},
+        headers=auth_headers(user["token"]),
+    ).get_json()
+
+    token = _snapshot_token_from_preview(client, user["token"], child["id"])
+    client.patch(
+        f"/api/children/{child['id']}/medication-schedules/{sched['id']}",
+        json={"medication_name": "Obat Rutin Diubah"}, headers=auth_headers(user["token"]),
+    )
+
+    resp = _pdf_card(client, user["token"], child["id"], snapshot_token=token)
+    assert resp.status_code == 409
+
+
+def test_medication_schedule_deactivation_after_preview_causes_409(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+    sched = client.post(
+        f"/api/children/{child['id']}/medication-schedules",
+        json={"medication_name": "Obat Rutin", "times_of_day": ["08:00"], "start_date": "2020-01-01"},
+        headers=auth_headers(user["token"]),
+    ).get_json()
+
+    token = _snapshot_token_from_preview(client, user["token"], child["id"])
+    client.patch(
+        f"/api/children/{child['id']}/medication-schedules/{sched['id']}",
+        json={"is_active": False}, headers=auth_headers(user["token"]),
+    )
+
+    resp = _pdf_card(client, user["token"], child["id"], snapshot_token=token)
+    assert resp.status_code == 409
+
+
+def test_medication_schedule_deletion_after_preview_causes_409(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+    sched = client.post(
+        f"/api/children/{child['id']}/medication-schedules",
+        json={"medication_name": "Obat Rutin", "times_of_day": ["08:00"], "start_date": "2020-01-01"},
+        headers=auth_headers(user["token"]),
+    ).get_json()
+
+    token = _snapshot_token_from_preview(client, user["token"], child["id"])
+    client.delete(
+        f"/api/children/{child['id']}/medication-schedules/{sched['id']}", headers=auth_headers(user["token"]),
+    )
+
+    resp = _pdf_card(client, user["token"], child["id"], snapshot_token=token)
+    assert resp.status_code == 409
+
+
+def test_child_display_data_change_after_preview_causes_409(client):
+    user = register(client)
+    child = create_child(client, user["token"], name="Nama Lama")
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+
+    token = _snapshot_token_from_preview(client, user["token"], child["id"])
+    client.put(
+        f"/api/children/{child['id']}", json={"nickname": "Panggilan Baru"}, headers=auth_headers(user["token"]),
+    )
+
+    resp = _pdf_card(client, user["token"], child["id"], snapshot_token=token)
+    assert resp.status_code == 409
+
+
+def test_unchanged_data_with_later_wall_clock_still_exports_previewed_snapshot(client, monkeypatch):
+    """Requirement #10: endpoint PDF TIDAK PERNAH mengambil now_wib() baru buat MEMBANGUN laporan (cuma buat metadata audit/nama file) -- wall-clock maju TIDAK mempengaruhi kecocokan digest selama data DB-nya sendiri tidak berubah."""
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+
+    token = _snapshot_token_from_preview(client, user["token"], child["id"])
+
+    later = datetime.now() + timedelta(hours=1)
+    monkeypatch.setattr(medical_profile_routes_module, "now_wib", lambda: later)
+
+    resp = _pdf_card(client, user["token"], child["id"], snapshot_token=token)
+    assert resp.status_code == 200
+    assert resp.data.startswith(b"%PDF-")
+
+
+def test_expired_snapshot_token_is_rejected(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+
+    real_time = time.time
+    with patch("time.time", return_value=real_time() - 3600):
+        token = _snapshot_token_from_preview(client, user["token"], child["id"])
+
+    resp = _pdf_card(client, user["token"], child["id"], snapshot_token=token)
+    assert resp.status_code == 400
+
+
+def test_tampered_snapshot_token_is_rejected(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+    token = _snapshot_token_from_preview(client, user["token"], child["id"])
+
+    tampered = token[:-1] + ("a" if token[-1] != "a" else "b")
+    resp = _pdf_card(client, user["token"], child["id"], snapshot_token=tampered)
+    assert resp.status_code == 400
+
+
+def test_snapshot_token_for_another_child_is_rejected(client):
+    user = register(client)
+    child_a = create_child(client, user["token"], name="Anak A")
+    child_b = create_child(client, user["token"], name="Anak B")
+    _put_profile(client, user["token"], child_a["id"], SAMPLE_PAYLOAD)
+    _put_profile(client, user["token"], child_b["id"], SAMPLE_PAYLOAD)
+
+    token_for_a = _snapshot_token_from_preview(client, user["token"], child_a["id"])
+    resp = _pdf_card(client, user["token"], child_b["id"], snapshot_token=token_for_a)
+    assert resp.status_code == 403
+
+
+def test_snapshot_token_for_another_user_is_rejected(client):
+    owner = register(client, name="Pemilik", email="owner-snap2@example.com")
+    child = create_child(client, owner["token"])
+    editor = register(client, name="Editor", email="editor-snap2@example.com")
+    invite_and_join(client, owner["token"], child["id"], editor["token"], "editor")
+    _put_profile(client, owner["token"], child["id"], SAMPLE_PAYLOAD)
+
+    token_for_owner = _snapshot_token_from_preview(client, owner["token"], child["id"])
+    resp = _pdf_card(client, editor["token"], child["id"], snapshot_token=token_for_owner)
+    assert resp.status_code == 403
+
+
+def test_missing_snapshot_token_is_rejected(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+
+    resp = _pdf_card(client, user["token"], child["id"], snapshot_token=None)
+    assert resp.status_code == 400
+
+
+def test_pdf_rejects_non_object_json_body(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+    resp = client.post(
+        f"/api/children/{child['id']}/emergency-card/pdf", json=["bukan", "objek"], headers=auth_headers(user["token"]),
+    )
+    assert resp.status_code == 400
+
+
+def test_pdf_rejects_malformed_json_body(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+    resp = client.post(
+        f"/api/children/{child['id']}/emergency-card/pdf",
+        data="{not valid json", headers={**auth_headers(user["token"]), "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 400
+
+
+def test_pdf_rejects_oversized_body(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+    resp = client.post(
+        f"/api/children/{child['id']}/emergency-card/pdf",
+        json={"snapshot_token": "x" * 5_000}, headers=auth_headers(user["token"]),
+    )
+    assert resp.status_code == 413
+
+
+def test_pdf_body_at_exact_boundary_passes_size_check(client):
+    """Body PERSIS di batas TIDAK PERNAH 413 -- kalau gagal, gagalnya karena token-nya sendiri tidak valid (padding acak), BUKAN karena ukuran (batas ukuran murni <=, bukan <)."""
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+
+    body = _pdf_body_of_exact_size(medical_profile_routes_module.MAX_EMERGENCY_CARD_PDF_BODY_BYTES)
+    resp = client.post(
+        f"/api/children/{child['id']}/emergency-card/pdf",
+        data=body, content_type="application/json", headers=auth_headers(user["token"]),
+    )
+    assert resp.status_code != 413
+
+
+def test_pdf_body_one_byte_over_boundary_is_rejected(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+
+    body = _pdf_body_of_exact_size(medical_profile_routes_module.MAX_EMERGENCY_CARD_PDF_BODY_BYTES + 1)
+    resp = client.post(
+        f"/api/children/{child['id']}/emergency-card/pdf",
+        data=body, content_type="application/json", headers=auth_headers(user["token"]),
+    )
+    assert resp.status_code == 413
+
+
+def test_pdf_missing_content_length_with_oversized_body_is_rejected(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+
+    big_body = _pdf_body_of_exact_size(medical_profile_routes_module.MAX_EMERGENCY_CARD_PDF_BODY_BYTES + 5_000)
+    status_code, _ = _post_without_content_length(
+        client, f"/api/children/{child['id']}/emergency-card/pdf", user["token"], big_body,
+    )
+    assert status_code == 413
+
+
+def test_viewer_gets_same_403_for_pdf_regardless_of_token_or_body_size(client):
+    owner = register(client, name="Pemilik", email="owner-snap3@example.com")
+    child = create_child(client, owner["token"])
+    viewer = register(client, name="Viewer", email="viewer-snap3@example.com")
+    invite_and_join(client, owner["token"], child["id"], viewer["token"], "viewer")
+    _put_profile(client, owner["token"], child["id"], SAMPLE_PAYLOAD)
+
+    valid_owner_token = _snapshot_token_from_preview(client, owner["token"], child["id"])
+
+    resp_missing = _pdf_card(client, viewer["token"], child["id"], snapshot_token=None)
+    resp_garbage = _pdf_card(client, viewer["token"], child["id"], snapshot_token="garbage")
+    resp_not_theirs = _pdf_card(client, viewer["token"], child["id"], snapshot_token=valid_owner_token)
+
+    huge_body = _pdf_body_of_exact_size(medical_profile_routes_module.MAX_EMERGENCY_CARD_PDF_BODY_BYTES + 5_000)
+    resp_oversized = client.post(
+        f"/api/children/{child['id']}/emergency-card/pdf",
+        data=huge_body, content_type="application/json", headers=auth_headers(viewer["token"]),
+    )
+
+    bodies = [resp.get_json() for resp in (resp_missing, resp_garbage, resp_not_theirs, resp_oversized)]
+    for resp in (resp_missing, resp_garbage, resp_not_theirs, resp_oversized):
+        assert resp.status_code == 403
+    assert all(b == bodies[0] for b in bodies)
+
+
+def test_no_pdf_renderer_called_for_rejected_requests(client, monkeypatch):
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("render_emergency_card_pdf should not be called for a rejected request")
+
+    monkeypatch.setattr(medical_profile_routes_module, "render_emergency_card_pdf", _fail_if_called)
+
+    assert _pdf_card(client, user["token"], child["id"], snapshot_token=None).status_code == 400
+
+    token = _snapshot_token_from_preview(client, user["token"], child["id"])
+    assert _pdf_card(client, user["token"], child["id"], snapshot_token=token[:-1] + "x").status_code == 400
+
+    token2 = _snapshot_token_from_preview(client, user["token"], child["id"])
+    _put_profile(client, user["token"], child["id"], {**SAMPLE_PAYLOAD, "blood_type": "A-"})
+    assert _pdf_card(client, user["token"], child["id"], snapshot_token=token2).status_code == 409
+
+
+def test_no_audit_event_for_rejected_or_stale_pdf_requests(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+    before = CaregiverAuditEvent.query.filter_by(child_id=child["id"], entity_type="emergency_card_pdf_export").count()
+
+    _pdf_card(client, user["token"], child["id"], snapshot_token=None)
+    _pdf_card(client, user["token"], child["id"], snapshot_token="garbage-token")
+    token = _snapshot_token_from_preview(client, user["token"], child["id"])
+    _put_profile(client, user["token"], child["id"], {**SAMPLE_PAYLOAD, "blood_type": "A-"})
+    _pdf_card(client, user["token"], child["id"], snapshot_token=token)
+
+    after = CaregiverAuditEvent.query.filter_by(child_id=child["id"], entity_type="emergency_card_pdf_export").count()
+    assert after == before
+
+
+def test_successful_pdf_export_creates_exactly_one_audit_event(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+    before = CaregiverAuditEvent.query.filter_by(child_id=child["id"], entity_type="emergency_card_pdf_export").count()
+
+    resp = _pdf_card(client, user["token"], child["id"])
+    assert resp.status_code == 200
+
+    after = CaregiverAuditEvent.query.filter_by(child_id=child["id"], entity_type="emergency_card_pdf_export").count()
+    assert after == before + 1
+
+
+def test_snapshot_token_claims_never_contain_medical_or_contact_values(client):
+    user = register(client)
+    child = create_child(client, user["token"])
+    _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
+    token = _snapshot_token_from_preview(client, user["token"], child["id"])
+
+    with client.application.app_context():
+        claims = decode_snapshot_token(token, child_id=child["id"], user_id=user["id"])
+    assert set(claims.keys()) == {"v", "child_id", "user_id", "preview_at", "digest"}
+
+    haystack = token + json.dumps(claims)
+    for sensitive in (
+        "Amoxicillin", "Kacang tanah", "Asma", "dr. Sarah", "Budi Santoso",
+        "021-5551234", "0812-3456-7890", "Hubungi ayah", "O+",
+    ):
+        assert sensitive not in haystack
+
+
+def test_canonicalization_is_stable_regardless_of_dict_key_order():
+    a = _sample_summary()
+    b = dict(reversed(list(a.items())))
+    b["allergies"] = [dict(reversed(list(a["allergies"][0].items())))]
+    assert digest_emergency_card_report(a) == digest_emergency_card_report(b)
+
+
+def test_relevant_content_change_alters_the_digest():
+    a = _sample_summary()
+    b = _sample_summary(blood_type="A-", blood_type_label="A-")
+    assert digest_emergency_card_report(a) != digest_emergency_card_report(b)
+
+
+def test_response_only_capability_field_does_not_alter_the_digest():
+    a = _sample_summary()
+    b = _sample_summary()
+    b["capabilities"] = {"can_view_medical_profile": True, "can_edit_medical_profile": False}
+    assert digest_emergency_card_report(a) == digest_emergency_card_report(b)
