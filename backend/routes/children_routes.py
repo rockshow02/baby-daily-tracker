@@ -19,6 +19,7 @@ from utils.access import (
 )
 from utils.auth import get_current_user_id
 from utils.audit import record_audit_event, MEMBERSHIP_ENTITY_TYPE
+from utils.vaccination_planner import vaccination_state, vaccination_summary
 
 children_bp = Blueprint("children", __name__)
 
@@ -283,13 +284,20 @@ def list_vaccine_schedule():
     return jsonify([v.to_dict() for v in items])
 
 
-def _build_vaccination_list(child, age_months):
+def _build_vaccination_list(child, age_months, reference_date=None):
+    reference_date = reference_date or today_wib()
     schedule = VaccineSchedule.query.order_by(VaccineSchedule.order_index.asc()).all()
     existing = {cv.vaccine_schedule_id: cv for cv in child.vaccinations}
 
     result = []
     for v in schedule:
         cv = existing.get(v.id)
+        state, recommended_date = vaccination_state(
+            birth_date=child.birth_date,
+            recommended_age_months=v.recommended_age_months,
+            reference_date=reference_date,
+            given=bool(cv and cv.given),
+        )
         given_early = False
         if cv and cv.given and cv.given_date:
             age_at_given = (
@@ -306,7 +314,10 @@ def _build_vaccination_list(child, age_months):
             "is_optional": v.is_optional,
             "category": v.category,
             "notes": v.notes,
-            "due": v.recommended_age_months <= age_months,
+            # `due` dipertahankan buat kompatibilitas klien lama.
+            "due": state in ("due", "overdue"),
+            "state": state,
+            "recommended_date": recommended_date.isoformat(),
             "given": cv.given if cv else False,
             "given_date": cv.given_date.isoformat() if (cv and cv.given_date) else None,
             "given_early": given_early,
@@ -338,26 +349,24 @@ def next_vaccine(child_id):
     if not wajib:
         return jsonify({"has_next": False, "message": "Semua vaksin wajib sudah tercatat lengkap."})
 
-    overdue = [v for v in wajib if v["due"]]
-    upcoming = [v for v in wajib if not v["due"]]
+    overdue = [v for v in wajib if v["state"] == "overdue"]
+    remaining = [v for v in wajib if v["state"] != "overdue"]
 
     if overdue:
         target = min(overdue, key=lambda v: v["recommended_age_months"])
         status = "overdue"
     else:
-        target = min(upcoming, key=lambda v: v["recommended_age_months"])
-        status = "upcoming"
+        target = min(remaining, key=lambda v: v["recommended_date"])
+        status = target["state"]
 
     months_until = target["recommended_age_months"] - age_months
-    estimated_date = _add_months(child.birth_date, target["recommended_age_months"])
-
     return jsonify({
         "has_next": True,
-        "status": status,  # 'overdue' | 'upcoming'
+        "status": status,  # 'overdue' | 'due' | 'upcoming'
         "vaccine_name": target["vaccine_name"],
         "recommended_age_months": target["recommended_age_months"],
         "months_until": months_until,
-        "estimated_date": estimated_date.isoformat(),
+        "estimated_date": target["recommended_date"],
         "overdue_count": len(overdue),
     })
 
@@ -373,7 +382,14 @@ def list_child_vaccinations(child_id):
         return jsonify({"error": "Anak tidak ditemukan"}), 404
 
     age_months = _age_in_months(child.birth_date)
-    return jsonify({"age_months": age_months, "vaccinations": _build_vaccination_list(child, age_months)})
+    items = _build_vaccination_list(child, age_months)
+    return jsonify({
+        "age_months": age_months,
+        "vaccinations": items,
+        "summary": vaccination_summary(items),
+        "can_update": resolve_role(child, user_id) in WRITE_ROLES,
+        "disclaimer": "Jadwal ini adalah referensi. Konfirmasikan waktu dan kebutuhan vaksin kepada dokter atau tenaga kesehatan.",
+    })
 
 
 @children_bp.route("/children/<int:child_id>/vaccinations", methods=["POST"])
@@ -401,13 +417,56 @@ def update_child_vaccinations(child_id):
     if resolve_role(child, user_id) not in WRITE_ROLES:
         return jsonify({"error": "Peran Anda hanya bisa melihat data, tidak bisa mengubah status vaksinasi."}), 403
 
-    data = request.get_json() or {}
-    items = data.get("items", [])
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        return jsonify({"error": "Format data vaksinasi tidak valid"}), 400
+    items = data["items"]
+    if len(items) == 0 or len(items) > 50:
+        return jsonify({"error": "Jumlah perubahan vaksinasi harus antara 1 dan 50"}), 400
 
+    normalized = []
+    seen_ids = set()
+    today = today_wib()
     for item in items:
+        if not isinstance(item, dict):
+            return jsonify({"error": "Setiap perubahan vaksinasi harus berupa objek"}), 400
         vaccine_schedule_id = item.get("vaccine_schedule_id")
-        if not vaccine_schedule_id:
-            continue
+        if isinstance(vaccine_schedule_id, bool) or not isinstance(vaccine_schedule_id, int):
+            return jsonify({"error": "vaccine_schedule_id tidak valid"}), 400
+        if vaccine_schedule_id in seen_ids:
+            return jsonify({"error": "Vaksin yang sama tidak boleh dikirim dua kali"}), 400
+        seen_ids.add(vaccine_schedule_id)
+        if db.session.get(VaccineSchedule, vaccine_schedule_id) is None:
+            return jsonify({"error": "Jadwal vaksin tidak ditemukan"}), 400
+        given = item.get("given")
+        if not isinstance(given, bool):
+            return jsonify({"error": "Status diberikan harus bernilai boolean"}), 400
+        given_date = None
+        given_date_str = item.get("given_date")
+        if given_date_str is not None:
+            if not isinstance(given_date_str, str):
+                return jsonify({"error": "Tanggal pemberian tidak valid"}), 400
+            try:
+                given_date = datetime.strptime(given_date_str, "%Y-%m-%d").date()
+            except ValueError:
+                return jsonify({"error": "Tanggal pemberian tidak valid, gunakan YYYY-MM-DD"}), 400
+            if given_date > today:
+                return jsonify({"error": "Tanggal pemberian tidak boleh di masa depan"}), 400
+            if given_date < child.birth_date:
+                return jsonify({"error": "Tanggal pemberian tidak boleh sebelum tanggal lahir anak"}), 400
+        if not given and given_date is not None:
+            return jsonify({"error": "Tanggal pemberian hanya boleh diisi jika vaksin sudah diberikan"}), 400
+        notes = item.get("notes") if "notes" in item else None
+        if notes is not None:
+            if not isinstance(notes, str):
+                return jsonify({"error": "Catatan vaksinasi harus berupa teks"}), 400
+            notes = notes.replace("\r\n", "\n").replace("\r", "\n").strip()
+            if len(notes) > 500:
+                return jsonify({"error": "Catatan vaksinasi maksimal 500 karakter"}), 400
+            notes = notes or None
+        normalized.append((vaccine_schedule_id, given, given_date, notes, "notes" in item))
+
+    for vaccine_schedule_id, given, given_date, notes, has_notes in normalized:
 
         cv = ChildVaccination.query.filter_by(
             child_id=child_id, vaccine_schedule_id=vaccine_schedule_id
@@ -416,16 +475,26 @@ def update_child_vaccinations(child_id):
             cv = ChildVaccination(child_id=child_id, vaccine_schedule_id=vaccine_schedule_id)
             db.session.add(cv)
 
-        cv.given = bool(item.get("given", False))
-        given_date_str = item.get("given_date")
-        cv.given_date = datetime.strptime(given_date_str, "%Y-%m-%d").date() if given_date_str else None
-        if "notes" in item:
-            cv.notes = item["notes"]
+        cv.given = given
+        cv.given_date = given_date if given else None
+        if not given:
+            # Membatalkan status "diberikan" juga membatalkan detail
+            # kejadian tersebut; jangan tampilkan catatan lama pada
+            # vaksin yang sekarang kembali berstatus belum tercatat.
+            cv.notes = None
+        elif has_notes:
+            cv.notes = notes
 
     db.session.commit()
 
     age_months = _age_in_months(child.birth_date)
-    return jsonify({"age_months": age_months, "vaccinations": _build_vaccination_list(child, age_months)})
+    result = _build_vaccination_list(child, age_months)
+    return jsonify({
+        "age_months": age_months,
+        "vaccinations": result,
+        "summary": vaccination_summary(result),
+        "can_update": True,
+    })
 
 
 # ---------- MULTI-CAREGIVER & PERAN (Caregiver Roles & Permissions Phase 1) ----------

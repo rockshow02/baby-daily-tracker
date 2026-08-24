@@ -373,9 +373,10 @@ function VaccinationSection({ section }) {
                 v.given ? "bg-feed/15 text-feed" : "bg-void-hairline text-ink-muted"
               }`}
             >
-              {describeVaccinationStatus(v.given)}
+              {describeVaccinationStatus(v.given, v.state)}
             </span>
           </div>
+          {v.recommended_date && <p className="text-ink-muted text-xs mt-0.5">Tanggal rekomendasi: {formatDateWIB(v.recommended_date)}</p>}
           {v.given_date && <p className="text-ink-muted text-xs mt-0.5">Diberikan: {formatDateWIB(v.given_date)}</p>}
         </DetailListItem>
       ))}

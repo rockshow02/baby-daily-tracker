@@ -42,8 +42,9 @@ export function describeMilestoneType(type) {
   return MILESTONE_TYPE_LABELS[type] || UNKNOWN_MILESTONE_LABEL;
 }
 
-export function describeVaccinationStatus(given) {
-  return given ? "Sudah diberikan" : "Belum diberikan";
+export function describeVaccinationStatus(given, state = null) {
+  if (given || state === "given") return "Sudah diberikan";
+  return { upcoming: "Akan datang", due: "Waktunya", overdue: "Terlambat" }[state] || "Belum diberikan";
 }
 
 export function describeGender(gender) {

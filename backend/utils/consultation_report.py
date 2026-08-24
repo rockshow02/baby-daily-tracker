@@ -469,7 +469,7 @@ def _medication_section(child_id, start_date, end_date, now):
 def _vaccination_section(child, end_date):
     age_months = _age_months_as_of(child.birth_date, end_date)
     return {
-        "vaccinations": _build_vaccination_list(child, age_months),
+        "vaccinations": _build_vaccination_list(child, age_months, reference_date=end_date),
         "age_months_as_of_report_end": age_months,
     }
 

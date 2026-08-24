@@ -338,14 +338,16 @@ def _render_medication(section, styles):
 
 
 def _render_vaccination(section, styles):
+    status_labels = {"given": "Sudah diberikan", "upcoming": "Akan datang", "due": "Waktunya", "overdue": "Terlambat"}
     rows = [
         [v["vaccine_name"] + (f" ({v['dose_label']})" if v.get("dose_label") else ""),
-         "Sudah" if v["given"] else "Belum", v.get("given_date") or "-"]
+         status_labels.get(v.get("state"), "Sudah diberikan" if v["given"] else "Belum diberikan"),
+         v.get("recommended_date") or "-", v.get("given_date") or "-"]
         for v in section["vaccinations"]
     ]
     if not rows:
         return [Paragraph("Belum ada jadwal vaksinasi yang tersedia.", styles.normal)]
-    return [_entries_table(["Vaksin", "Status", "Tanggal Diberikan"], rows, [8 * cm, 3 * cm, 5 * cm], styles)]
+    return [_entries_table(["Vaksin", "Status", "Rekomendasi", "Diberikan"], rows, [7 * cm, 3 * cm, 3 * cm, 3 * cm], styles)]
 
 
 def _render_milestones(section, styles):
