@@ -10,13 +10,14 @@ from sqlalchemy.exc import IntegrityError
 
 from extensions import db
 from models import (
-    Child, FeedingLog, SleepLog, DiaperLog, PumpingLog, ActivityLog,
+    Child, ChildMedicalProfile, FeedingLog, SleepLog, DiaperLog, PumpingLog, ActivityLog,
     MedicationLog, TemperatureLog, DoctorVisitLog, IllnessLog,
     GrowthMeasurement, ChildVaccination, VaccineSchedule, MoodLog, MilestoneLog,
 )
 from routes.children_routes import ALLOWED_PHOTO_EXT, MAX_PHOTO_SIZE_MB
-from utils.access import get_accessible_child, ROLE_OWNER
+from utils.access import get_accessible_child, resolve_role, ROLE_OWNER, WRITE_ROLES
 from utils.auth import get_current_user_id
+from utils.medical_profile_engine import MedicalProfileValidationError, validate_medical_profile_payload
 from utils.timezone_utils import to_wib_naive
 
 backup_bp = Blueprint("backup", __name__)
@@ -176,6 +177,19 @@ def export_json(child_id):
     if not child:
         return jsonify({"error": "Anak tidak ditemukan"}), 404
 
+    # Child Medical Profile & Emergency Card Phase 1 -- kebijakan peran
+    # profil medis LEBIH KETAT dari backup anak secara umum (yang sudah
+    # bisa diakses editor/viewer lewat _owned_child di atas) -- CUMA
+    # Owner/Editor yang boleh membawa data profil medis+kontak darurat
+    # ikut ke dalam backup, konsisten sama GET /medical-profile
+    # (Viewer selalu 403 di sana). Viewer TETAP bisa backup data anak
+    # LAINNYA seperti biasa, cuma field `medical_profile` yang
+    # dikecualikan (bukan seluruh endpoint ini ditolak).
+    include_medical_profile = resolve_role(child, get_current_user_id()) in WRITE_ROLES
+    medical_profile_row = (
+        ChildMedicalProfile.query.filter_by(child_id=child_id).first() if include_medical_profile else None
+    )
+
     photo_base64 = None
     photo_ext = None
     if child.photo_filename:
@@ -323,6 +337,26 @@ def export_json(child_id):
             }
             for l in MilestoneLog.query.filter_by(child_id=child_id).all()
         ],
+        # `None` kalau anak ini belum pernah punya profil medis SAMA
+        # SEKALI, ATAUPUN kalau pengekspornya Viewer (lihat
+        # `include_medical_profile` di atas) -- backward compatible
+        # dengan backup versi lama yang nggak punya key ini sama sekali
+        # (import_json:` data.get("medical_profile")` di bawah).
+        "medical_profile": (
+            {
+                "blood_type": medical_profile_row.blood_type,
+                "allergies": list(medical_profile_row.allergies or []),
+                "conditions": list(medical_profile_row.conditions or []),
+                "primary_doctor_name": medical_profile_row.primary_doctor_name,
+                "primary_clinic_name": medical_profile_row.primary_clinic_name,
+                "primary_clinic_phone": medical_profile_row.primary_clinic_phone,
+                "emergency_contact_name": medical_profile_row.emergency_contact_name,
+                "emergency_contact_relationship": medical_profile_row.emergency_contact_relationship,
+                "emergency_contact_phone": medical_profile_row.emergency_contact_phone,
+                "emergency_instructions": medical_profile_row.emergency_instructions,
+            }
+            if medical_profile_row else None
+        ),
     }
 
     return jsonify(data)
@@ -512,6 +546,26 @@ def import_json():
                 achieved_date=datetime.strptime(l["achieved_date"], "%Y-%m-%d").date(),
                 notes=l.get("notes"),
             ))
+
+        # Child Medical Profile & Emergency Card Phase 1 -- `None`/key
+        # nggak ada SAMA SEKALI (backup lama dari sebelum fitur ini ada)
+        # -> dilewati dengan aman, TIDAK bikin baris ChildMedicalProfile
+        # apa pun (backward compatible, requirement eksplisit). Kalau
+        # ADA, divalidasi lewat FUNGSI VALIDASI YANG SAMA PERSIS dipakai
+        # PUT /medical-profile (utils/medical_profile_engine.py) --
+        # bukan aturan validasi kedua yang bisa hanyut beda -- jadi
+        # backup dengan data yang nggak valid (versi lama yang formatnya
+        # beda, atau diedit manual) HARUS gagal total (masuk except di
+        # bawah), BUKAN diam-diam terpotong/diterima sebagian.
+        # `last_reviewed_at`/`last_reviewed_by` SENGAJA TIDAK diimport
+        # apa pun keadaannya -- profil yang baru dipulihkan di device/akun
+        # LAIN dianggap "belum pernah diperiksa ulang di sini", metadata
+        # siapa yang mereview di akun ASAL nggak relevan/valid dipindah
+        # ke akun pengimpor.
+        raw_medical_profile = data.get("medical_profile")
+        if raw_medical_profile is not None:
+            fields = validate_medical_profile_payload(raw_medical_profile)
+            db.session.add(ChildMedicalProfile(child_id=child.id, **fields))
 
         db.session.commit()
     except (KeyError, ValueError, TypeError, AttributeError):

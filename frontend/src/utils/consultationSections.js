@@ -27,6 +27,12 @@ export const SECTION_DEFS = [
   { code: "illness", label: "Riwayat Sakit", sensitive: true, defaultOn: false },
   { code: "medication", label: "Riwayat Obat", sensitive: true, defaultOn: false },
   { code: "doctor_visits", label: "Kunjungan Dokter Sebelumnya", sensitive: true, defaultOn: false },
+  // Child Medical Profile & Emergency Card Phase 1 — PALING sensitif
+  // (golongan darah, alergi, kondisi medis, kontak darurat), default
+  // OFF, DAN (beda dari section sensitif lain di atas) Owner/Editor
+  // SAJA yang boleh menyertakannya — Viewer ditolak 403 kalau nyoba
+  // (lihat backend/docs/MEDICAL_PROFILE.md).
+  { code: "medical_profile", label: "Profil Medis & Kartu Darurat", sensitive: true, defaultOn: false },
   { code: "questions", label: "Pertanyaan untuk Dokter", sensitive: true, defaultOn: false },
   { code: "note", label: "Catatan Tambahan Caregiver", sensitive: true, defaultOn: false },
 ];

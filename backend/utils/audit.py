@@ -84,6 +84,16 @@ SAFE_CHANGED_FIELDS = {
     # `medication_log` di bawah) dan instruksi bebas teks ada di
     # PRIVATE_CHANGED_FIELDS.
     "medication_schedule": {"start_date", "end_date", "times_of_day", "is_active"},
+    # Child Medical Profile & Emergency Card Phase 1 (lihat
+    # backend/docs/MEDICAL_PROFILE.md) — set KOSONG SENGAJA: TIDAK ADA
+    # satu pun field profil medis yang "aman" disebut namanya (bahkan
+    # golongan darah TETAP data medis sensitif per requirement eksplisit
+    # "treat all of these fields as sensitive medical/private data") --
+    # SEMUA field-nya ada di PRIVATE_CHANGED_FIELDS di bawah, entry ini
+    # CUMA supaya entity_type-nya lolos allowlist record_audit_event()
+    # (SAFE_CHANGED_FIELDS kosong tetap valid, beda dari "entity_type
+    # nggak terdaftar sama sekali").
+    "medical_profile": set(),
 }
 
 PRIVATE_CHANGED_FIELDS = {
@@ -116,6 +126,17 @@ PRIVATE_CHANGED_FIELDS = {
     # spesifik anak (SAMA kebijakannya kayak medication_name/dosage di
     # `medication_log`); instructions = teks bebas caregiver, analog notes.
     "medication_schedule": {"medication_name", "dose_value", "dose_unit", "instructions"},
+    # Child Medical Profile & Emergency Card Phase 1 -- SEMUA field
+    # (golongan darah, alergi, kondisi medis, nama dokter/klinik,
+    # SEMUA nomor telepon & nama kontak, instruksi darurat) sensitif,
+    # TIDAK ADA satu pun yang aman disebut namanya -- perubahan field
+    # mana pun CUMA tercatat sebagai marker generik `private_details`.
+    "medical_profile": {
+        "blood_type", "allergies", "conditions",
+        "primary_doctor_name", "primary_clinic_name", "primary_clinic_phone",
+        "emergency_contact_name", "emergency_contact_relationship", "emergency_contact_phone",
+        "emergency_instructions",
+    },
 }
 
 # Urutan TETAP (bukan set) — dipakai buat pesan error yang deterministik
@@ -209,6 +230,26 @@ DOCTOR_CONSULTATION_PDF_EXPORT_ENTITY_TYPE = "doctor_consultation_pdf_export"
 MEDICATION_DOSE_ADMINISTERED_ENTITY_TYPE = "medication_dose_administered"
 MEDICATION_DOSE_SKIPPED_ENTITY_TYPE = "medication_dose_skipped"
 
+# --- Child Medical Profile & Emergency Card Phase 1 (lihat
+# backend/docs/MEDICAL_PROFILE.md) ---
+#
+# "Ditandai sudah diperiksa ulang" DIPISAH dari create/update field
+# biasa (`entity_type="medical_profile"` di atas) -- ini KEJADIAN
+# ("caregiver ini mengonfirmasi profilnya masih akurat SEKARANG"),
+# bukan perubahan NILAI field apa pun (caregiver bisa menandai ulang
+# tanpa mengubah satu field pun) -- pola SAMA PERSIS
+# REMINDER_OCCURRENCE_*_ENTITY_TYPE. `action` SELALU 'create',
+# `entity_id` = ChildMedicalProfile.id, `changed_fields` SELALU None.
+MEDICAL_PROFILE_REVIEWED_ENTITY_TYPE = "medical_profile_reviewed"
+
+# Ekspor PDF Kartu Darurat -- pola SAMA PERSIS
+# DOCTOR_CONSULTATION_PDF_EXPORT_ENTITY_TYPE: `action` SELALU 'create',
+# `entity_id` SELALU 0 (PDF-nya sendiri TIDAK PERNAH disimpan
+# permanen), `changed_fields` SELALU None. Isi kartu (golongan darah,
+# alergi, kontak, dst) TIDAK PERNAH masuk baris audit ini -- cuma
+# kejadian "PDF ini pernah dibuat, oleh siapa, kapan".
+EMERGENCY_CARD_PDF_EXPORT_ENTITY_TYPE = "emergency_card_pdf_export"
+
 # Entity_type yang SENGAJA nggak punya entry SAFE_CHANGED_FIELDS sama
 # sekali — `changed_fields` buat SEMUANYA SELALU dipaksa None (lihat
 # record_audit_event di bawah), TIDAK PEDULI apa pun yang dikirim
@@ -220,6 +261,8 @@ NO_FIELD_DIFF_ENTITY_TYPES = (
     DOCTOR_CONSULTATION_PDF_EXPORT_ENTITY_TYPE,
     MEDICATION_DOSE_ADMINISTERED_ENTITY_TYPE,
     MEDICATION_DOSE_SKIPPED_ENTITY_TYPE,
+    MEDICAL_PROFILE_REVIEWED_ENTITY_TYPE,
+    EMERGENCY_CARD_PDF_EXPORT_ENTITY_TYPE,
 )
 
 # Dipakai endpoint baca (routes/audit_routes.py) buat validasi query

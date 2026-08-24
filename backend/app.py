@@ -101,6 +101,7 @@ def create_app(config_overrides=None):
     from routes.insights_routes import insights_bp
     from routes.reminder_routes import reminder_bp
     from routes.medication_schedule_routes import medication_schedule_bp
+    from routes.medical_profile_routes import medical_profile_bp
     from routes.doctor_consultation_routes import doctor_consultation_bp
 
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
@@ -119,6 +120,7 @@ def create_app(config_overrides=None):
     app.register_blueprint(insights_bp, url_prefix="/api")
     app.register_blueprint(reminder_bp, url_prefix="/api")
     app.register_blueprint(medication_schedule_bp, url_prefix="/api")
+    app.register_blueprint(medical_profile_bp, url_prefix="/api")
     app.register_blueprint(doctor_consultation_bp, url_prefix="/api")
 
     with app.app_context():

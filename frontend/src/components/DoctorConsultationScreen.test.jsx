@@ -148,6 +148,42 @@ describe("DoctorConsultationScreen — section selection & sensitive indicators"
   });
 });
 
+describe("DoctorConsultationScreen — medical profile section gating (Owner/Editor only)", () => {
+  it("allows selecting the medical profile section before any preview has confirmed capabilities", () => {
+    render(<DoctorConsultationScreen child={testChild} onClose={vi.fn()} onRecordVisit={vi.fn()} />);
+    const checkbox = screen.getByLabelText("Profil Medis & Kartu Darurat");
+    expect(checkbox).not.toBeDisabled();
+    fireEvent.click(checkbox);
+    expect(checkbox).toBeChecked();
+  });
+
+  it("disables and unchecks the medical profile section once a preview confirms the role cannot include it (Viewer)", async () => {
+    apiMock.previewDoctorConsultation.mockResolvedValue(makeReport({
+      capabilities: { can_preview: true, can_export: false, can_add_private_notes: false, can_record_visit: false, can_include_medical_profile: false },
+    }));
+    render(<DoctorConsultationScreen child={testChild} onClose={vi.fn()} onRecordVisit={vi.fn()} />);
+    fireEvent.click(screen.getByLabelText("Profil Medis & Kartu Darurat"));
+    fireEvent.click(screen.getByRole("button", { name: "Buat Pratinjau" }));
+
+    await waitFor(() => expect(screen.getByLabelText("Profil Medis & Kartu Darurat")).toBeDisabled());
+    expect(screen.getByLabelText("Profil Medis & Kartu Darurat")).not.toBeChecked();
+    expect(screen.getByText("Peran Anda tidak bisa mengakses ini")).toBeInTheDocument();
+  });
+
+  it("keeps the medical profile section available when a preview confirms Owner/Editor capability", async () => {
+    apiMock.previewDoctorConsultation.mockResolvedValue(makeReport({
+      capabilities: { can_preview: true, can_export: true, can_add_private_notes: true, can_record_visit: true, can_include_medical_profile: true },
+    }));
+    render(<DoctorConsultationScreen child={testChild} onClose={vi.fn()} onRecordVisit={vi.fn()} />);
+    fireEvent.click(screen.getByLabelText("Profil Medis & Kartu Darurat"));
+    fireEvent.click(screen.getByRole("button", { name: "Buat Pratinjau" }));
+
+    await waitFor(() => expect(apiMock.previewDoctorConsultation).toHaveBeenCalled());
+    expect(screen.getByLabelText("Profil Medis & Kartu Darurat")).not.toBeDisabled();
+    expect(screen.getByLabelText("Profil Medis & Kartu Darurat")).toBeChecked();
+  });
+});
+
 describe("DoctorConsultationScreen — PDF export & privacy confirmation", () => {
   it("downloads directly when no sensitive section is selected", async () => {
     apiMock.previewDoctorConsultation.mockResolvedValue(makeReport());

@@ -32,11 +32,12 @@ from datetime import datetime, time, timedelta
 
 from extensions import db
 from models import (
-    DoctorVisitLog, GrowthMeasurement, IllnessLog,
+    ChildMedicalProfile, DoctorVisitLog, GrowthMeasurement, IllnessLog,
     MedicationDoseAction, MedicationLog, MedicationSchedule, MilestoneLog, TemperatureLog,
 )
 from routes.children_routes import _build_vaccination_list
 from routes.report_routes import _age_str
+from utils.emergency_card_report import build_emergency_card_summary
 from utils.medication_schedule_engine import adherence_percentage, compute_adherence
 from utils.insights_engine import (
     build_comparison,
@@ -74,12 +75,20 @@ SECTION_DOCTOR_VISITS = "doctor_visits"
 SECTION_INSIGHTS = "insights"
 SECTION_QUESTIONS = "questions"
 SECTION_NOTE = "note"
+# Child Medical Profile & Emergency Card Phase 1 (lihat
+# backend/docs/MEDICAL_PROFILE.md) — section OPSIONAL PALING sensitif
+# (golongan darah, alergi, kondisi medis, kontak darurat) — default OFF,
+# opt-in eksplisit, DAN (beda dari section sensitif lain di atas)
+# Owner/Editor SAJA yang boleh menyertakannya — Viewer ditolak `403`
+# kalau nyoba, lihat _capabilities()/_parse_request_payload() di
+# routes/doctor_consultation_routes.py.
+SECTION_MEDICAL_PROFILE = "medical_profile"
 
 SECTION_CODES = (
     SECTION_CHILD_SUMMARY, SECTION_FEEDING, SECTION_SLEEP, SECTION_DIAPER,
     SECTION_PUMPING, SECTION_ACTIVITY_MOOD, SECTION_GROWTH, SECTION_TEMPERATURE,
     SECTION_ILLNESS, SECTION_MEDICATION, SECTION_VACCINATION, SECTION_MILESTONES,
-    SECTION_DOCTOR_VISITS, SECTION_INSIGHTS, SECTION_QUESTIONS, SECTION_NOTE,
+    SECTION_DOCTOR_VISITS, SECTION_MEDICAL_PROFILE, SECTION_INSIGHTS, SECTION_QUESTIONS, SECTION_NOTE,
 )
 _SECTION_CODE_SET = frozenset(SECTION_CODES)
 MAX_SECTIONS = len(SECTION_CODES)
@@ -98,6 +107,7 @@ DEFAULT_INCLUDED_SECTIONS = frozenset({
 # sebelum export, dan (questions/note) buat menegakkan can_add_private_notes.
 SENSITIVE_SECTIONS = frozenset({
     SECTION_ILLNESS, SECTION_MEDICATION, SECTION_DOCTOR_VISITS, SECTION_QUESTIONS, SECTION_NOTE,
+    SECTION_MEDICAL_PROFILE,
 })
 
 # Batas baris per section detail -- SELALU dibatasi + ditandai `truncated`
@@ -466,6 +476,20 @@ def _medication_section(child_id, start_date, end_date, now):
     }
 
 
+def _medical_profile_section(child, now):
+    """
+    REUSE penuh utils/emergency_card_report.py:build_emergency_card_summary
+    -- SATU sumber kebenaran bentuk data yang SAMA dipakai Emergency
+    Card berdiri sendiri (routes/medical_profile_routes.py). Section
+    ini SENGAJA cuma field-field yang layak masuk Emergency Card
+    (requirement: "include only emergency-card-appropriate fields") --
+    TIDAK ADA `catatan internal` tambahan apa pun di luar itu yang
+    disisipkan khusus buat laporan konsultasi ini.
+    """
+    profile = ChildMedicalProfile.query.filter_by(child_id=child.id).first()
+    return build_emergency_card_summary(child, profile, now)
+
+
 def _vaccination_section(child, end_date):
     age_months = _age_months_as_of(child.birth_date, end_date)
     return {
@@ -622,6 +646,8 @@ def build_consultation_report(child, period, sections, questions_text, note_text
         data[SECTION_MILESTONES] = _milestones_section(child.id, start_date, end_date)
     if SECTION_DOCTOR_VISITS in sections_set:
         data[SECTION_DOCTOR_VISITS] = _doctor_visits_section(child.id, start_date, end_date)
+    if SECTION_MEDICAL_PROFILE in sections_set:
+        data[SECTION_MEDICAL_PROFILE] = _medical_profile_section(child, now)
     if SECTION_INSIGHTS in sections_set:
         data[SECTION_INSIGHTS] = _insights_section(child.id, start_date, end_date, today)
     if SECTION_QUESTIONS in sections_set:

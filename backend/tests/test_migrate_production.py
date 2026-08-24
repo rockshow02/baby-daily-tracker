@@ -983,3 +983,154 @@ def test_medication_schedule_check_constraints_reject_invalid_values_after_migra
                 ))
     finally:
         engine.dispose()
+
+
+# --------------------------------------------------------------------------
+# Child Medical Profile & Emergency Card — Phase 1 (lihat
+# backend/docs/MEDICAL_PROFILE.md). 1 tabel baru (child_medical_profiles),
+# SAMA PERSIS pola medication_schedules/reminders di atas -- TIDAK ADA
+# entry COLUMNS_TO_ENSURE baru buat ini, db.create_all() di ujung
+# migrate() yang bikin tabel ini dari nol.
+# --------------------------------------------------------------------------
+
+
+def _seed_pre_medical_profile_schema(path):
+    """Simulasi database production SEBELUM fitur ini di-deploy -- semua tabel KECUALI child_medical_profiles, diisi data 'lama'."""
+    engine = create_engine(f"sqlite:///{path}")
+    tables_to_create = [t for t in db.metadata.sorted_tables if t.name != "child_medical_profiles"]
+    db.metadata.create_all(bind=engine, tables=tables_to_create)
+
+    with engine.begin() as conn:
+        conn.execute(
+            db.metadata.tables["users"].insert(),
+            {
+                "name": "Legacy User", "email": "legacy-medprofile@example.com",
+                "password_hash": "not-a-real-hash", "telegram_chat_id": None,
+                "created_at": datetime(2024, 1, 1),
+            },
+        )
+        conn.execute(
+            db.metadata.tables["children"].insert(),
+            {
+                "user_id": 1, "name": "Legacy Child", "nickname": None,
+                "birth_date": date(2024, 1, 1), "gender": "L",
+                "birth_weight_kg": None, "birth_height_cm": None, "photo_filename": None,
+                "created_at": datetime(2024, 1, 1),
+            },
+        )
+        conn.execute(
+            db.metadata.tables["medication_logs"].insert(),
+            {
+                "child_id": 1, "illness_id": None, "medication_name": "Obat Lama",
+                "dosage": "1 sendok takar", "timestamp": datetime(2024, 1, 2, 8, 0, 0),
+                "notes": None, "created_at": datetime(2024, 1, 2, 8, 0, 0), "created_by_user_id": 1,
+            },
+        )
+    engine.dispose()
+
+
+def test_medical_profile_migration_creates_the_new_table(temp_db_path, monkeypatch):
+    _seed_pre_medical_profile_schema(temp_db_path)
+    assert "child_medical_profiles" not in _table_names(temp_db_path)
+
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    assert "child_medical_profiles" in _table_names(temp_db_path)
+
+
+def test_medical_profile_migration_creates_expected_columns(temp_db_path, monkeypatch):
+    _seed_pre_medical_profile_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    columns = _column_names(temp_db_path, "child_medical_profiles")
+    assert {
+        "id", "child_id", "blood_type", "allergies", "conditions",
+        "primary_doctor_name", "primary_clinic_name", "primary_clinic_phone",
+        "emergency_contact_name", "emergency_contact_relationship", "emergency_contact_phone",
+        "emergency_instructions", "last_reviewed_at", "last_reviewed_by_user_id",
+        "created_at", "updated_at",
+    }.issubset(columns)
+
+
+def test_medical_profile_migration_creates_expected_indexes(temp_db_path, monkeypatch):
+    _seed_pre_medical_profile_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    indexed = _indexed_columns(temp_db_path, "child_medical_profiles")
+    assert "child_id" in indexed
+
+
+def test_medical_profile_migration_creates_unique_child_id_constraint(temp_db_path, monkeypatch):
+    """Requirement: SATU baris per anak -- (child_id) HARUS punya index UNIK."""
+    _seed_pre_medical_profile_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    conn = sqlite3.connect(temp_db_path)
+    try:
+        indexes = conn.execute("PRAGMA index_list(child_medical_profiles);").fetchall()
+        unique_indexes = [idx for idx in indexes if idx[2] == 1]
+        found = False
+        for idx in unique_indexes:
+            cols = {row[2] for row in conn.execute(f"PRAGMA index_info({idx[1]});").fetchall()}
+            if cols == {"child_id"}:
+                found = True
+        assert found, f"nggak ketemu unique index (child_id) -- index unik yang ada: {unique_indexes}"
+    finally:
+        conn.close()
+
+
+def test_medical_profile_migration_rerun_is_safe(temp_db_path, monkeypatch):
+    _seed_pre_medical_profile_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+    _run_migrate_against(temp_db_path, monkeypatch)  # kedua kalinya HARUS nggak error/nggak nambah apa-apa
+
+    assert "child_medical_profiles" in _table_names(temp_db_path)
+    conn = sqlite3.connect(temp_db_path)
+    try:
+        (count,) = conn.execute("SELECT COUNT(*) FROM child_medical_profiles;").fetchone()
+        assert count == 0
+    finally:
+        conn.close()
+
+
+def test_medical_profile_migration_preserves_existing_data_in_other_tables(temp_db_path, monkeypatch):
+    _seed_pre_medical_profile_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    conn = sqlite3.connect(temp_db_path)
+    try:
+        user_row = conn.execute("SELECT name, email FROM users WHERE id = 1;").fetchone()
+        assert user_row == ("Legacy User", "legacy-medprofile@example.com")
+        log_row = conn.execute("SELECT medication_name, dosage FROM medication_logs WHERE id = 1;").fetchone()
+        assert log_row == ("Obat Lama", "1 sendok takar")
+    finally:
+        conn.close()
+
+
+def test_medical_profile_migration_never_touches_the_real_project_database(temp_db_path, monkeypatch):
+    real_db_existed_before = os.path.exists(REAL_INSTANCE_DB)
+    real_mtime_before = os.path.getmtime(REAL_INSTANCE_DB) if real_db_existed_before else None
+
+    _seed_pre_medical_profile_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    assert os.path.exists(REAL_INSTANCE_DB) == real_db_existed_before
+    if real_db_existed_before:
+        assert os.path.getmtime(REAL_INSTANCE_DB) == real_mtime_before
+
+
+def test_medical_profile_check_constraints_reject_invalid_blood_type_after_migration(temp_db_path, monkeypatch):
+    _seed_pre_medical_profile_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    engine = create_engine(f"sqlite:///{temp_db_path}")
+    try:
+        with engine.begin() as conn:
+            with pytest.raises(Exception):
+                conn.execute(text(
+                    "INSERT INTO child_medical_profiles (child_id, blood_type, allergies, conditions, "
+                    "created_at, updated_at) VALUES (1, 'not_a_real_blood_type', '[]', '[]', "
+                    "'2026-01-01 00:00:00', '2026-01-01 00:00:00')"
+                ))
+    finally:
+        engine.dispose()

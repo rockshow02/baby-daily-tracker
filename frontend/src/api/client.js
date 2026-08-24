@@ -506,6 +506,20 @@ export const api = {
   getMedicationAdherence: (childId, period = "7d") =>
     request(`/children/${childId}/medication-schedules/adherence?period=${period}`),
 
+  // Child Medical Profile & Emergency Card (Phase 1) — lihat
+  // backend/docs/MEDICAL_PROFILE.md. ONLINE-ONLY SENGAJA: TIDAK SATU
+  // PUN path di bawah ini pernah masuk OFFLINE_QUEUEABLE_PATHS (lihat
+  // atas) — data medis+kontak darurat lengkap terlalu sensitif buat
+  // antrian offline yang didesain buat mutasi terbatas biasa.
+  getMedicalProfile: (childId) => request(`/children/${childId}/medical-profile`),
+  updateMedicalProfile: (childId, payload) =>
+    request(`/children/${childId}/medical-profile`, { method: "PUT", body: JSON.stringify(payload) }),
+  reviewMedicalProfile: (childId) =>
+    request(`/children/${childId}/medical-profile/review`, { method: "POST", body: JSON.stringify({}) }),
+  previewEmergencyCard: (childId) =>
+    request(`/children/${childId}/emergency-card/preview`, { method: "POST", body: JSON.stringify({}) }),
+  emergencyCardPdfUrl: (childId) => `${BASE_URL}/children/${childId}/emergency-card/pdf`,
+
   // multi-caregiver (Caregiver Roles & Permissions Phase 1 — lihat
   // backend/docs/ROLES_PERMISSIONS.md)
   listCaregivers: (childId) => request(`/children/${childId}/caregivers`),

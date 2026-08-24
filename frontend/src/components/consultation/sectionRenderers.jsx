@@ -11,6 +11,9 @@ import {
 import {
   describeFeedType, describeGender, describeMilestoneType, describeMood, describeVaccinationStatus,
 } from "../../utils/consultationLabels";
+import {
+  describeAllergyType, describeConditionStatus, describeSeverity,
+} from "../../utils/medicalProfile";
 
 /** Tanggal murni ("YYYY-MM-DD") ATAU datetime ISO ("...T...+07:00") berada di dalam [start, end] ("YYYY-MM-DD") -- perbandingan STRING langsung, sah buat format tanggal ISO zero-padded. */
 function isWithinPeriod(dateOrDateTime, period) {
@@ -452,6 +455,100 @@ function NoteSection({ section }) {
   return <p className="text-sm text-ink whitespace-pre-wrap break-words">{text}</p>;
 }
 
+/**
+ * Child Medical Profile & Emergency Card Phase 1 -- section PALING
+ * sensitif, Owner/Editor SAJA (backend menolak 403 buat Viewer, lihat
+ * backend/docs/MEDICAL_PROFILE.md). `section` datang PERSIS dari
+ * utils/emergency_card_report.py:build_emergency_card_summary -- SAMA
+ * PERSIS shape yang dipakai Kartu Darurat berdiri sendiri
+ * (MedicalProfileScreen.jsx), jadi label/format di sini SENGAJA
+ * disamakan biar nggak ada 2 cara beda nampilin data yang sama.
+ */
+function MedicalProfileSection({ section }) {
+  if (!section?.has_profile) {
+    return <EmptySectionState message="Profil medis anak ini belum pernah diisi caregiver." />;
+  }
+  return (
+    <div className="space-y-4">
+      <SummaryGrid rows={[
+        { label: "Golongan darah", value: orDash(section.blood_type_label) },
+      ]} />
+
+      <div>
+        <p className="text-xs text-ink-faint font-mono uppercase tracking-wider mb-2">Alergi</p>
+        {(!section.allergies || section.allergies.length === 0) ? (
+          <EmptySectionState message="Tidak ada alergi tercatat." />
+        ) : (
+          <DetailList>
+            {section.allergies.map((a, i) => (
+              <DetailListItem key={i}>
+                <p className="font-medium">{describeAllergyType(a.type)} · {orDash(a.allergen)}</p>
+                <p className="text-ink-muted text-xs mt-0.5">
+                  {describeSeverity(a.severity)}{a.reaction ? ` · ${a.reaction}` : ""}
+                </p>
+              </DetailListItem>
+            ))}
+          </DetailList>
+        )}
+      </div>
+
+      <div>
+        <p className="text-xs text-ink-faint font-mono uppercase tracking-wider mb-2">Kondisi Medis Penting</p>
+        {(!section.conditions || section.conditions.length === 0) ? (
+          <EmptySectionState message="Tidak ada kondisi medis penting tercatat." />
+        ) : (
+          <DetailList>
+            {section.conditions.map((c, i) => (
+              <DetailListItem key={i}>
+                <p className="font-medium">{orDash(c.condition_name)}</p>
+                <p className="text-ink-muted text-xs mt-0.5">{describeConditionStatus(c.status)}</p>
+              </DetailListItem>
+            ))}
+          </DetailList>
+        )}
+      </div>
+
+      <div>
+        <p className="text-xs text-ink-faint font-mono uppercase tracking-wider mb-2">Obat Rutin Saat Ini</p>
+        {(!section.regular_medications || section.regular_medications.length === 0) ? (
+          <EmptySectionState message="Tidak ada obat rutin aktif tercatat." />
+        ) : (
+          <DetailList>
+            {section.regular_medications.map((m, i) => (
+              <DetailListItem key={i}>
+                <p className="font-medium">{orDash(m.medication_name)}</p>
+                <p className="text-ink-muted text-xs mt-0.5">{orDash(m.dose)}</p>
+              </DetailListItem>
+            ))}
+          </DetailList>
+        )}
+      </div>
+
+      <SummaryGrid rows={[
+        { label: "Dokter utama", value: orDash(section.primary_doctor_name) },
+        { label: "Klinik/RS utama", value: orDash(section.primary_clinic_name) },
+        { label: "Telepon klinik", value: orDash(section.primary_clinic_phone) },
+        { label: "Kontak darurat", value: orDash(section.emergency_contact_name) },
+        { label: "Hubungan", value: orDash(section.emergency_contact_relationship) },
+        { label: "Telepon kontak darurat", value: orDash(section.emergency_contact_phone) },
+      ]} />
+
+      {section.emergency_instructions && (
+        <div>
+          <p className="text-xs text-ink-faint font-mono uppercase tracking-wider mb-2">Instruksi Darurat</p>
+          <p className="text-sm text-ink whitespace-pre-wrap break-words">{section.emergency_instructions}</p>
+        </div>
+      )}
+
+      <p className="text-ink-faint text-xs">
+        {section.last_reviewed_at
+          ? `Terakhir diperiksa ulang: ${formatDateTimeWIB(section.last_reviewed_at)}${section.last_reviewed_by_name ? ` oleh ${section.last_reviewed_by_name}` : ""}`
+          : "Belum pernah ditandai diperiksa ulang."}
+      </p>
+    </div>
+  );
+}
+
 function UnavailableSection() {
   return <EmptySectionState message="Bagian ini belum didukung pada versi aplikasi ini." />;
 }
@@ -470,6 +567,7 @@ export const SECTION_RENDERERS = {
   vaccination: VaccinationSection,
   milestones: MilestonesSection,
   doctor_visits: DoctorVisitsSection,
+  medical_profile: MedicalProfileSection,
   insights: InsightsSection,
   questions: QuestionsSection,
   note: NoteSection,

@@ -503,6 +503,59 @@ describe("ConsultationPreview — previous doctor visits (sensitive)", () => {
   });
 });
 
+describe("ConsultationPreview — medical profile (sensitive, Owner/Editor only)", () => {
+  it("shows a human-readable empty state when the child has no profile yet", () => {
+    render(<ConsultationPreview report={makeReport({
+      medical_profile: { has_profile: false },
+    })} />);
+    expect(screen.getByText("Profil medis anak ini belum pernah diisi caregiver.")).toBeInTheDocument();
+  });
+
+  it("shows blood type, allergies, conditions, medications, and contacts", () => {
+    render(<ConsultationPreview report={makeReport({
+      medical_profile: {
+        has_profile: true,
+        blood_type_label: "O+",
+        allergies: [{ type: "drug", allergen: "Amoxicillin", reaction: "Ruam", severity: "severe" }],
+        conditions: [{ condition_name: "Asma", status: "active" }],
+        regular_medications: [{ medication_name: "Ventolin", dose: "1 puff" }],
+        primary_doctor_name: "dr. Sarah",
+        primary_clinic_name: "Klinik Sehat",
+        primary_clinic_phone: "021-555",
+        emergency_contact_name: "Budi",
+        emergency_contact_relationship: "Ayah",
+        emergency_contact_phone: "0812",
+        emergency_instructions: null,
+        last_reviewed_at: null,
+        last_reviewed_by_name: null,
+      },
+    })} />);
+    expect(screen.getByText("O+")).toBeInTheDocument();
+    expect(screen.getByText(/Amoxicillin/)).toBeInTheDocument();
+    expect(screen.getByText("Asma")).toBeInTheDocument();
+    expect(screen.getByText("Ventolin")).toBeInTheDocument();
+    expect(screen.getByText("dr. Sarah")).toBeInTheDocument();
+    expect(screen.getByText("Budi")).toBeInTheDocument();
+  });
+
+  it("never renders raw enum codes for allergy type/severity or condition status", () => {
+    render(<ConsultationPreview report={makeReport({
+      medical_profile: {
+        has_profile: true, blood_type_label: "Belum dicatat",
+        allergies: [{ type: "drug", allergen: "Amoxicillin", severity: "severe" }],
+        conditions: [{ condition_name: "Asma", status: "active" }],
+        regular_medications: [], primary_doctor_name: null, primary_clinic_name: null,
+        primary_clinic_phone: null, emergency_contact_name: null, emergency_contact_relationship: null,
+        emergency_contact_phone: null, emergency_instructions: null, last_reviewed_at: null, last_reviewed_by_name: null,
+      },
+    })} />);
+    const text = document.body.textContent;
+    expect(text).not.toMatch(/\bdrug\b/);
+    expect(text).not.toMatch(/\bsevere\b/);
+    expect(text).not.toMatch(/\bactive\b/);
+  });
+});
+
 describe("ConsultationPreview — Smart Insights", () => {
   it("shows the backend-provided safe description", () => {
     render(<ConsultationPreview report={makeReport({

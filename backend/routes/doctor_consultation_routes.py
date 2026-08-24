@@ -31,6 +31,7 @@ from utils.consultation_pdf import render_consultation_pdf
 from utils.consultation_report import (
     ConsultationValidationError,
     MAX_CONSULTATION_BODY_BYTES,
+    SECTION_MEDICAL_PROFILE,
     SENSITIVE_SECTIONS,
     build_consultation_report,
     resolve_consultation_period,
@@ -63,6 +64,13 @@ def _capabilities(role):
         "can_export": write,
         "can_add_private_notes": write,
         "can_record_visit": write,
+        # Child Medical Profile & Emergency Card Phase 1 -- section
+        # `medical_profile` SENGAJA lebih ketat dari section sensitif
+        # lain (illness/medication/doctor_visits, yang boleh Viewer
+        # baca lewat preview) -- golongan darah/alergi/kontak darurat
+        # HANYA Owner/Editor, Viewer ditolak `403` kalau menyertakannya
+        # (lihat _parse_request_payload di bawah).
+        "can_include_medical_profile": write,
     }
 
 
@@ -172,6 +180,11 @@ def _parse_request_payload(role, capabilities):
     if wants_private_text and not capabilities["can_add_private_notes"]:
         return None, None, None, None, (
             jsonify({"error": "Peran Anda tidak bisa menambahkan pertanyaan/catatan tambahan."}), 403
+        )
+
+    if SECTION_MEDICAL_PROFILE in sections and not capabilities["can_include_medical_profile"]:
+        return None, None, None, None, (
+            jsonify({"error": "Peran Anda tidak bisa menyertakan bagian Profil Medis & Kartu Darurat."}), 403
         )
 
     return period, sections, questions_text, note_text, None

@@ -111,6 +111,10 @@ def test_owner_can_preview_and_export(client, monkeypatch):
     body = preview.get_json()
     assert body["capabilities"] == {
         "can_preview": True, "can_export": True, "can_add_private_notes": True, "can_record_visit": True,
+        # Child Medical Profile & Emergency Card Phase 1 -- kapabilitas
+        # baru, Owner/Editor sama-sama True (lihat test_medical_profile.py
+        # buat kontrak lengkap Viewer=False-nya).
+        "can_include_medical_profile": True,
     }
     pdf = _pdf(client, user["token"], child["id"])
     assert pdf.status_code == 200

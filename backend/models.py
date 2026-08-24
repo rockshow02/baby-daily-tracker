@@ -1192,3 +1192,97 @@ class MedicationDoseAction(db.Model):
             "acted_by_name": self.actor.name if self.actor else None,
             "medication_log_id": self.medication_log_id,
         }
+
+
+class ChildMedicalProfile(db.Model):
+    """
+    Child Medical Profile & Emergency Card — Phase 1 (lihat
+    backend/docs/MEDICAL_PROFILE.md buat kontrak lengkapnya). SATU baris
+    per anak (`child_id` UNIQUE) — snapshot profil medis kritis (bukan
+    riwayat/log kejadian kayak 12 tipe record lain di app ini), jadi
+    modelnya PUT/snapshot penuh, bukan CRUD per-entri.
+
+    SEMUA field di sini diperlakukan sebagai data medis/kontak SANGAT
+    SENSITIF -- TIDAK PERNAH masuk audit trail apa adanya (lihat
+    utils/audit.py), TIDAK PERNAH di-cache di localStorage/IndexedDB
+    frontend (lihat "Kebijakan offline" di dokumen), dan TIDAK PERNAH
+    memuat nomor BPJS/asuransi/identitas resmi/alamat (SENGAJA
+    dikecualikan Phase 1 -- risiko privasi tidak sepadan buat ringkasan
+    darurat).
+
+    `allergies`/`conditions` JSON -- list of dict TERBATAS & TERVALIDASI
+    PENUH di layer server (utils/medical_profile_engine.py) SEBELUM
+    pernah disimpan di sini -- TIDAK PERNAH dipercaya sebagai JSON bebas
+    dari klien. Satu field `allergies` (bukan drug_allergies/
+    other_allergies terpisah) dengan `type: drug|food|other` per entri --
+    UI mengelompokkan tampilannya per tipe dari field yang SAMA, bukan 2
+    kolom yang isinya nyaris identik strukturnya (desain paling kecil
+    yang tetap gampang divalidasi/diaudit/di-migrasi, sesuai requirement
+    "smallest normalized design").
+
+    `regular_medication_summary` SENGAJA TIDAK punya kolom di sini SAMA
+    SEKALI -- "ringkasan obat rutin" di Emergency Card DIDERIVASI
+    langsung dari `MedicationSchedule` yang aktif milik anak ini saat
+    kartu dibuat (lihat utils/emergency_card_report.py), BUKAN disalin
+    ke tabel/kolom kedua -- requirement eksplisit "do not duplicate
+    current medication logs or medication schedules... do not copy
+    mutable medication history into another table".
+    """
+    __tablename__ = "child_medical_profiles"
+    __table_args__ = (
+        db.CheckConstraint(
+            "blood_type IN ('A+','A-','B+','B-','AB+','AB-','O+','O-','unknown')",
+            name="ck_child_medical_profiles_blood_type",
+        ),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, unique=True, index=True)
+
+    blood_type = db.Column(db.String(10), nullable=True)  # allowlist -- lihat CHECK constraint + utils/medical_profile_engine.py
+    # List of {"type": "drug"|"food"|"other", "allergen": str, "reaction": str|None,
+    #          "severity": "mild"|"moderate"|"severe"|"unknown"|None, "confirmed_by_professional": bool|None}
+    allergies = db.Column(db.JSON, nullable=False, default=list)
+    # List of {"condition_name": str, "diagnosed_year": int|None, "status": "active"|"resolved"|"unknown"|None, "note": str|None}
+    conditions = db.Column(db.JSON, nullable=False, default=list)
+
+    primary_doctor_name = db.Column(db.String(100), nullable=True)
+    primary_clinic_name = db.Column(db.String(150), nullable=True)
+    primary_clinic_phone = db.Column(db.String(30), nullable=True)
+
+    emergency_contact_name = db.Column(db.String(100), nullable=True)
+    emergency_contact_relationship = db.Column(db.String(50), nullable=True)
+    emergency_contact_phone = db.Column(db.String(30), nullable=True)
+
+    emergency_instructions = db.Column(db.Text, nullable=True)
+
+    last_reviewed_at = db.Column(db.DateTime, nullable=True)
+    last_reviewed_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    child = db.relationship(
+        "Child", backref=db.backref("medical_profile", uselist=False, cascade="all, delete-orphan")
+    )
+    last_reviewed_by = db.relationship("User", foreign_keys=[last_reviewed_by_user_id])
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "child_id": self.child_id,
+            "blood_type": self.blood_type,
+            "allergies": list(self.allergies or []),
+            "conditions": list(self.conditions or []),
+            "primary_doctor_name": self.primary_doctor_name,
+            "primary_clinic_name": self.primary_clinic_name,
+            "primary_clinic_phone": self.primary_clinic_phone,
+            "emergency_contact_name": self.emergency_contact_name,
+            "emergency_contact_relationship": self.emergency_contact_relationship,
+            "emergency_contact_phone": self.emergency_contact_phone,
+            "emergency_instructions": self.emergency_instructions,
+            "last_reviewed_at": (self.last_reviewed_at.isoformat() + "+07:00") if self.last_reviewed_at else None,
+            "last_reviewed_by_name": self.last_reviewed_by.name if self.last_reviewed_by else None,
+            "created_at": self.created_at.isoformat() + "Z",
+            "updated_at": self.updated_at.isoformat() + "Z",
+        }

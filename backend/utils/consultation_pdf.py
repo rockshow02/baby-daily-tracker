@@ -19,28 +19,39 @@ questions/additional_note) WAJIB lewat `_safe()` (html.escape) SEBELUM
 dibungkus Paragraph di mana pun di file ini -- mencegah PDF-markup
 injection lewat data yang caregiver ketik sendiri.
 """
-import html
 import io
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
-from reportlab.platypus import (
-    KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
-)
+from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer
 
 from utils.consultation_report import (
     SECTION_ACTIVITY_MOOD, SECTION_CHILD_SUMMARY, SECTION_DIAPER, SECTION_DOCTOR_VISITS,
-    SECTION_FEEDING, SECTION_GROWTH, SECTION_ILLNESS, SECTION_INSIGHTS, SECTION_MEDICATION,
-    SECTION_MILESTONES, SECTION_NOTE, SECTION_PUMPING, SECTION_QUESTIONS, SECTION_SLEEP,
-    SECTION_TEMPERATURE, SECTION_VACCINATION,
+    SECTION_FEEDING, SECTION_GROWTH, SECTION_ILLNESS, SECTION_INSIGHTS, SECTION_MEDICAL_PROFILE,
+    SECTION_MEDICATION, SECTION_MILESTONES, SECTION_NOTE, SECTION_PUMPING, SECTION_QUESTIONS,
+    SECTION_SLEEP, SECTION_TEMPERATURE, SECTION_VACCINATION,
 )
-
-COLOR_ACCENT = colors.HexColor("#FFA733")
-COLOR_MUTED = colors.HexColor("#C7BAA9")
-COLOR_INK = colors.HexColor("#4A3F35")
-COLOR_HEADER_BG = colors.HexColor("#FFF1DE")
+# REUSE penuh -- lihat docstring utils/pdf_common.py. Nama `_safe`/`_Styles`/
+# dkk di modul INI (dengan underscore) dipertahankan APA ADANYA lewat
+# alias import, biar test yang sudah ada (tests/test_consultation_pdf.py)
+# TIDAK PERNAH perlu berubah -- CUMA lokasi definisinya yang pindah.
+from utils.pdf_common import (
+    BaseStyles as _Styles,
+    COLOR_HEADER_BG,
+    COLOR_INK,
+    COLOR_MUTED,
+    entries_table as _entries_table,
+    fmt_num as _fmt_num,
+    kv_table as _kv_table,
+    safe as _safe,
+    safe_multiline as _safe_multiline,
+)
+# Section `medical_profile` (Child Medical Profile & Emergency Card
+# Phase 1) me-render PERSIS flowable yang SAMA dipakai kartu darurat
+# berdiri sendiri -- SATU fungsi render, dua pemanggil, lihat docstring
+# utils/emergency_card_pdf.py.
+from utils.emergency_card_pdf import render_medical_profile_flowables
 
 SECTION_LABELS = {
     SECTION_CHILD_SUMMARY: "Ringkasan Anak",
@@ -56,80 +67,13 @@ SECTION_LABELS = {
     SECTION_VACCINATION: "Status Vaksinasi",
     SECTION_MILESTONES: "Tumbuh Kembang",
     SECTION_DOCTOR_VISITS: "Kunjungan Dokter Sebelumnya",
+    SECTION_MEDICAL_PROFILE: "Profil Medis & Kartu Darurat",
     SECTION_INSIGHTS: "Ringkasan Smart Insights",
     SECTION_QUESTIONS: "Pertanyaan untuk Dokter",
     SECTION_NOTE: "Catatan Tambahan Caregiver",
 }
 
 MOOD_LABELS = {"ceria": "Ceria", "baik": "Baik", "sedih": "Sedih", "menangis": "Menangis"}
-
-
-def _safe(value):
-    """Escape teks sumber-caregiver SEBELUM masuk Paragraph -- lihat docstring modul. `None`/kosong -> '-'."""
-    if value is None or value == "":
-        return "-"
-    return html.escape(str(value), quote=False)
-
-
-def _safe_multiline(value):
-    """Sama seperti `_safe`, TAPI newline (dari questions/additional_note yang sudah dinormalisasi) diubah jadi `<br/>` SETELAH escape -- tag ini yang kita sisipkan sendiri, bukan dari input user, jadi aman."""
-    if value is None or value == "":
-        return "-"
-    return html.escape(str(value), quote=False).replace("\n", "<br/>")
-
-
-def _fmt_num(value, suffix=""):
-    if value is None:
-        return "-"
-    return f"{value}{suffix}"
-
-
-class _Styles:
-    def __init__(self):
-        base = getSampleStyleSheet()
-        self.title = ParagraphStyle("ConsultTitle", parent=base["Title"], fontSize=18, spaceAfter=2)
-        self.subtitle = ParagraphStyle("ConsultSubtitle", parent=base["Normal"], fontSize=10, textColor=colors.grey)
-        self.h2 = ParagraphStyle(
-            "ConsultH2", parent=base["Heading2"], fontSize=13, spaceBefore=14, spaceAfter=6, textColor=COLOR_INK
-        )
-        self.normal = ParagraphStyle("ConsultNormal", parent=base["Normal"], fontSize=9, leading=12)
-        self.cell = ParagraphStyle("ConsultCell", parent=base["Normal"], fontSize=8, leading=10)
-        self.small = ParagraphStyle("ConsultSmall", parent=base["Normal"], fontSize=8, textColor=colors.grey, leading=11)
-        self.disclaimer = ParagraphStyle(
-            "ConsultDisclaimer", parent=base["Normal"], fontSize=9, leading=12, textColor=COLOR_INK
-        )
-
-
-def _kv_table(rows, styles, col_widths=(5.5 * cm, 10.5 * cm)):
-    """Tabel 2 kolom label/nilai -- dipakai buat semua section ringkasan (bukan daftar baris)."""
-    data = [[Paragraph(f"<b>{_safe(k)}</b>", styles.cell), Paragraph(_safe(v), styles.cell)] for k, v in rows]
-    t = Table(data, colWidths=list(col_widths))
-    t.setStyle(TableStyle([
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("GRID", (0, 0), (-1, -1), 0.4, COLOR_MUTED),
-        ("BACKGROUND", (0, 0), (0, -1), COLOR_HEADER_BG),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-    ]))
-    return t
-
-
-def _entries_table(header, rows, col_widths, styles):
-    """Tabel banyak baris (illness/medication/doctor_visits/growth/milestones/vaksinasi) -- SEMUA sel teks bebas lewat Paragraph (auto-wrap, nggak pernah clipped), header berulang tiap halaman baru (`repeatRows=1`)."""
-    data = [[Paragraph(f"<b>{_safe(h)}</b>", styles.cell) for h in header]]
-    for row in rows:
-        data.append([Paragraph(_safe(cell), styles.cell) for cell in row])
-    t = Table(data, colWidths=col_widths, repeatRows=1)
-    t.setStyle(TableStyle([
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("BACKGROUND", (0, 0), (-1, 0), COLOR_HEADER_BG),
-        ("GRID", (0, 0), (-1, -1), 0.4, COLOR_MUTED),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-    ]))
-    return t
 
 
 def _truncation_note(section, styles):
@@ -402,6 +346,11 @@ def _render_note(section, styles):
     return [Paragraph(_safe_multiline(section["text"]) or "-", styles.normal)]
 
 
+def _render_medical_profile(section, styles):
+    """REUSE penuh -- lihat docstring utils/emergency_card_pdf.py. Judul section-nya SENDIRI sudah ditambahkan pemanggil (lihat render_consultation_pdf di bawah), jadi `heading` TIDAK dipakai di sini."""
+    return render_medical_profile_flowables(section, styles)
+
+
 _SECTION_RENDERERS = {
     SECTION_CHILD_SUMMARY: _render_child_summary,
     SECTION_FEEDING: _render_feeding,
@@ -416,6 +365,7 @@ _SECTION_RENDERERS = {
     SECTION_VACCINATION: _render_vaccination,
     SECTION_MILESTONES: _render_milestones,
     SECTION_DOCTOR_VISITS: _render_doctor_visits,
+    SECTION_MEDICAL_PROFILE: _render_medical_profile,
     SECTION_INSIGHTS: _render_insights,
     SECTION_QUESTIONS: _render_questions,
     SECTION_NOTE: _render_note,

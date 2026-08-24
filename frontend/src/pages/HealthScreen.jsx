@@ -5,6 +5,7 @@ import SteppedDateTimeInput from "../components/SteppedDateTimeInput";
 import RelatedArticles from "../components/RelatedArticles";
 import DoctorConsultationScreen from "../components/DoctorConsultationScreen";
 import MedicationScheduleScreen from "./MedicationScheduleScreen";
+import MedicalProfileScreen from "./MedicalProfileScreen";
 import { todayWIB } from "../utils/date";
 
 const SUB_TABS = [
@@ -42,6 +43,7 @@ export default function HealthScreen({ child, currentUserId }) {
   const [editingKind, setEditingKind] = useState(null);
   const [showConsultation, setShowConsultation] = useState(false);
   const [showMedicationSchedule, setShowMedicationSchedule] = useState(false);
+  const [showMedicalProfile, setShowMedicalProfile] = useState(false);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -118,6 +120,13 @@ export default function HealthScreen({ child, currentUserId }) {
                 className="w-full py-2.5 mb-1 rounded-xl2 border border-feed text-feed text-sm font-semibold"
               >
                 🩺 Siapkan Konsultasi
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowMedicalProfile(true)}
+                className="w-full py-2.5 mb-1 rounded-xl2 border border-feed text-feed text-sm font-semibold"
+              >
+                🩺 Profil Medis & Kartu Darurat
               </button>
               {visits.length === 0 && <p className="text-ink-faint text-sm">Belum ada catatan kunjungan.</p>}
               {visits.map((v) => (
@@ -359,6 +368,14 @@ export default function HealthScreen({ child, currentUserId }) {
             setShowMedicationSchedule(false);
             loadAll();
           }}
+        />
+      )}
+
+      {showMedicalProfile && (
+        <MedicalProfileScreen
+          child={child}
+          currentUserId={currentUserId}
+          onClose={() => setShowMedicalProfile(false)}
         />
       )}
     </div>

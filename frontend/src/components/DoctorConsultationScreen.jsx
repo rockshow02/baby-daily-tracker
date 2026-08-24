@@ -161,6 +161,28 @@ export default function DoctorConsultationScreen({ child, onRecordVisit, onClose
   const canAddNotes = knownCanAddNotes;
   const canExport = activeSnapshot?.report?.capabilities?.can_export ?? false;
   const canRecordVisit = activeSnapshot?.report?.capabilities?.can_record_visit ?? false;
+  // Child Medical Profile & Emergency Card Phase 1 -- section INI
+  // lebih ketat dari section sensitif lain (Owner/Editor SAJA, lihat
+  // backend/docs/MEDICAL_PROFILE.md), jadi checkbox-nya butuh gating
+  // TAMBAHAN sendiri, SAMA PERSIS pola least-privilege `canAddNotes` di
+  // atas -- `false` sampai preview PERTAMA yang berhasil mengonfirmasi.
+  const knownCanIncludeMedicalProfile = activeSnapshot?.report?.capabilities?.can_include_medical_profile ?? false;
+
+  // Preview yang BERHASIL tapi ternyata perannya nggak boleh menyertakan
+  // `medical_profile` (mis. Viewer) -- lepas centangnya OTOMATIS, biar
+  // nggak nyangkut ke-checked-tapi-disabled selamanya (yang bakal bikin
+  // preview/export berikutnya keblok terus tanpa jalan keluar dari UI).
+  useEffect(() => {
+    if (activeSnapshot && !knownCanIncludeMedicalProfile) {
+      setSelectedSections((prev) => {
+        if (!prev.has("medical_profile")) return prev;
+        const next = new Set(prev);
+        next.delete("medical_profile");
+        return next;
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSnapshot, knownCanIncludeMedicalProfile]);
 
   // Ganti anak (mis. caregiver switch child TANPA komponen ini pernah
   // unmount) -- HAPUS snapshot/kapabilitas/teks transien LAMA seketika,
@@ -367,6 +389,13 @@ export default function DoctorConsultationScreen({ child, onRecordVisit, onClose
           <div className="space-y-1.5">
             {SECTION_DEFS.map((s) => {
               const inputId = `consult-section-${s.code}`;
+              // `medical_profile` butuh kapabilitas TAMBAHAN (Owner/Editor
+              // saja) -- disabled begitu preview yang sudah berjalan
+              // mengonfirmasi peran ini nggak boleh (lihat
+              // knownCanIncludeMedicalProfile di atas), TIDAK PERNAH
+              // sebelum ada konfirmasi (least-privilege TAPI checkbox-nya
+              // sendiri tetap boleh dicoba centang di percobaan PERTAMA).
+              const medicalProfileBlocked = s.code === "medical_profile" && activeSnapshot && !knownCanIncludeMedicalProfile;
               return (
                 <div key={s.code} className="flex items-center gap-2">
                   <input
@@ -374,11 +403,15 @@ export default function DoctorConsultationScreen({ child, onRecordVisit, onClose
                     type="checkbox"
                     checked={selectedSections.has(s.code)}
                     onChange={() => toggleSection(s.code)}
+                    disabled={medicalProfileBlocked}
                     className="h-4 w-4"
                   />
-                  <label htmlFor={inputId} className="text-sm text-ink flex-1">
+                  <label htmlFor={inputId} className={`text-sm flex-1 ${medicalProfileBlocked ? "text-ink-faint" : "text-ink"}`}>
                     {s.label}
                   </label>
+                  {medicalProfileBlocked && (
+                    <span className="text-[10px] text-ink-faint">Peran Anda tidak bisa mengakses ini</span>
+                  )}
                   {s.sensitive && (
                     <span className="text-[10px] font-medium text-warn bg-warn/10 border border-warn/30 rounded-full px-2 py-0.5">
                       Sensitif
