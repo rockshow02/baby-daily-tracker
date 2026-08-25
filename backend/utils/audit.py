@@ -94,6 +94,16 @@ SAFE_CHANGED_FIELDS = {
     # (SAFE_CHANGED_FIELDS kosong tetap valid, beda dari "entity_type
     # nggak terdaftar sama sekali").
     "medical_profile": set(),
+    # Caregiver Handover Summary Phase 1 (lihat
+    # backend/docs/CAREGIVER_HANDOVER.md) — SATU-SATUNYA field mutable
+    # lewat PUT adalah `note` (catatan serah-terima bebas-teks), yang
+    # SENGAJA diperlakukan privat (lihat PRIVATE_CHANGED_FIELDS di
+    # bawah) — set KOSONG di sini SAMA PERSIS pola `medical_profile` di
+    # atas, CUMA supaya entity_type-nya lolos allowlist
+    # record_audit_event() (bukan berarti "tidak ada field yang
+    # berubah", field-nya TETAP ada, cuma tidak pernah "aman" disebut
+    # namanya).
+    "caregiver_handover": set(),
 }
 
 PRIVATE_CHANGED_FIELDS = {
@@ -137,6 +147,10 @@ PRIVATE_CHANGED_FIELDS = {
         "emergency_contact_name", "emergency_contact_relationship", "emergency_contact_phone",
         "emergency_instructions",
     },
+    # Caregiver Handover Summary Phase 1 -- `note` bebas-teks (bisa aja
+    # berisi rincian perawatan/medis spesifik yang caregiver ketik
+    # sendiri, sama sensitifnya kayak `notes` di 12 tipe log lain).
+    "caregiver_handover": {"note"},
 }
 
 # Urutan TETAP (bukan set) — dipakai buat pesan error yang deterministik
@@ -250,6 +264,23 @@ MEDICAL_PROFILE_REVIEWED_ENTITY_TYPE = "medical_profile_reviewed"
 # kejadian "PDF ini pernah dibuat, oleh siapa, kapan".
 EMERGENCY_CARD_PDF_EXPORT_ENTITY_TYPE = "emergency_card_pdf_export"
 
+# --- Caregiver Handover Summary — Phase 1 (lihat
+# backend/docs/CAREGIVER_HANDOVER.md) ---
+#
+# "handover dibuat" DAN "catatan diubah" pakai entity_type
+# "caregiver_handover" biasa di atas (action='create'/'update', lewat
+# SAFE/PRIVATE_CHANGED_FIELDS seperti 13 tipe record lain). "ditutup"
+# dan "diakui/dibaca" adalah KEJADIAN terpisah (pola SAMA PERSIS
+# MEDICAL_PROFILE_REVIEWED_ENTITY_TYPE di atas -- bukan perubahan NILAI
+# field apa pun), `action` SELALU 'create', `changed_fields` SELALU
+# None. `entity_id` = CaregiverHandover.id (buat closed) ATAU
+# CaregiverHandoverAcknowledgement.id (buat acknowledged) -- "id record
+# aslinya", pola yang sama kayak SELURUH entity_type lain di modul ini.
+# TIDAK PERNAH menyimpan isi ringkasan (feeding/tidur/obat/dst) ATAUPUN
+# isi `note` di baris audit manapun di sini.
+CAREGIVER_HANDOVER_CLOSED_ENTITY_TYPE = "caregiver_handover_closed"
+CAREGIVER_HANDOVER_ACKNOWLEDGED_ENTITY_TYPE = "caregiver_handover_acknowledged"
+
 # Entity_type yang SENGAJA nggak punya entry SAFE_CHANGED_FIELDS sama
 # sekali — `changed_fields` buat SEMUANYA SELALU dipaksa None (lihat
 # record_audit_event di bawah), TIDAK PEDULI apa pun yang dikirim
@@ -263,6 +294,8 @@ NO_FIELD_DIFF_ENTITY_TYPES = (
     MEDICATION_DOSE_SKIPPED_ENTITY_TYPE,
     MEDICAL_PROFILE_REVIEWED_ENTITY_TYPE,
     EMERGENCY_CARD_PDF_EXPORT_ENTITY_TYPE,
+    CAREGIVER_HANDOVER_CLOSED_ENTITY_TYPE,
+    CAREGIVER_HANDOVER_ACKNOWLEDGED_ENTITY_TYPE,
 )
 
 # Dipakai endpoint baca (routes/audit_routes.py) buat validasi query

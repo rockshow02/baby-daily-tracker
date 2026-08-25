@@ -103,13 +103,26 @@ const { apiMock, currentUserIdBox } = vi.hoisted(() => ({
     exportPdfUrl: () => "",
     exportJsonUrl: () => "",
     downloadAuthenticated: vi.fn(),
+    // Caregiver Handover Summary Phase 1 -- CaregiverHandoverScreen
+    // dirender sebagai overlay dari Dashboard, mock-nya harus ada di
+    // sini juga biar overlay itu (kalau dibuka lewat tombol entry-point)
+    // nggak manggil fungsi yang beneran nggak ke-mock.
+    getCaregiverHandover: vi.fn(),
+    createCaregiverHandover: vi.fn(),
+    updateCaregiverHandover: vi.fn(),
+    acknowledgeCaregiverHandover: vi.fn(),
+    closeCaregiverHandover: vi.fn(),
   },
 }));
 
-vi.mock("../api/client", () => ({
-  api: apiMock,
-  getCurrentUserId: () => currentUserIdBox.value,
-}));
+vi.mock("../api/client", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    api: apiMock,
+    getCurrentUserId: () => currentUserIdBox.value,
+  };
+});
 
 const testChild = {
   id: 1,
@@ -145,6 +158,10 @@ function resetApiMock() {
   apiMock.listActivity.mockResolvedValue([]);
   apiMock.listMedication.mockResolvedValue([]);
   apiMock.getStats.mockResolvedValue({ days: [] });
+  apiMock.getCaregiverHandover.mockResolvedValue({
+    handover: null, summary: null, acknowledgements: [],
+    capabilities: { can_view: true, can_create: true, can_edit: false, can_close: false, can_acknowledge: false },
+  });
 }
 
 async function renderDashboardReady() {
@@ -854,5 +871,31 @@ describe("Dashboard — Caregiver Roles & Permissions (Phase 1)", () => {
 
     // modal TETAP kebuka (submit gagal) — bukan logout/redirect/crash
     expect(await screen.findByTestId("quick-log-sheet")).toBeInTheDocument();
+  });
+});
+
+describe("Dashboard — Caregiver Handover entry point", () => {
+  it("shows the '🤝 Serah Terima Pengasuh' entry point in the header, role-independent", async () => {
+    await renderDashboardReady();
+    expect(screen.getByRole("button", { name: /Serah Terima Pengasuh/ })).toBeInTheDocument();
+  });
+
+  it("opens the CaregiverHandoverScreen overlay without adding a new top-level nav tab", async () => {
+    await renderDashboardReady();
+    expect(apiMock.getCaregiverHandover).not.toHaveBeenCalled();
+
+    screen.getByRole("button", { name: /Serah Terima Pengasuh/ }).click();
+
+    await waitFor(() => expect(apiMock.getCaregiverHandover).toHaveBeenCalledWith(testChild.id));
+    expect(await screen.findByRole("heading", { name: /Serah Terima Pengasuh/ })).toBeInTheDocument();
+  });
+
+  it("closing the overlay returns to the normal dashboard view", async () => {
+    await renderDashboardReady();
+    screen.getByRole("button", { name: /Serah Terima Pengasuh/ }).click();
+    await screen.findByRole("heading", { name: /Serah Terima Pengasuh/ });
+
+    screen.getByLabelText("Tutup").click();
+    await waitFor(() => expect(screen.queryByRole("heading", { name: /Serah Terima Pengasuh/ })).not.toBeInTheDocument());
   });
 });

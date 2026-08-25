@@ -103,6 +103,7 @@ def create_app(config_overrides=None):
     from routes.medication_schedule_routes import medication_schedule_bp
     from routes.medical_profile_routes import medical_profile_bp
     from routes.doctor_consultation_routes import doctor_consultation_bp
+    from routes.caregiver_handover_routes import caregiver_handover_bp
 
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(children_bp, url_prefix="/api")
@@ -122,6 +123,7 @@ def create_app(config_overrides=None):
     app.register_blueprint(medication_schedule_bp, url_prefix="/api")
     app.register_blueprint(medical_profile_bp, url_prefix="/api")
     app.register_blueprint(doctor_consultation_bp, url_prefix="/api")
+    app.register_blueprint(caregiver_handover_bp, url_prefix="/api")
 
     with app.app_context():
         db.create_all()

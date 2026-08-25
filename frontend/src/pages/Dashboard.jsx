@@ -18,6 +18,7 @@ import SwipeableHistoryItem from "../components/SwipeableHistoryItem";
 import SmartInsightsBell from "../components/SmartInsightsBell";
 import MotorActivityCard from "../components/MotorActivityCard";
 import DashboardReminderSummary from "../components/DashboardReminderSummary";
+import CaregiverHandoverScreen from "./CaregiverHandoverScreen";
 import { weeklyAverageExcludingToday } from "../utils/insights";
 import { todayWIB, toWIBDateStr, timePeriodLabel } from "../utils/date";
 import { canWrite as canWriteRole, canDeleteRecord } from "../utils/roles";
@@ -104,6 +105,7 @@ export default function Dashboard({ child, onOpenProfile, reminderMonitor, onOpe
   const [sheetType, setSheetType] = useState(null); // 'feeding' | 'sleep' | 'diaper' | 'pumping' | 'stroll' | 'bathing' | 'vitamin' | null
   const [editingItem, setEditingItem] = useState(null); // item riwayat yang lagi diedit, atau null buat catat baru
   const [showMoreMenu, setShowMoreMenu] = useState(false);
+  const [showCaregiverHandover, setShowCaregiverHandover] = useState(false);
   const [loading, setLoading] = useState(true);
   const [weeklyStats, setWeeklyStats] = useState(null);
 
@@ -626,6 +628,13 @@ export default function Dashboard({ child, onOpenProfile, reminderMonitor, onOpe
           >
             💾 Backup data (JSON)
           </button>
+          <button
+            type="button"
+            onClick={() => setShowCaregiverHandover(true)}
+            className="inline-flex items-center gap-1.5 text-xs text-ink-muted"
+          >
+            🤝 Serah Terima Pengasuh
+          </button>
         </div>
       </header>
 
@@ -1010,6 +1019,14 @@ export default function Dashboard({ child, onOpenProfile, reminderMonitor, onOpe
               ? () => handleDelete(editingItem.kind, editingItem.id)
               : undefined
           }
+        />
+      )}
+
+      {showCaregiverHandover && (
+        <CaregiverHandoverScreen
+          child={child}
+          currentUserId={currentUserId}
+          onClose={() => setShowCaregiverHandover(false)}
         />
       )}
     </div>

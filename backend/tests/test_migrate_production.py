@@ -1134,3 +1134,196 @@ def test_medical_profile_check_constraints_reject_invalid_blood_type_after_migra
                 ))
     finally:
         engine.dispose()
+
+
+# --------------------------------------------------------------------------
+# Caregiver Handover Summary — Phase 1 (lihat
+# backend/docs/CAREGIVER_HANDOVER.md). 2 tabel baru (caregiver_handovers,
+# caregiver_handover_acknowledgements), SAMA PERSIS pola
+# medication_schedules/reminders di atas -- TIDAK ADA entry
+# COLUMNS_TO_ENSURE baru buat ini, db.create_all() di ujung migrate()
+# yang bikin kedua tabel ini dari nol (TERMASUK partial unique index
+# "1 handover terbuka per anak" -- SQLite mendukung `CREATE UNIQUE INDEX
+# ... WHERE status = 'open'` APA ADANYA lewat db.create_all(), TIDAK
+# PERNAH butuh ALTER TABLE/DDL manual).
+# --------------------------------------------------------------------------
+
+
+def _seed_pre_caregiver_handover_schema(path):
+    """Simulasi database production SEBELUM fitur ini di-deploy -- semua tabel KECUALI 2 tabel handover, diisi data 'lama'."""
+    engine = create_engine(f"sqlite:///{path}")
+    tables_to_create = [
+        t for t in db.metadata.sorted_tables
+        if t.name not in ("caregiver_handovers", "caregiver_handover_acknowledgements")
+    ]
+    db.metadata.create_all(bind=engine, tables=tables_to_create)
+
+    with engine.begin() as conn:
+        conn.execute(
+            db.metadata.tables["users"].insert(),
+            {
+                "name": "Legacy User", "email": "legacy-handover@example.com",
+                "password_hash": "not-a-real-hash", "telegram_chat_id": None,
+                "created_at": datetime(2024, 1, 1),
+            },
+        )
+        conn.execute(
+            db.metadata.tables["children"].insert(),
+            {
+                "user_id": 1, "name": "Legacy Child", "nickname": None,
+                "birth_date": date(2024, 1, 1), "gender": "L",
+                "birth_weight_kg": None, "birth_height_cm": None, "photo_filename": None,
+                "created_at": datetime(2024, 1, 1),
+            },
+        )
+        conn.execute(
+            db.metadata.tables["medication_logs"].insert(),
+            {
+                "child_id": 1, "illness_id": None, "medication_name": "Obat Lama",
+                "dosage": "1 sendok takar", "timestamp": datetime(2024, 1, 2, 8, 0, 0),
+                "notes": None, "created_at": datetime(2024, 1, 2, 8, 0, 0), "created_by_user_id": 1,
+            },
+        )
+    engine.dispose()
+
+
+def test_caregiver_handover_migration_creates_both_new_tables(temp_db_path, monkeypatch):
+    _seed_pre_caregiver_handover_schema(temp_db_path)
+    assert "caregiver_handovers" not in _table_names(temp_db_path)
+    assert "caregiver_handover_acknowledgements" not in _table_names(temp_db_path)
+
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    assert "caregiver_handovers" in _table_names(temp_db_path)
+    assert "caregiver_handover_acknowledgements" in _table_names(temp_db_path)
+
+
+def test_caregiver_handover_migration_creates_expected_columns(temp_db_path, monkeypatch):
+    _seed_pre_caregiver_handover_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    handover_columns = _column_names(temp_db_path, "caregiver_handovers")
+    assert {
+        "id", "child_id", "created_by_user_id", "window_start", "as_of_at", "note", "status",
+        "created_at", "updated_at", "closed_at", "closed_by_user_id",
+    }.issubset(handover_columns)
+
+    ack_columns = _column_names(temp_db_path, "caregiver_handover_acknowledgements")
+    assert {"id", "handover_id", "user_id", "acknowledged_at"}.issubset(ack_columns)
+
+
+def test_caregiver_handover_migration_creates_expected_indexes(temp_db_path, monkeypatch):
+    _seed_pre_caregiver_handover_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    handover_indexed = _indexed_columns(temp_db_path, "caregiver_handovers")
+    assert "child_id" in handover_indexed
+    assert "status" in handover_indexed
+
+    ack_indexed = _indexed_columns(temp_db_path, "caregiver_handover_acknowledgements")
+    assert "handover_id" in ack_indexed
+    assert "user_id" in ack_indexed
+
+
+def test_caregiver_handover_migration_creates_partial_unique_index_for_one_open_per_child(temp_db_path, monkeypatch):
+    """
+    Requirement eksplisit: "1 handover terbuka per anak" HARUS
+    ditegakkan lewat partial unique index DI DATABASE (bukan cuma query
+    cek-dulu di aplikasi, yang rentan race) -- lihat
+    models.py:CaregiverHandover.
+    """
+    _seed_pre_caregiver_handover_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    conn = sqlite3.connect(temp_db_path)
+    try:
+        indexes = conn.execute("PRAGMA index_list(caregiver_handovers);").fetchall()
+        unique_indexes = [idx for idx in indexes if idx[2] == 1]
+        found_partial = False
+        for idx in unique_indexes:
+            cols = {row[2] for row in conn.execute(f"PRAGMA index_info({idx[1]});").fetchall()}
+            if cols == {"child_id"}:
+                sql_row = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (idx[1],)
+                ).fetchone()
+                if sql_row and sql_row[0] and "WHERE" in sql_row[0].upper():
+                    found_partial = True
+        assert found_partial, f"nggak ketemu PARTIAL unique index (child_id) WHERE status='open' -- index unik yang ada: {unique_indexes}"
+    finally:
+        conn.close()
+
+
+def test_caregiver_handover_migration_creates_ack_unique_constraint(temp_db_path, monkeypatch):
+    """Requirement: acknowledge idempoten per (handover_id, user_id) -- HARUS ada unique constraint DB."""
+    _seed_pre_caregiver_handover_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    conn = sqlite3.connect(temp_db_path)
+    try:
+        indexes = conn.execute("PRAGMA index_list(caregiver_handover_acknowledgements);").fetchall()
+        unique_indexes = [idx for idx in indexes if idx[2] == 1]
+        found = False
+        for idx in unique_indexes:
+            cols = {row[2] for row in conn.execute(f"PRAGMA index_info({idx[1]});").fetchall()}
+            if cols == {"handover_id", "user_id"}:
+                found = True
+        assert found, f"nggak ketemu unique index (handover_id, user_id) -- index unik yang ada: {unique_indexes}"
+    finally:
+        conn.close()
+
+
+def test_caregiver_handover_migration_rerun_is_safe(temp_db_path, monkeypatch):
+    _seed_pre_caregiver_handover_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+    _run_migrate_against(temp_db_path, monkeypatch)  # kedua kalinya HARUS nggak error/nggak nambah apa-apa
+
+    assert "caregiver_handovers" in _table_names(temp_db_path)
+    conn = sqlite3.connect(temp_db_path)
+    try:
+        (count,) = conn.execute("SELECT COUNT(*) FROM caregiver_handovers;").fetchone()
+        assert count == 0
+    finally:
+        conn.close()
+
+
+def test_caregiver_handover_migration_preserves_existing_data_in_other_tables(temp_db_path, monkeypatch):
+    _seed_pre_caregiver_handover_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    conn = sqlite3.connect(temp_db_path)
+    try:
+        user_row = conn.execute("SELECT name, email FROM users WHERE id = 1;").fetchone()
+        assert user_row == ("Legacy User", "legacy-handover@example.com")
+        log_row = conn.execute("SELECT medication_name, dosage FROM medication_logs WHERE id = 1;").fetchone()
+        assert log_row == ("Obat Lama", "1 sendok takar")
+    finally:
+        conn.close()
+
+
+def test_caregiver_handover_migration_never_touches_the_real_project_database(temp_db_path, monkeypatch):
+    real_db_existed_before = os.path.exists(REAL_INSTANCE_DB)
+    real_mtime_before = os.path.getmtime(REAL_INSTANCE_DB) if real_db_existed_before else None
+
+    _seed_pre_caregiver_handover_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    assert os.path.exists(REAL_INSTANCE_DB) == real_db_existed_before
+    if real_db_existed_before:
+        assert os.path.getmtime(REAL_INSTANCE_DB) == real_mtime_before
+
+
+def test_caregiver_handover_check_constraint_rejects_invalid_status_after_migration(temp_db_path, monkeypatch):
+    _seed_pre_caregiver_handover_schema(temp_db_path)
+    _run_migrate_against(temp_db_path, monkeypatch)
+
+    engine = create_engine(f"sqlite:///{temp_db_path}")
+    try:
+        with engine.begin() as conn:
+            with pytest.raises(Exception):
+                conn.execute(text(
+                    "INSERT INTO caregiver_handovers (child_id, created_by_user_id, window_start, as_of_at, "
+                    "status, created_at, updated_at) VALUES (1, 1, '2026-01-01 00:00:00', "
+                    "'2026-01-02 00:00:00', 'not_a_real_status', '2026-01-02 00:00:00', '2026-01-02 00:00:00')"
+                ))
+    finally:
+        engine.dispose()

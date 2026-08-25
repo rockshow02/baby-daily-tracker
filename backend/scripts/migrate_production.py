@@ -337,6 +337,18 @@ def migrate():
         else:
             print("  PERINGATAN: tabel 'reminders'/'reminder_actions' TIDAK ditemukan setelah migrasi!")
 
+        # Caregiver Handover Summary Phase 1 (lihat
+        # backend/docs/CAREGIVER_HANDOVER.md) — pola SAMA PERSIS
+        # 'reminders'/'caregiver_audit_events' di atas: 2 tabel BARU,
+        # db.create_all() di atas SUDAH CUKUP (termasuk partial unique
+        # index "1 handover terbuka per anak" — lihat
+        # models.py:CaregiverHandover), tidak ada baris lama yang perlu
+        # ditransformasi.
+        if "caregiver_handovers" in final_tables and "caregiver_handover_acknowledgements" in final_tables:
+            print("  OK: tabel 'caregiver_handovers' dan 'caregiver_handover_acknowledgements' (Caregiver Handover Summary Phase 1) ada.")
+        else:
+            print("  PERINGATAN: tabel 'caregiver_handovers'/'caregiver_handover_acknowledgements' TIDAK ditemukan setelah migrasi!")
+
 
 if __name__ == "__main__":
     migrate()

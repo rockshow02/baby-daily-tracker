@@ -204,6 +204,24 @@ def export_json(child_id):
 
     vaccinations = ChildVaccination.query.filter_by(child_id=child_id).all()
 
+    # Caregiver Handover Summary Phase 1 (lihat
+    # backend/docs/CAREGIVER_HANDOVER.md) -- SENGAJA TIDAK diekspor sama
+    # sekali, konsisten kebijakan yang SUDAH ADA buat Reminders/
+    # MedicationSchedule (juga tidak pernah masuk `data` di bawah): 1)
+    # `note` bebas-teks-nya SAMA sensitifnya kayak `notes` di 12 tipe log
+    # lain (PRIVATE_CHANGED_FIELDS di utils/audit.py), TAPI kebijakan
+    # peran backup di sini per-CHILD (Owner/Editor/Viewer semua bisa
+    # backup), BUKAN per-record kayak handover (Owner boleh edit
+    # SEMUANYA, Editor cuma punya sendiri) -- menyalin `note` mentah ke
+    # backup bakal MELEWATI kontrol kepemilikan itu buat siapa pun yang
+    # bisa export; 2) handover CUMA state OPERASIONAL sementara (1 baris
+    # terbuka per anak, dibekukan 24 jam, dimaksudkan buat dibaca lalu
+    # ditutup) -- BUKAN riwayat medis permanen anak yang jadi TUJUAN
+    # fitur backup/restore ini; ringkasannya sendiri DIHITUNG ULANG dari
+    # tabel sumber (feeding/sleep/dst) yang SUDAH ikut ter-backup di
+    # bawah, jadi tidak ada data hilang secara substansial. Restore dari
+    # backup LAMA (sebelum fitur ini ada) TETAP jalan APA ADANYA -- tidak
+    # ada field baru yang jadi wajib.
     data = {
         "export_version": EXPORT_VERSION,
         "exported_at": datetime.utcnow().isoformat() + "Z",

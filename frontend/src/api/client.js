@@ -530,6 +530,30 @@ export const api = {
     request(`/children/${childId}/emergency-card/preview`, { method: "POST", body: JSON.stringify({}) }),
   emergencyCardPdfUrl: (childId) => `${BASE_URL}/children/${childId}/emergency-card/pdf`,
 
+  // Caregiver Handover Summary (Phase 1) — lihat
+  // backend/docs/CAREGIVER_HANDOVER.md. ONLINE-ONLY SENGAJA: TIDAK SATU
+  // PUN path di bawah ini pernah masuk OFFLINE_QUEUEABLE_PATHS (lihat
+  // atas) — create/update/acknowledge/close TIDAK PERNAH diantrikan
+  // offline (requirement eksplisit Phase 1: online-only, tidak pernah
+  // disimpan ke localStorage/IndexedDB/antrean offline).
+  getCaregiverHandover: (childId) => request(`/children/${childId}/caregiver-handover`),
+  createCaregiverHandover: (childId, note) =>
+    request(`/children/${childId}/caregiver-handover`, {
+      method: "POST", body: JSON.stringify(note != null ? { note } : {}),
+    }),
+  updateCaregiverHandover: (handoverId, note) =>
+    request(`/caregiver-handovers/${handoverId}`, {
+      method: "PUT", body: JSON.stringify({ note }),
+    }),
+  acknowledgeCaregiverHandover: (handoverId) =>
+    request(`/caregiver-handovers/${handoverId}/acknowledge`, {
+      method: "POST", body: JSON.stringify({}),
+    }),
+  closeCaregiverHandover: (handoverId) =>
+    request(`/caregiver-handovers/${handoverId}/close`, {
+      method: "POST", body: JSON.stringify({}),
+    }),
+
   // multi-caregiver (Caregiver Roles & Permissions Phase 1 — lihat
   // backend/docs/ROLES_PERMISSIONS.md)
   listCaregivers: (childId) => request(`/children/${childId}/caregivers`),

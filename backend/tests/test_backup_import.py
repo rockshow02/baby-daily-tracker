@@ -579,3 +579,65 @@ def test_real_uploads_directory_is_never_touched_by_invalid_photo_import(client)
 
     after = set(os.listdir(real_dir)) if os.path.isdir(real_dir) else set()
     assert after == before
+
+
+# --------------------------------------------------------------------------
+# Caregiver Handover Summary Phase 1 -- kebijakan backup/import: SENGAJA
+# DIKECUALIKAN total, konsisten Reminders/MedicationSchedule (lihat
+# routes/backup_routes.py:export_json komentar keputusan). Test di sini
+# membuktikan keputusan itu BENERAN diterapkan (bukan cuma didokumentasikan).
+# --------------------------------------------------------------------------
+
+
+def test_export_json_never_includes_caregiver_handover_data(client, monkeypatch):
+    import routes.caregiver_handover_routes as handover_routes_module
+    from datetime import datetime
+
+    monkeypatch.setattr(handover_routes_module, "now_wib", lambda: datetime(2026, 8, 23, 10, 0, 0))
+    user = register(client)
+    child = create_child(client, user["token"])
+    create_resp = client.post(
+        f"/api/children/{child['id']}/caregiver-handover",
+        json={"note": "RAHASIA_CATATAN_SERAH_TERIMA"},
+        headers=auth_headers(user["token"]),
+    )
+    assert create_resp.status_code == 201, create_resp.get_json()
+
+    export_resp = client.get(f"/api/children/{child['id']}/export-json", headers=auth_headers(user["token"]))
+    assert export_resp.status_code == 200
+    backup = export_resp.get_json()
+
+    assert "caregiver_handover" not in backup
+    assert "caregiver_handovers" not in backup
+    assert "handover" not in backup
+    assert "RAHASIA_CATATAN_SERAH_TERIMA" not in str(backup)
+
+
+def test_export_json_excludes_handover_note_even_for_viewer_only_context(client, monkeypatch):
+    """Requirement: "note content is not exposed to Viewer-only exporters" -- trivially true kalau handover TIDAK PERNAH masuk export sama sekali, terlepas peran siapa pun yang meng-export."""
+    import routes.caregiver_handover_routes as handover_routes_module
+    from datetime import datetime
+    from tests.test_roles_permissions import invite_and_join
+
+    monkeypatch.setattr(handover_routes_module, "now_wib", lambda: datetime(2026, 8, 23, 10, 0, 0))
+    owner = register(client, name="Owner", email="owner-backup-handover@example.com")
+    child = create_child(client, owner["token"])
+    viewer = register(client, name="Viewer", email="viewer-backup-handover@example.com")
+    invite_and_join(client, owner["token"], child["id"], viewer["token"], "viewer")
+    client.post(
+        f"/api/children/{child['id']}/caregiver-handover",
+        json={"note": "RAHASIA_UNTUK_VIEWER"},
+        headers=auth_headers(owner["token"]),
+    )
+
+    export_resp = client.get(f"/api/children/{child['id']}/export-json", headers=auth_headers(viewer["token"]))
+    assert export_resp.status_code == 200
+    backup = export_resp.get_json()
+    assert "RAHASIA_UNTUK_VIEWER" not in str(backup)
+
+
+def test_old_backup_without_handover_fields_still_imports_successfully(client):
+    """Requirement: "old backups remain importable" -- backup JSON dari SEBELUM fitur ini ada (tidak punya field handover apa pun) tetap harus jalan APA ADANYA, tidak ada field baru yang jadi wajib."""
+    user = register(client)
+    resp = _import(client, user["token"], _minimal_import_payload())
+    assert resp.status_code == 201, resp.get_json()

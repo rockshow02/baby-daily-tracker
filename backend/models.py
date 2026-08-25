@@ -1286,3 +1286,136 @@ class ChildMedicalProfile(db.Model):
             "created_at": self.created_at.isoformat() + "Z",
             "updated_at": self.updated_at.isoformat() + "Z",
         }
+
+
+class CaregiverHandover(db.Model):
+    """
+    Caregiver Handover Summary — Phase 1 (lihat
+    backend/docs/CAREGIVER_HANDOVER.md buat kontrak lengkapnya). SATU
+    baris = SATU handover yang lagi/pernah "terbuka" buat 1 anak — beda
+    dari 12 tipe log (yang tiap baris = 1 kejadian perawatan), baris di
+    sini murni METADATA workflow serah-terima (kapan dibuat, catatan
+    opsional, siapa yang sudah mengonfirmasi baca) — RINGKASAN konten
+    (feeding/tidur/obat/dst) TIDAK PERNAH disalin/disimpan ke sini,
+    SELALU dihitung ULANG dari tabel sumber yang sudah ada tiap kali
+    handover ini dibaca (lihat utils/caregiver_handover_summary.py) —
+    PERSIS prinsip "no duplicate copy of every log" & arsitektur
+    "tanpa scheduler background" yang sudah ditegakkan Reminder/
+    MedicationSchedule di app ini.
+
+    `window_start`/`as_of_at` DIBEKUKAN SEKALI saat `POST .../caregiver-handover`
+    (SATU sampel `now_wib()`, lihat routes/caregiver_handover_routes.py)
+    — jendela 24 jam INI TIDAK PERNAH bergeser lagi walau handover-nya
+    dibaca berkali-kali di waktu yang berbeda-beda (requirement eksplisit:
+    "later wall-clock time must not move an existing handover's reporting
+    window").
+
+    SATU handover 'open' per anak — ditegakkan DUA LAPIS: (1) partial
+    unique index `child_id` KHUSUS baris `status='open'` (lihat
+    `__table_args__` di bawah — SQLite native, bukan cuma query
+    aplikasi SEBELUM insert, yang rentan race 2 request bersamaan), DAN
+    (2) `IntegrityError` dari lapis (1) ditangkap eksplisit di route
+    jadi `409` yang aman, BUKAN 500 mentah (lihat requirement "handle
+    the database uniqueness race deterministically").
+    """
+    __tablename__ = "caregiver_handovers"
+    __table_args__ = (
+        db.CheckConstraint("status IN ('open', 'closed')", name="ck_caregiver_handovers_status"),
+        # Partial unique index -- CUMA menegakkan uniqueness `child_id`
+        # buat baris `status='open'` (SQLite native "partial index",
+        # didukung lewat `sqlite_where` SQLAlchemy 1.4+/2.x). Baris
+        # `status='closed'` boleh sebanyak apa pun per anak (riwayat),
+        # TAPI CUMA SATU yang boleh 'open' di satu waktu -- SATU-SATUNYA
+        # penegak final (bukan sekadar cek query dulu baru INSERT, yang
+        # TETAP rentan race 2 request yang BENERAN bersamaan lolos
+        # cek-nya bareng, lihat docstring kelas).
+        db.Index(
+            "uq_caregiver_handovers_one_open_per_child", "child_id",
+            unique=True, sqlite_where=db.text("status = 'open'"),
+        ),
+        db.Index("ix_caregiver_handovers_child_status", "child_id", "status"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+
+    # Jendela 24 jam BEKU -- lihat docstring kelas. `as_of_at` = SATU
+    # sampel `now_wib()` saat handover dibuat; `window_start` =
+    # `as_of_at - timedelta(hours=24)`, dihitung DI ROUTE (bukan kolom
+    # computed DB) SEKALI saja lalu disimpan APA ADANYA.
+    window_start = db.Column(db.DateTime, nullable=False)
+    as_of_at = db.Column(db.DateTime, nullable=False)
+
+    # Catatan serah-terima OPSIONAL, sensitif (lihat kebijakan validasi
+    # utils/caregiver_handover_engine.py) -- TIDAK PERNAH masuk audit
+    # trail/log/exception apa adanya (lihat utils/audit.py).
+    note = db.Column(db.Text, nullable=True)
+
+    status = db.Column(db.String(10), nullable=False, default="open")
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    closed_at = db.Column(db.DateTime, nullable=True)
+    closed_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
+    closer = db.relationship("User", foreign_keys=[closed_by_user_id])
+    child = db.relationship(
+        "Child", backref=db.backref("handovers", lazy="dynamic", cascade="all, delete-orphan")
+    )
+    acknowledgements = db.relationship(
+        "CaregiverHandoverAcknowledgement", backref="handover", lazy="dynamic", cascade="all, delete-orphan"
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "child_id": self.child_id,
+            "created_by_user_id": self.created_by_user_id,
+            "created_by_name": self.creator.name if self.creator else None,
+            "window_start": self.window_start.isoformat() + "+07:00",
+            "as_of_at": self.as_of_at.isoformat() + "+07:00",
+            "note": self.note,
+            "status": self.status,
+            "created_at": self.created_at.isoformat() + "Z",
+            "updated_at": self.updated_at.isoformat() + "Z",
+            "closed_at": (self.closed_at.isoformat() + "Z") if self.closed_at else None,
+            "closed_by_name": self.closer.name if self.closer else None,
+        }
+
+
+class CaregiverHandoverAcknowledgement(db.Model):
+    """
+    SATU konfirmasi "caregiver ini sudah membuka/membaca handover ini"
+    -- lihat backend/docs/CAREGIVER_HANDOVER.md bagian "Makna
+    acknowledgement" buat batasan makna EKSPLISIT (BUKAN persetujuan
+    medis, BUKAN konfirmasi semua tugas selesai). SATU baris per
+    (handover_id, user_id) -- `UniqueConstraint` di bawah menegakkan
+    idempotensi di level DATABASE (bukan cuma query aplikasi dulu),
+    persis alasan yang sama seperti partial unique index di
+    `CaregiverHandover` -- 2 request acknowledge BERSAMAAN dari
+    caregiver yang SAMA TIDAK PERNAH menghasilkan 2 baris.
+    """
+    __tablename__ = "caregiver_handover_acknowledgements"
+    __table_args__ = (
+        db.UniqueConstraint("handover_id", "user_id", name="uq_caregiver_handover_ack"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    handover_id = db.Column(db.Integer, db.ForeignKey("caregiver_handovers.id"), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+
+    acknowledged_at = db.Column(db.DateTime, nullable=False)
+
+    user = db.relationship("User")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            # Nama tampilan doang -- TIDAK PERNAH email/telepon/token/ID
+            # internal di UI (requirement eksplisit), lihat docstring modul.
+            "display_name": self.user.name if self.user else None,
+            "acknowledged_at": self.acknowledged_at.isoformat() + "+07:00",
+        }
