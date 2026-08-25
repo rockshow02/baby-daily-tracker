@@ -64,7 +64,7 @@ function makeHandover(overrides = {}) {
     id: 5, child_id: 10, created_by_user_id: 1, created_by_name: "Ibu",
     window_start: "2026-08-22T14:30:00+07:00", as_of_at: "2026-08-23T14:30:00+07:00",
     note: null, status: "open",
-    created_at: "2026-08-23T14:30:00Z", updated_at: "2026-08-23T14:30:00Z",
+    created_at: "2026-08-23T14:30:00+07:00", updated_at: "2026-08-23T14:30:00+07:00",
     closed_at: null, closed_by_name: null,
     ...overrides,
   };

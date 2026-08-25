@@ -1354,8 +1354,12 @@ class CaregiverHandover(db.Model):
 
     status = db.Column(db.String(10), nullable=False, default="open")
 
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # Semua timestamp workflow handover disimpan sebagai WIB naive,
+    # konsisten dengan window_start/as_of_at/acknowledged_at dan route
+    # yang memakai satu sampel now_wib(). Serialisasi menempelkan
+    # offset +07:00 secara eksplisit; jangan pernah melabelinya `Z`.
+    created_at = db.Column(db.DateTime, default=now_wib)
+    updated_at = db.Column(db.DateTime, default=now_wib, onupdate=now_wib)
     closed_at = db.Column(db.DateTime, nullable=True)
     closed_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
 
@@ -1378,9 +1382,9 @@ class CaregiverHandover(db.Model):
             "as_of_at": self.as_of_at.isoformat() + "+07:00",
             "note": self.note,
             "status": self.status,
-            "created_at": self.created_at.isoformat() + "Z",
-            "updated_at": self.updated_at.isoformat() + "Z",
-            "closed_at": (self.closed_at.isoformat() + "Z") if self.closed_at else None,
+            "created_at": self.created_at.isoformat() + "+07:00",
+            "updated_at": self.updated_at.isoformat() + "+07:00",
+            "closed_at": (self.closed_at.isoformat() + "+07:00") if self.closed_at else None,
             "closed_by_name": self.closer.name if self.closer else None,
         }
 

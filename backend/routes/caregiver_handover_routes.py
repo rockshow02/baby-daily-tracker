@@ -15,6 +15,7 @@ Free yang sudah ditegakkan di seluruh app ini.
 from datetime import timedelta
 
 from flask import Blueprint, jsonify, request
+from sqlalchemy import insert, literal, select
 from sqlalchemy.exc import IntegrityError
 
 from extensions import db
@@ -113,14 +114,11 @@ def _capabilities(role, handover, user_id):
         "can_create": role in WRITE_ROLES,
         "can_edit": can_edit_or_close_now,
         "can_close": can_edit_or_close_now,
-        # SEMUA peran (termasuk Viewer) boleh acknowledge -- requirement
-        # eksplisit "every currently authorized caregiver, including
-        # Viewer, may read and acknowledge an open handover". TIDAK
-        # disyaratkan status 'open' di sini (lihat docstring
-        # acknowledge_caregiver_handover -- acknowledge TETAP boleh
-        # buat handover yang BARU SAJA ditutup, demi perilaku race
-        # deterministik yang sederhana).
-        "can_acknowledge": handover is not None and role is not None,
+        # SEMUA peran (termasuk Viewer) boleh acknowledge, tetapi CUMA
+        # selama handover masih open. Endpoint menegakkan kondisi yang
+        # sama secara atomik agar UI basi tidak bisa membuat ack baru
+        # setelah request close menang race.
+        "can_acknowledge": handover is not None and handover.status == "open" and role is not None,
     }
 
 
@@ -225,7 +223,7 @@ def create_caregiver_handover(child_id):
     handover = CaregiverHandover(
         child_id=child_id, created_by_user_id=user_id,
         window_start=now - timedelta(hours=24), as_of_at=now,
-        note=note, status="open",
+        note=note, status="open", created_at=now, updated_at=now,
     )
     db.session.add(handover)
     try:
@@ -321,13 +319,13 @@ def acknowledge_caregiver_handover(handover_id):
     balikin baris yang SUDAH ADA (200, `created: false`), TIDAK PERNAH
     bikin baris kedua ATAUPUN baris audit kedua.
 
-    SENGAJA TIDAK mensyaratkan `handover.status == 'open'` -- caregiver
-    yang baru sempat baca SETELAH handover ditutup (mis. kalah race
-    sama request close) TETAP boleh menandai "saya sudah baca ini",
-    ini yang bikin perilaku "close racing dengan acknowledge" SELALU
-    deterministik (dua-duanya independen, saling nggak bisa
-    menggagalkan satu sama lain) -- requirement: "close racing with
-    acknowledge has deterministic behavior".
+    Acknowledgement BARU cuma boleh untuk handover `open`. Insert-nya
+    memakai SATU statement database `INSERT ... SELECT ... WHERE
+    status='open'`, bukan check-then-insert di Python. Karena write
+    SQLite diserialisasi, race close-vs-ack punya dua hasil yang sah:
+    ack menang (201, lalu close boleh sukses), atau close menang (409,
+    tanpa ack/audit baru). Retry ack yang SUDAH berhasil tetap idempoten
+    200 walau handover kemudian ditutup.
     """
     user_id = get_current_user_id()
     if not user_id:
@@ -352,10 +350,19 @@ def acknowledge_caregiver_handover(handover_id):
     if existing:
         return jsonify({"acknowledgement": existing.to_dict(), "created": False})
 
-    ack = CaregiverHandoverAcknowledgement(handover_id=handover.id, user_id=user_id, acknowledged_at=now)
-    db.session.add(ack)
+    # Satu statement atomik: tidak ada celah antara "masih open?" dan
+    # INSERT yang dapat dimenangkan request close dari transaksi lain.
+    insert_if_open = insert(CaregiverHandoverAcknowledgement).from_select(
+        ["handover_id", "user_id", "acknowledged_at"],
+        select(literal(handover.id), literal(user_id), literal(now)).where(
+            select(CaregiverHandover.id).where(
+                CaregiverHandover.id == handover.id,
+                CaregiverHandover.status == "open",
+            ).exists()
+        ),
+    )
     try:
-        db.session.flush()
+        result = db.session.execute(insert_if_open)
     except IntegrityError:
         # Race: request LAIN dari user yang SAMA sudah lebih dulu
         # nyimpen baris acknowledge-nya SESAAT sebelum ini -- ambil
@@ -365,6 +372,14 @@ def acknowledge_caregiver_handover(handover_id):
             handover_id=handover.id, user_id=user_id,
         ).first()
         return jsonify({"acknowledgement": existing.to_dict() if existing else None, "created": False})
+
+    if result.rowcount != 1:
+        db.session.rollback()
+        return jsonify({"error": CLOSED_MESSAGE}), 409
+
+    ack = CaregiverHandoverAcknowledgement.query.filter_by(
+        handover_id=handover.id, user_id=user_id,
+    ).one()
 
     record_audit_event(
         child_id=handover.child_id, actor_user_id=user_id, action="create",

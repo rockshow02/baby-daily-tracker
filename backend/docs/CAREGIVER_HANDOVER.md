@@ -47,7 +47,7 @@ tiap kali dibaca.
 | `as_of_at` | DateTime | sampel `now_wib()` TUNGGAL saat dibuat, dibekukan |
 | `note` | Text, nullable | catatan serah-terima opsional, max 1000 karakter |
 | `status` | String, CHECK `IN ('open','closed')` | |
-| `created_at`/`updated_at`/`closed_at` | DateTime | |
+| `created_at`/`updated_at`/`closed_at` | DateTime | WIB naive di database, diserialisasi eksplisit dengan offset `+07:00` |
 | `closed_by_user_id` | FK → `users.id`, nullable | |
 
 **Constraint kunci**: partial unique index
@@ -155,7 +155,7 @@ database mentah di UI, dump historis lengkap.
 | Buat handover baru | ✅ | ✅ | ❌ |
 | Edit catatan handover MANA PUN | ✅ | ❌ (cuma miliknya sendiri) | ❌ |
 | Tutup handover MANA PUN | ✅ | ❌ (cuma miliknya sendiri) | ❌ |
-| Acknowledge (tandai sudah baca) | ✅ | ✅ | ✅ |
+| Acknowledge handover yang masih terbuka | ✅ | ✅ | ✅ |
 
 Owner **selalu** `Child.user_id` (tidak pernah baris `ChildCaregiver`
 terpisah, konsisten seluruh app). Kapabilitas (`can_view`/`can_create`/
@@ -200,9 +200,10 @@ menghasilkan baris audit.
 
 Body kosong atau objek kecil. Idempoten per user — percobaan ulang
 balikin `{"acknowledgement": {...}, "created": false}` (200), sukses
-pertama `{"acknowledgement": {...}, "created": true}` (201). **Sengaja
-tidak** mensyaratkan status `open` — caregiver tetap boleh mengakui
-handover yang baru saja ditutup.
+pertama `{"acknowledgement": {...}, "created": true}` (201). Ack BARU
+cuma boleh selama handover masih `open`; kalau close lebih dulu menang,
+request ack ditolak `409`. Retry ack yang memang sudah berhasil tetap
+idempoten `200` walaupun handover kemudian ditutup.
 
 ### `POST /api/caregiver-handovers/<handover_id>/close`
 
@@ -232,9 +233,10 @@ cek-lalu-tulis di memori:
 - **2 acknowledge bersamaan, user sama** → `UniqueConstraint` +
   `IntegrityError` ditangkap, dikembalikan `created: false` (bukan
   error).
-- **Close vs acknowledge bersamaan** → deterministik by design: keduanya
-  independen (acknowledge tidak mensyaratkan status), tidak bisa saling
-  menggagalkan.
+- **Close vs acknowledge bersamaan** → satu statement atomik
+  `INSERT ... SELECT ... WHERE status='open'`: kalau ack menang lebih
+  dulu hasilnya `201` lalu close tetap boleh sukses; kalau close menang,
+  ack mendapat `409` tanpa baris acknowledgement/audit baru.
 - **Edit/close handover yang sudah closed** → `updated_rows == 0` dari
   `UPDATE ... WHERE status='open'` → `400`/idempoten `200`, tidak pernah
   mutasi parsial.

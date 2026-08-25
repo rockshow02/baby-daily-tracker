@@ -444,7 +444,7 @@ def test_update_cross_child_unrelated_user_404(client):
 
 
 # --------------------------------------------------------------------------
-# 5. Acknowledge — idempotency, roles, close independence
+# 5. Acknowledge — idempotency, roles, and open-status enforcement
 # --------------------------------------------------------------------------
 
 
@@ -505,7 +505,7 @@ def test_acknowledge_display_shows_name_and_timestamp_only(client, monkeypatch):
     assert "email" not in ack
 
 
-def test_acknowledge_still_allowed_after_close(client, monkeypatch):
+def test_new_acknowledgement_after_close_is_rejected_without_row_or_audit(client, monkeypatch):
     _freeze(monkeypatch)
     owner = register(client, name="Owner", email="owner-h11@example.com")
     child = create_child(client, owner["token"])
@@ -514,8 +514,33 @@ def test_acknowledge_still_allowed_after_close(client, monkeypatch):
     handover_id = _create(client, owner["token"], child["id"]).get_json()["handover"]["id"]
     _close(client, owner["token"], handover_id)
 
+    before = CaregiverAuditEvent.query.filter_by(entity_type="caregiver_handover_acknowledged").count()
     resp = _acknowledge(client, viewer["token"], handover_id)
-    assert resp.status_code == 201
+    assert resp.status_code == 409
+    assert resp.get_json()["error"] == handover_routes_module.CLOSED_MESSAGE
+    assert CaregiverHandoverAcknowledgement.query.filter_by(
+        handover_id=handover_id, user_id=viewer["id"],
+    ).count() == 0
+    after = CaregiverAuditEvent.query.filter_by(entity_type="caregiver_handover_acknowledged").count()
+    assert after == before
+
+
+def test_successful_acknowledgement_retry_remains_idempotent_after_close(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client, email="ack-retry-closed@example.com")
+    child = create_child(client, user["token"])
+    handover_id = _create(client, user["token"], child["id"]).get_json()["handover"]["id"]
+
+    first = _acknowledge(client, user["token"], handover_id)
+    assert first.status_code == 201
+    _close(client, user["token"], handover_id)
+
+    retry = _acknowledge(client, user["token"], handover_id)
+    assert retry.status_code == 200
+    assert retry.get_json()["created"] is False
+    assert CaregiverHandoverAcknowledgement.query.filter_by(
+        handover_id=handover_id, user_id=user["id"],
+    ).count() == 1
 
 
 def test_removed_caregiver_cannot_acknowledge(client, monkeypatch):
@@ -1117,10 +1142,37 @@ def test_close_racing_with_acknowledge_is_deterministic(file_db_app, monkeypatch
     t2.join()
 
     assert results["close"] == 200
-    assert results["ack"] in (200, 201)
+    assert results["ack"] in (201, 409)
     with file_db_app.app_context():
         assert CaregiverHandover.query.get(handover_id).status == "closed"
-        assert CaregiverHandoverAcknowledgement.query.filter_by(handover_id=handover_id).count() == 1
+        ack_count = CaregiverHandoverAcknowledgement.query.filter_by(handover_id=handover_id).count()
+        assert ack_count == (1 if results["ack"] == 201 else 0)
+
+
+def test_handover_workflow_timestamps_are_serialized_as_wib(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client, email="handover-timezone@example.com")
+    child = create_child(client, user["token"])
+
+    created = _create(client, user["token"], child["id"], note="awal")
+    assert created.status_code == 201
+    handover = created.get_json()["handover"]
+    handover_id = handover["id"]
+    expected = FAKE_NOW.isoformat() + "+07:00"
+    assert handover["created_at"] == expected
+    assert handover["updated_at"] == expected
+
+    updated = _update(client, user["token"], handover_id, note="baru")
+    assert updated.status_code == 200
+    assert updated.get_json()["handover"]["updated_at"] == expected
+
+    closed = _close(client, user["token"], handover_id)
+    assert closed.status_code == 200
+    closed_handover = closed.get_json()["handover"]
+    assert closed_handover["closed_at"] == expected
+    assert not closed_handover["created_at"].endswith("Z")
+    assert not closed_handover["updated_at"].endswith("Z")
+    assert not closed_handover["closed_at"].endswith("Z")
 
 
 # --------------------------------------------------------------------------
