@@ -195,14 +195,10 @@ def update_or_delete_child(child_id):
         return err
 
     if request.method == "DELETE":
-        # hapus juga file foto kalau ada
-        if child.photo_filename:
-            path = os.path.join(_uploads_dir(), child.photo_filename)
-            if os.path.exists(path):
-                os.remove(path)
-        db.session.delete(child)
-        db.session.commit()
-        return jsonify({"success": True})
+        # Endpoint lama sengaja tidak lagi melakukan aksi destruktif tanpa
+        # re-auth. UI baru memakai Privacy Center dengan password + typed
+        # confirmation dan cleanup file setelah transaksi DB sukses.
+        return jsonify({"error": "Gunakan Pusat Privasi untuk menghapus data anak dengan aman"}), 400
 
     data = request.get_json() or {}
     if "name" in data:

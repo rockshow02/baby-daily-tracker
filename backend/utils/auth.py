@@ -32,8 +32,22 @@ def get_current_user_id():
         s = URLSafeTimedSerializer(current_app.config["SECRET_KEY"])
         try:
             data = s.loads(token, max_age=TOKEN_MAX_AGE)
-            return data.get("user_id")
+            user_id = data.get("user_id")
+            if not user_id:
+                return None
+            # Token lama langsung tidak berlaku setelah akun dihapus.
+            # Import lokal menghindari siklus import saat app startup.
+            from models import User
+            from extensions import db
+            user = db.session.get(User, user_id)
+            return user_id if user and user.is_active else None
         except (BadSignature, SignatureExpired):
             return None
 
-    return session.get("user_id")
+    user_id = session.get("user_id")
+    if not user_id:
+        return None
+    from models import User
+    from extensions import db
+    user = db.session.get(User, user_id)
+    return user_id if user and user.is_active else None

@@ -25,6 +25,7 @@ import InsightsScreen from "./pages/InsightsScreen";
 import ReminderScreen from "./pages/ReminderScreen";
 import ChildProfileScreen from "./pages/ChildProfileScreen";
 import UserProfileScreen from "./pages/UserProfileScreen";
+import PrivacyDataScreen from "./pages/PrivacyDataScreen";
 import CaregiverModal from "./components/CaregiverModal";
 import OfflineStatusBanner from "./components/OfflineStatusBanner";
 import SyncCenter from "./components/SyncCenter";
@@ -43,6 +44,7 @@ const NAV_ITEMS = [
 const EXTRA_LABELS = {
   childProfile: "Profil Anak",
   userProfile: "Profil Saya",
+  privacy: "Privasi & Data",
 };
 
 function AppContent() {
@@ -54,6 +56,7 @@ function AppContent() {
   // "offline_cached" (gagal muat, tapi ada cache offline yang dipakai) |
   // "offline_no_cache" (gagal muat, DAN nggak ada cache sama sekali)
   const [childLoadError, setChildLoadError] = useState(null);
+  const [showEmptyPrivacy, setShowEmptyPrivacy] = useState(false);
 
   /**
    * Muat daftar anak. Bedain 4 kemungkinan hasil secara eksplisit:
@@ -176,8 +179,21 @@ function AppContent() {
     // ngonfirmasi daftar anaknya kosong (childLoadError === null) — bukan
     // gara-gara request gagal (requirement #4: jangan nampilin onboarding
     // cuma gara-gara request anak gagal)
+    if (showEmptyPrivacy) {
+      return (
+        <PrivacyDataScreen
+          onClose={() => setShowEmptyPrivacy(false)}
+          onAccessChanged={async () => {
+            await loadChildren();
+          }}
+          onAccountDeleted={logout}
+        />
+      );
+    }
+
     return (
       <OnboardingWizard
+        onOpenPrivacy={() => setShowEmptyPrivacy(true)}
         onComplete={(child) => {
           setChildren([child]);
           setActiveChild(child);
@@ -197,6 +213,13 @@ function AppContent() {
       setActiveChild={setActiveChild}
       setUser={setUser}
       logout={logout}
+      reloadChildren={async () => {
+        // Kalau aksi Privasi menghapus/mencabut akses anak terakhir,
+        // pertahankan jalur ke layar Privasi agar user masih bisa
+        // menghapus akun—jangan menjebaknya langsung di onboarding.
+        setShowEmptyPrivacy(true);
+        await loadChildren();
+      }}
     />
   );
 }
@@ -213,7 +236,7 @@ function AppContent() {
  * OfflineStatusBanner DAN SyncCenter — bukan dipanggil ulang sendiri-
  * sendiri sama masing-masing (yang bisa bikin 2 loop auto-sync balapan).
  */
-function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, setActiveChild, setUser, logout }) {
+function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, setActiveChild, setUser, logout, reloadChildren }) {
   const [activeView, setActiveView] = useState("daily");
   const [showCaregivers, setShowCaregivers] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
@@ -327,6 +350,9 @@ function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, s
         <ChildProfileScreen child={activeChild} currentUserId={user.id} onUpdated={handleChildUpdated} />
       )}
       {activeView === "userProfile" && <UserProfileScreen user={user} onUserUpdated={setUser} />}
+      {activeView === "privacy" && (
+        <PrivacyDataScreen onAccessChanged={reloadChildren} onAccountDeleted={logout} />
+      )}
 
       {showMenu && (
         <div className="fixed inset-0 z-50 flex items-start justify-end sm:items-center sm:justify-center">
@@ -408,6 +434,18 @@ function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, s
               >
                 <span className="text-base">🕘</span>
                 Aktivitas Pengasuh
+              </button>
+              <button
+                onClick={() => {
+                  setActiveView("privacy");
+                  setShowMenu(false);
+                }}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl2 text-sm text-left ${
+                  activeView === "privacy" ? "bg-feed/15 text-feed font-medium" : "text-ink"
+                }`}
+              >
+                <span className="text-base">🔐</span>
+                Privasi & Data
               </button>
               <button
                 onClick={handleLogout}

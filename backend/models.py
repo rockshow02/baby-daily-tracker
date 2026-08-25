@@ -13,6 +13,11 @@ class User(db.Model):
     email = db.Column(db.String(120), unique=True, nullable=False, index=True)
     password_hash = db.Column(db.String(255), nullable=False)
     telegram_chat_id = db.Column(db.String(50), nullable=True)
+    # Privacy & Data Management Center: akun yang dihapus dipseudonimkan
+    # (bukan hard-delete) supaya atribusi historis lintas-caregiver tidak
+    # dipindahkan ke orang lain dan seluruh FK non-null tetap valid.
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    deleted_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     children = db.relationship("Child", backref="owner", lazy="dynamic", cascade="all, delete-orphan")

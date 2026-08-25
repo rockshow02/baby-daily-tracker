@@ -669,7 +669,11 @@ def test_deleting_a_child_cascades_deletes_its_audit_events(client):
 
     assert CaregiverAuditEvent.query.filter_by(child_id=child["id"]).count() == 1
 
-    resp = client.delete(f"/api/children/{child['id']}", headers=auth_headers(user["token"]))
+    resp = client.post(
+        f"/api/privacy/children/{child['id']}/delete",
+        json={"password": "password123", "confirmation": child["name"]},
+        headers=auth_headers(user["token"]),
+    )
     assert resp.status_code == 200
     assert CaregiverAuditEvent.query.filter_by(child_id=child["id"]).count() == 0
 

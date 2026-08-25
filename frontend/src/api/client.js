@@ -211,6 +211,24 @@ export const api = {
     }),
   me: () => request("/auth/me"),
 
+  // Privacy & Data Management Center — semua aksi destruktif online-only.
+  privacyOverview: () => request("/privacy/overview"),
+  leaveChildAccess: (childId, payload) =>
+    request(`/privacy/children/${childId}/leave`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  deleteChildData: (childId, payload) =>
+    request(`/privacy/children/${childId}/delete`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  deleteAccount: (payload) =>
+    request("/privacy/account/delete", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
   // children
   listChildren: () => request("/children"),
   createChild: (payload) =>

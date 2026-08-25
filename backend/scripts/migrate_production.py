@@ -31,6 +31,8 @@ from models import CaregiverAuditEvent, Child, ChildCaregiver, User
 # belum ada di database production yang udah lama nggak di-reset
 COLUMNS_TO_ENSURE = [
     ("users", "telegram_chat_id", "VARCHAR(50)"),
+    ("users", "is_active", "BOOLEAN NOT NULL DEFAULT 1"),
+    ("users", "deleted_at", "DATETIME"),
     ("children", "nickname", "VARCHAR(30)"),
     ("articles", "last_tip_shown_at", "DATETIME"),
     # fitur "log siapa yang catat" - atribusi per entri

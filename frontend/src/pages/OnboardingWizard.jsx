@@ -4,7 +4,7 @@ import { todayWIB } from "../utils/date";
 
 const STEPS = ["Data Anak", "Berat & Tinggi", "Vaksinasi", "Foto"];
 
-export default function OnboardingWizard({ onComplete }) {
+export default function OnboardingWizard({ onComplete, onOpenPrivacy }) {
   const [step, setStep] = useState(0);
   const [child, setChild] = useState(null);
   const [error, setError] = useState("");
@@ -259,6 +259,15 @@ export default function OnboardingWizard({ onComplete }) {
             >
               {submitting ? "Menyimpan..." : "Lanjut"}
             </button>
+            {onOpenPrivacy && (
+              <button
+                type="button"
+                onClick={onOpenPrivacy}
+                className="w-full py-2 text-xs font-medium text-ink-muted"
+              >
+                Privasi & Data akun
+              </button>
+            )}
           </form>
         )}
 

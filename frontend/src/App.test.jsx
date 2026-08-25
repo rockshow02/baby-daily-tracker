@@ -21,7 +21,12 @@ vi.mock("./components/MotorActivityCard", () => ({ default: () => null }));
 // OnboardingWizard di-stub biar keliatan JELAS kapan App mutusin nampilin
 // wizard ini — itu satu-satunya hal yang mau dicek, bukan detail form-nya.
 vi.mock("./pages/OnboardingWizard", () => ({
-  default: () => <div data-testid="onboarding-wizard-stub">onboarding</div>,
+  default: ({ onOpenPrivacy }) => (
+    <div data-testid="onboarding-wizard-stub">
+      onboarding
+      {onOpenPrivacy && <button onClick={onOpenPrivacy}>open empty privacy</button>}
+    </div>
+  ),
 }));
 // InsightsScreen (Smart Insights & Weekly Summary Phase 1) di-stub SAMA
 // alasannya — test di file ini cuma perlu mbuktiin App.jsx NAVIGASI ke
@@ -44,6 +49,16 @@ vi.mock("./pages/ReminderScreen", () => ({
     </div>
   ),
 }));
+// Pusat Privasi punya pengujian komponen sendiri. Di App test cukup
+// buktikan jalur navigasi akun kosong tanpa membuka IndexedDB tambahan.
+vi.mock("./pages/PrivacyDataScreen", () => ({
+  default: () => (
+    <div>
+      <h1>Privasi & Data</h1>
+      <button>Hapus akun saya</button>
+    </div>
+  ),
+}));
 
 const { apiMock } = vi.hoisted(() => ({
   apiMock: {
@@ -63,10 +78,14 @@ const { apiMock } = vi.hoisted(() => ({
     listAuditEvents: vi.fn(),
     getStats: vi.fn(),
     listReminders: vi.fn(),
+    privacyOverview: vi.fn(),
     photoUrl: (f) => f,
     exportPdfUrl: () => "",
     exportJsonUrl: () => "",
     downloadAuthenticated: vi.fn(),
+    deleteChildData: vi.fn(),
+    leaveChildAccess: vi.fn(),
+    deleteAccount: vi.fn(),
   },
 }));
 
@@ -131,6 +150,10 @@ function resetApiMock() {
   apiMock.listReminders.mockResolvedValue({
     child_id: 10, timezone: "Asia/Jakarta", server_time: new Date().toISOString(),
     reminders: [], summary: { due_count: 0, overdue_count: 0, next_upcoming_at: null },
+  });
+  apiMock.privacyOverview.mockResolvedValue({
+    children: [],
+    account: { owned_children: 0, shared_children: 0, can_delete_account: true, confirmation_text: "HAPUS AKUN" },
   });
 }
 
@@ -733,5 +756,22 @@ describe("App — revoked child access removes cached reminder snapshots on reva
 
     await waitFor(() => expect(localStorage.getItem(revokedKey)).toBeNull());
     expect(localStorage.getItem(stillAccessibleKey)).not.toBeNull();
+  });
+});
+
+describe("App — account privacy remains reachable without a child", () => {
+  it("opens Privacy & Data from the empty-account onboarding state", async () => {
+    setToken("tok-5");
+    setCurrentUser(5);
+    apiMock.me.mockResolvedValue(testUser);
+    apiMock.listChildren.mockResolvedValue([]);
+    setOnline(true);
+
+    render(<App />);
+    expect(await screen.findByTestId("onboarding-wizard-stub")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "open empty privacy" }));
+
+    expect(await screen.findByText("Privasi & Data")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Hapus akun saya" })).toBeInTheDocument();
   });
 });
