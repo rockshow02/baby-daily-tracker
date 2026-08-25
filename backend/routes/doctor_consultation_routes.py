@@ -229,11 +229,22 @@ def preview_consultation(child_id):
     """
     Lihat backend/docs/DOCTOR_CONSULTATION.md bagian "Konsistensi
     snapshot preview -> PDF (token bertanda tangan)" + docstring
-    utils/consultation_snapshot.py. `now` di-sample SEKALI di sini --
-    dipakai buat isi laporan (usia, "generated_at", resolusi period
-    preset, dll) DAN ikut ditandatangani di dalam `snapshot_token`
-    (field `preview_at`), biar endpoint PDF bisa membangun ulang
-    laporan yang SAMA PERSIS tanpa perlu menyimpan apa pun di server.
+    utils/consultation_snapshot.py. `now_wib()` di-sample TEPAT SEKALI
+    di sini (bug review Agustus 2026 -- "midnight race": versi
+    SEBELUMNYA memanggil `today_wib()` DULUAN buat validasi period,
+    BARU `now_wib()` BELAKANGAN buat isi laporan -- 2 pemanggilan jam
+    sistem terpisah berarti kalau eksekusi kebetulan melewati tengah
+    malam WIB PERSIS di antara keduanya, `period` bisa ke-resolve pakai
+    tanggal LAMA sementara `generated_at`/`preview_at` token pakai
+    tanggal BARU, bikin PDF yang BENERAN belum berubah ditolak `409`
+    palsu -- lihat test_doctor_consultation.py bagian "midnight race").
+    `now` (SATU objek, immutable) dipakai buat SEMUANYA: `now.date()`
+    buat resolusi period (`_parse_request_payload`), isi laporan (usia,
+    "generated_at", resolusi period preset, dll), DAN ditandatangani di
+    dalam `snapshot_token` (field `preview_at`) -- biar endpoint PDF
+    bisa membangun ulang laporan yang SAMA PERSIS tanpa perlu menyimpan
+    apa pun di server. Endpoint ini TIDAK PERNAH lagi memanggil
+    `today_wib()`.
     """
     child, err = _require_login_and_child(child_id)
     if err:
@@ -242,12 +253,11 @@ def preview_consultation(child_id):
     role = resolve_role(child, user_id)
     capabilities = _capabilities(role)
 
-    today = today_wib()
-    period, sections, questions_text, note_text, _data, err = _parse_request_payload(role, capabilities, today)
+    now = now_wib()
+    period, sections, questions_text, note_text, _data, err = _parse_request_payload(role, capabilities, now.date())
     if err:
         return err
 
-    now = now_wib()
     report = build_consultation_report(child, period, sections, questions_text, note_text, period["end_date"], now)
 
     digest = digest_consultation_report(report)

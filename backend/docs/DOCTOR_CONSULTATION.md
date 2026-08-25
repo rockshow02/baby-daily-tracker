@@ -470,6 +470,24 @@ token opaque yang frontend bawa balik:
    dengan digest di token; **tidak cocok** → `409`, **tidak pernah**
    merender PDF yang berbeda dari yang sudah di-preview & dikonfirmasi.
 
+**Satu sampel waktu per preview, TANPA KECUALI** (bug review Agustus
+2026 — "midnight race"): `preview_consultation()` memanggil `now_wib()`
+**TEPAT SEKALI**, disimpan ke SATU variabel lokal (`now`) yang dipakai
+buat SEMUANYA — `now.date()` buat resolusi period, `build_consultation_report`
+(usia, obat rutin aktif, dll), `generated_at`, DAN `preview_at` di
+dalam `snapshot_token`. Endpoint ini **tidak pernah** memanggil
+`today_wib()` sama sekali. Versi SEBELUMNYA memanggil `today_wib()`
+duluan (buat resolusi period) baru `now_wib()` belakangan (buat isi
+laporan + token) — 2 pemanggilan jam sistem TERPISAH berarti kalau
+eksekusi kebetulan melewati tengah malam WIB PERSIS di antara
+keduanya, `period` bisa ke-resolve pakai tanggal LAMA sementara
+`generated_at`/`preview_at` token pakai tanggal BARU, membuat PDF yang
+laporannya BENERAN belum berubah ditolak `409` PALSU saat diunduh.
+Endpoint PDF (`export_consultation_pdf`) TIDAK terpengaruh perbaikan
+ini — `today_wib()`-nya SENGAJA tetap dipanggil, murni buat validasi
+bentuk/rentang payload yang dikirim ulang (lihat urutan pengecekan di
+bawah), BUKAN buat isi laporan yang di-digest.
+
 ### Kontrak request PDF — bentuk FLAT (keputusan sadar)
 
 `POST .../doctor-consultation/pdf` menerima **bentuk flat yang sama**

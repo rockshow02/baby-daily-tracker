@@ -1705,3 +1705,159 @@ def test_doctor_consultation_token_cannot_be_used_for_emergency_card(client, mon
         json={"snapshot_token": consultation_token}, headers=auth_headers(user["token"]),
     )
     assert resp.status_code == 400
+
+
+# --------------------------------------------------------------------------
+# 13. Midnight race di endpoint preview (bug review Agustus 2026) --
+# `preview_consultation()` SEBELUMNYA memanggil `today_wib()` DULUAN
+# (buat validasi period) baru `now_wib()` BELAKANGAN (buat isi laporan +
+# token) -- 2 pemanggilan jam sistem TERPISAH, kalau eksekusi kebetulan
+# melewati tengah malam WIB PERSIS di antara keduanya, `period` bisa
+# ke-resolve pakai tanggal LAMA sementara `generated_at`/`preview_at`
+# token pakai tanggal BARU, bikin PDF yang laporannya BENERAN belum
+# berubah ditolak `409` palsu. Perbaikan: `now_wib()` di-sample TEPAT
+# SEKALI, `now.date()` dipakai buat resolusi period, endpoint preview
+# TIDAK PERNAH lagi memanggil `today_wib()` sama sekali.
+# --------------------------------------------------------------------------
+
+
+def _today_wib_should_not_be_called():
+    raise AssertionError("preview_consultation should never call today_wib()")
+
+
+def test_preview_calls_now_wib_exactly_once_and_never_calls_today_wib(client, monkeypatch):
+    call_count = {"now_wib": 0}
+
+    def _counting_now_wib():
+        call_count["now_wib"] += 1
+        return FAKE_NOW
+
+    monkeypatch.setattr(consultation_routes_module, "now_wib", _counting_now_wib)
+    monkeypatch.setattr(consultation_routes_module, "today_wib", _today_wib_should_not_be_called)
+
+    user = register(client)
+    child = create_child(client, user["token"])
+    resp = _preview(client, user["token"], child["id"])
+
+    assert resp.status_code == 200
+    assert call_count["now_wib"] == 1
+
+
+def test_period_end_date_equals_sampled_now_date(client, monkeypatch):
+    monkeypatch.setattr(consultation_routes_module, "now_wib", lambda: FAKE_NOW)
+    monkeypatch.setattr(consultation_routes_module, "today_wib", _today_wib_should_not_be_called)
+
+    user = register(client)
+    child = create_child(client, user["token"])
+    resp = _preview(client, user["token"], child["id"])
+
+    assert resp.status_code == 200
+    assert resp.get_json()["period"]["end_date"] == FAKE_NOW.date().isoformat()
+
+
+def test_token_preview_at_and_report_generated_at_match_sampled_now(client, monkeypatch):
+    monkeypatch.setattr(consultation_routes_module, "now_wib", lambda: FAKE_NOW)
+    monkeypatch.setattr(consultation_routes_module, "today_wib", _today_wib_should_not_be_called)
+
+    user = register(client)
+    child = create_child(client, user["token"])
+    body = _preview(client, user["token"], child["id"]).get_json()
+
+    assert body["generated_at"] == FAKE_NOW.isoformat() + "+07:00"
+    with client.application.app_context():
+        claims = decode_consultation_snapshot_token(
+            body["snapshot_token"], child_id=child["id"], user_id=user["id"],
+        )
+    assert claims["preview_at"] == FAKE_NOW.isoformat()
+
+
+def test_period_presets_use_sampled_date_consistently_across_7_14_30_days(client, monkeypatch):
+    monkeypatch.setattr(consultation_routes_module, "now_wib", lambda: FAKE_NOW)
+    monkeypatch.setattr(consultation_routes_module, "today_wib", _today_wib_should_not_be_called)
+
+    user = register(client)
+    child = create_child(client, user["token"])
+    for preset, days in (("7d", 7), ("14d", 14), ("30d", 30)):
+        resp = _preview(client, user["token"], child["id"], period={"preset": preset})
+        assert resp.status_code == 200, resp.get_json()
+        period = resp.get_json()["period"]
+        assert period["end_date"] == FAKE_NOW.date().isoformat()
+        assert period["start_date"] == (FAKE_NOW.date() - timedelta(days=days - 1)).isoformat()
+
+
+def test_midnight_race_no_longer_causes_false_409(client, monkeypatch):
+    """
+    Simulasi EKSPLISIT bug lama: `now_wib()` dibekukan ke waktu TEPAT
+    setelah tengah malam WIB (00:00:01), dan `today_wib()` dibuat
+    MELEMPAR AssertionError kalau kepanggil sama sekali SELAMA request
+    preview -- kalau endpoint preview MASIH memanggil `today_wib()` di
+    jalur mana pun (bug lama), test ini langsung gagal KERAS, bukan
+    cuma "kebetulan lolos" gara-gara waktu tes yang tidak melewati
+    tengah malam beneran (TIDAK ADA wall-clock sleep di sini SAMA
+    SEKALI -- deterministik).
+    """
+    just_after_midnight = datetime(2026, 8, 25, 0, 0, 1)
+    user = register(client)
+    child = create_child(client, user["token"])
+
+    with monkeypatch.context() as m:
+        m.setattr(consultation_routes_module, "now_wib", lambda: just_after_midnight)
+        m.setattr(consultation_routes_module, "today_wib", _today_wib_should_not_be_called)
+        preview_resp = _preview(client, user["token"], child["id"])
+
+    assert preview_resp.status_code == 200
+    preview_body = preview_resp.get_json()
+    assert preview_body["period"]["end_date"] == "2026-08-25"
+
+    # Endpoint PDF SENGAJA TETAP boleh memanggil today_wib() (perilaku
+    # ekspor yang TIDAK diubah tugas ini, murni buat validasi bentuk
+    # payload yang dikirim ulang) -- dibekukan normal di sini (bukan
+    # dilarang) buat memverifikasi PDF-nya sendiri BERHASIL 200 tanpa
+    # 409 palsu, dengan database TIDAK PERNAH tersentuh sama sekali
+    # antara preview & PDF (tidak ada tulis apa pun di test ini).
+    monkeypatch.setattr(consultation_routes_module, "now_wib", lambda: just_after_midnight)
+    monkeypatch.setattr(consultation_routes_module, "today_wib", lambda: just_after_midnight.date())
+    resp = _pdf(client, user["token"], child["id"], snapshot_token=preview_body["snapshot_token"])
+    assert resp.status_code == 200
+    assert resp.data.startswith(b"%PDF-")
+
+
+def test_genuine_database_change_after_preview_still_causes_409_after_midnight_fix(client, monkeypatch):
+    """Requirement #8: perbaikan midnight race TIDAK BOLEH melemahkan deteksi perubahan data ASLI -- 409 tetap terjadi buat data yang beneran berubah."""
+    just_after_midnight = datetime(2026, 8, 25, 0, 0, 1)
+    monkeypatch.setattr(consultation_routes_module, "now_wib", lambda: just_after_midnight)
+    monkeypatch.setattr(consultation_routes_module, "today_wib", lambda: just_after_midnight.date())
+    user = register(client)
+    child = create_child(client, user["token"])
+
+    token = _preview(client, user["token"], child["id"], sections=["medication"]).get_json()["snapshot_token"]
+
+    db.session.add(MedicationLog(
+        child_id=child["id"], medication_name="Obat Baru Setelah Preview", timestamp=just_after_midnight,
+    ))
+    db.session.commit()
+
+    resp = _pdf(client, user["token"], child["id"], sections=["medication"], snapshot_token=token)
+    assert resp.status_code == 409
+
+
+def test_successful_export_after_midnight_fix_creates_exactly_one_sanitized_audit_event(client, monkeypatch):
+    just_after_midnight = datetime(2026, 8, 25, 0, 0, 1)
+    monkeypatch.setattr(consultation_routes_module, "now_wib", lambda: just_after_midnight)
+    monkeypatch.setattr(consultation_routes_module, "today_wib", lambda: just_after_midnight.date())
+    user = register(client)
+    child = create_child(client, user["token"])
+    before = CaregiverAuditEvent.query.filter_by(
+        child_id=child["id"], entity_type="doctor_consultation_pdf_export",
+    ).count()
+
+    resp = _pdf(client, user["token"], child["id"])
+    assert resp.status_code == 200
+
+    events = CaregiverAuditEvent.query.filter_by(
+        child_id=child["id"], entity_type="doctor_consultation_pdf_export",
+    ).all()
+    assert len(events) == before + 1
+    event = events[-1]
+    assert event.changed_fields_json is None
+    assert event.entity_id == 0
