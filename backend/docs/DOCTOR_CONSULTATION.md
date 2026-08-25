@@ -165,10 +165,16 @@ yang mungkin masih terbang buat anak lama).
 ## Request validation & size limits
 
 Body endpoint konsultasi SEHARUSNYA kecil (≤16 kode section pendek,
-metadata periode, dan 2 field teks yang masing-masing sudah dibatasi
-1000 karakter) — jauh lebih kecil dari `MAX_CONTENT_LENGTH` global
-aplikasi (6MB, `config.py`, dilonggarkan buat upload foto). Endpoint
-ini menegakkan batas KHUSUS yang lebih ketat,
+metadata periode, 2 field teks yang masing-masing sudah dibatasi 1000
+karakter, DAN — khusus endpoint PDF sejak "Doctor Consultation
+Snapshot-Safe PDF Export" — 1 `snapshot_token` yang jauh di bawah 2KB)
+— jauh lebih kecil dari `MAX_CONTENT_LENGTH` global aplikasi (6MB,
+`config.py`, dilonggarkan buat upload foto). **Batas
+`MAX_CONSULTATION_BODY_BYTES = 20_000` (20KB) TIDAK diubah/dilonggarkan**
+buat mengakomodasi token — sisa ruang yang sudah ada jauh lebih dari
+cukup, requirement: "account for the added token without weakening the
+current consultation-specific body limit." Endpoint ini menegakkan
+batas KHUSUS yang lebih ketat,
 `utils/consultation_report.py:MAX_CONSULTATION_BODY_BYTES = 20_000`
 (20KB), lewat **2 LAPIS** (lihat
 `routes/doctor_consultation_routes.py:_read_json_body_within_limit`) —
@@ -403,6 +409,269 @@ presedennya di app ini; disederhanakan demi cakupan Fase 1, bisa
 ditambah nanti kalau dibutuhkan. Tidak memuat foto profil/gambar
 unggahan/URL eksternal apa pun (murni tabel/teks).
 
+## Konsistensi snapshot preview -> PDF (token bertanda tangan)
+
+### Risiko yang diperbaiki (Doctor Consultation Snapshot-Safe PDF Export, bug review Agustus 2026)
+
+Frontend (`DoctorConsultationScreen.jsx`) sudah punya `activeSnapshot`
+immutable yang mencegah EDIT LOKAL (form yang diubah user SENDIRI)
+diam-diam mengubah payload yang diekspor — lihat "Human-readable
+preview" & docstring komponen itu. **Ini TIDAK CUKUP**: endpoint PDF
+backend TETAP membangun ulang laporan dari state DATABASE TERKINI saat
+request PDF datang. Kalau caregiver LAIN mengubah data
+feeding/tidur/kesehatan/obat/vaksinasi/pertumbuhan/profil medis/dll —
+ATAUPUN section APA PUN yang DIPILIH user ini — di antara waktu preview
+& unduh PDF, PDF yang dihasilkan **bisa berbeda** dari laporan yang
+sudah caregiver review & setujui privasinya. `editCounterRef`/
+`requestSeqRef` frontend cuma melindungi dari race/edit **lewat
+instance frontend yang sama**, **tidak pernah** dari perubahan
+**eksternal** (caregiver lain, request lain, waktu yang berlalu).
+
+Perilaku yang WAJIB (dan sekarang TERBUKTI lewat test, bukan cuma
+diklaim): export mengirim persis laporan logis yang di-preview, ATAU
+ditolak dan meminta pratinjau ulang. **Tidak pernah** diam-diam
+mengekspor data yang berbeda.
+
+### Arsitektur: token snapshot bertanda tangan (STATELESS)
+
+Pola **SAMA** dengan Child Medical Profile & Emergency Card (lihat
+`backend/docs/MEDICAL_PROFILE.md`), primitif kriptografi **DI-REUSE**
+lewat `utils/snapshot_token.py` (SATU implementasi tanda-tangan/
+verifikasi/expiry/hashing/perbandingan timing-safe, TIDAK diduplikasi)
+tapi dengan **salt & versi skema TERPISAH** khusus fitur ini
+(`utils/consultation_snapshot.py:CONSULTATION_SNAPSHOT_SALT`/
+`CONSULTATION_SNAPSHOT_SCHEMA_VERSION`) — token 1 fitur **tidak pernah**
+valid dipakai buat fitur lain (diverifikasi test: token Emergency Card
+ditolak endpoint konsultasi, dan sebaliknya). PythonAnywhere Free
+**tidak mendukung** Redis/Celery/worker persisten/cron/cache
+lintas-request — solusinya **bukan** menyimpan state sementara di
+server, tapi menandatangani ringkasan snapshot itu sendiri ke sebuah
+token opaque yang frontend bawa balik:
+
+1. **Preview** men-sample `now_wib()` **SEKALI** (`preview_at`),
+   membangun laporan penuh (`build_consultation_report`), menghitung
+   digest SHA-256 dari REPRESENTASI KANONIK-nya
+   (`utils/consultation_snapshot.py:canonicalize_consultation_report` +
+   `digest_consultation_report`), lalu menandatangani token yang CUMA
+   berisi `child_id`, `user_id`, `preview_at`, `digest`, versi skema —
+   **tidak pernah** pertanyaan/catatan/data medis/penyakit/obat/
+   kunjungan dokter/detail menyusui-tidur/detail vaksinasi/isi section
+   apa pun. Token dikembalikan sebagai `snapshot_token` di respons
+   preview.
+2. **PDF** WAJIB menerima token itu balik **beserta payload yang
+   dikirim ulang** (period/sections/questions/additional_note — laporan
+   **tidak bisa** dibangun ulang dari token doang, token cuma bawa
+   digest+identitas, **bukan** isi laporan). Token diverifikasi (tanda
+   tangan + kedaluwarsa + versi skema + child/user COCOK), laporan
+   DIBANGUN ULANG memakai payload yang dikirim ulang **dan** database
+   TERKINI, TAPI period-nya di-resolve ulang memakai `preview_at` BEKU
+   dari token (bukan `today_wib()` baru) — digest laporan yang baru
+   dibangun ulang dibandingkan **timing-safe** (`hmac.compare_digest`)
+   dengan digest di token; **tidak cocok** → `409`, **tidak pernah**
+   merender PDF yang berbeda dari yang sudah di-preview & dikonfirmasi.
+
+### Kontrak request PDF — bentuk FLAT (keputusan sadar)
+
+`POST .../doctor-consultation/pdf` menerima **bentuk flat yang sama**
+dengan sebelumnya (`period`, `sections`, `questions`,
+`additional_note`), dengan `snapshot_token` ditambahkan **alongside**
+field-field itu — **bukan** nesting baru `{"payload": {...},
+"snapshot_token": "..."}`. Dipilih karena lebih kompatibel (perubahan
+minimal ke bentuk request yang sudah ada, konsisten dengan cara
+`_parse_request_payload` membaca body lewat `data.get(...)` satu-satu)
+dan tetap membawa SEMUA yang dibutuhkan buat membangun ulang laporan.
+Kontrak ini **satu-satunya** yang didukung — seluruh caller (frontend,
+test) memakainya secara konsisten.
+
+### Urutan pengecekan endpoint PDF (SENGAJA, lihat `export_consultation_pdf`)
+
+1. Autentikasi + akses anak.
+2. Otorisasi export (Owner/Editor) — **sebelum** body/token disentuh
+   sama sekali, Viewer selalu dapat `403` yang sama terlepas ukuran
+   body/validitas token.
+3. Bounded raw-body read (batas KHUSUS, lihat "Request validation &
+   size limits" di bawah — **tidak berubah**, token muat nyaman di
+   dalamnya).
+4. Body harus objek JSON.
+5. Validasi payload & section sensitif yang **sudah ada**
+   (period/sections/questions/note — pakai `today_wib()` REAL, **murni
+   buat validasi bentuk/rentang**, bukan isi laporan akhir).
+6. Tanda tangan + kedaluwarsa + versi skema token.
+7. Token harus milik `child_id`+`user_id` yang **sama** dengan request
+   sekarang.
+8. Parse `preview_at` dari token secara **defensif** (praktis mustahil
+   gagal — claims sudah lolos verifikasi tanda tangan — tetap ditangani
+   eksplisit, bukan dipercaya buta).
+9. **Bangun ulang** laporan pakai payload yang dikirim ulang + database
+   TERKINI, TAPI period di-**resolve ulang** memakai `preview_at` BEKU
+   (bukan `today_wib()` lagi).
+10. Hash pakai helper kanonik yang **sama persis** dipakai preview.
+11. Bandingkan digest **timing-safe**.
+12. Render PDF **cuma** kalau cocok.
+13. Audit **cuma** ditulis SETELAH semua validasi & pengecekan digest
+    lolos.
+
+**Tidak pernah** merender PDF ATAUPUN menulis baris audit buat request
+yang ditolak di langkah manapun (diverifikasi test
+`test_no_pdf_renderer_called_for_rejected_or_stale_requests` +
+`test_no_audit_event_for_rejected_or_stale_pdf_requests`).
+
+### Waktu beku vs waktu ekspor sebenarnya
+
+`preview_at` (dari token) dipakai buat **SEMUA** hal yang memengaruhi
+isi laporan: `generated_at`, perhitungan usia, resolusi period (preset
+"7d" dkk **tetap** merujuk rentang tanggal yang SAMA PERSIS kayak saat
+preview, bukan "7 hari dari sekarang" yang baru), dan field
+time-sensitive lain manapun. `now_wib()` yang FRESH (`export_now`,
+disample TERPISAH) **cuma** dipakai buat metadata audit
+(`recorded_at`) + tanggal di nama file unduhan — dua hal itu **bukan**
+bagian dari digest, jadi wall-clock yang lebih belakangan **tidak
+pernah** membuat snapshot yang sebenarnya masih valid ditolak keliru
+(diverifikasi test
+`test_later_wall_clock_alone_does_not_invalidate_unchanged_snapshot`).
+
+### Kebijakan kanonikalisasi (`utils/consultation_snapshot.py`)
+
+Satu helper kanonikalisasi/digest EKSPLISIT, dipakai **SAMA PERSIS**
+oleh preview MAUPUN PDF.
+
+**DIMASUKKAN** (semua field yang tampil di preview JSON maupun PDF):
+`child_id`, `child_display_name`, `period` (hasil resolusi — termasuk
+`start_date`/`end_date`), `generated_at`, `disclaimer`, `privacy_note`,
+`generated_statement`, `included_sections`, `sensitive_sections_included`,
+dan `sections` (SELURUH isi tiap section yang TERPILIH — termasuk field
+truncation/`total_count_in_period` per section; termasuk teks
+`questions`/`note` TRANSIEN kalau section-nya dipilih; termasuk isi
+section `medical_profile` kalau dipilih).
+
+**DIKECUALIKAN**: `capabilities` (response-only, tergantung role
+pemanggil SAAT ITU), `request_id`, `sensitive_section_codes`
+(allowlist TETAP, bukan isi laporan) — ketiganya ditambahkan ROUTE
+**setelah** `build_consultation_report()` selesai, jadi otomatis tidak
+pernah tersentuh fungsi kanonikalisasi. `snapshot_token` itu sendiri
+jelas bukan bagian konten.
+
+**Allowlist di level KODE SECTION, bukan per-field nested** — keputusan
+SADAR: 16 kode section bentuknya SANGAT heterogen (metrik agregat/
+daftar entri/status vaksinasi/kartu insight/dll). Meng-hand-allowlist
+SETIAP field nested-nya akan jadi TIDAK SINKRON kalau
+`utils/consultation_report.py` menambah field baru ke salah satu
+section builder di masa depan (field baru itu diam-diam **tidak** ikut
+ke digest — rasa aman PALSU, kebalikan dari tujuan fitur ini).
+Menyertakan isi section APA ADANYA (dibatasi ke KODE section yang
+DIKENAL saja) justru LEBIH KONSERVATIF: perubahan field apa pun di
+section manapun otomatis ikut memengaruhi digest. Ini aman karena tiap
+section builder SUDAH menerapkan data-minimization-nya sendiri SEBELUM
+mengembalikan datanya (`notes` bebas-teks/`custom_label`/dll tidak
+pernah disertakan — lihat "Data-minimization" di atas modul
+`consultation_report.py`) — isi section yang sampai ke sini sudah
+berupa permukaan yang di-vetting aman untuk laporan.
+
+Deterministik: `json.dumps(sort_keys=True, ensure_ascii=False,
+separators=(",",":"), default=str)` (lihat
+`utils/snapshot_token.py:compute_sha256_digest`) menormalkan urutan KEY
+di semua level nested — urutan insersi dict Python TIDAK berpengaruh.
+`None`/`""`/`[]`/angka/boolean dibedakan APA ADANYA. `default=str`
+adalah jaring pengaman DEFENSIF (bukan perilaku normal — semua builder
+laporan SUDAH `.isoformat()` sebelum mengembalikan data) buat
+permukaan laporan yang jauh lebih besar dari Emergency Card.
+
+**Server TIDAK PERNAH mempercayai laporan lengkap yang dikirim balik
+browser sebagai konten PDF** — endpoint PDF cuma menerima `period`/
+`sections`/`questions`/`additional_note`/`snapshot_token` (parameter
+buat MEMBANGUN ULANG laporan), **bukan** laporan itu sendiri; server
+SELALU membangun ulang dari database + memvalidasi lewat digest,
+sesuai requirement "do not trust a complete report sent back by the
+browser as PDF content."
+
+### Urutan database deterministik
+
+Diaudit SEMUA section yang melakukan query list (`_growth_section`,
+`_illness_section`, `_medication_section`, `_milestones_section`,
+`_doctor_visits_section` di `utils/consultation_report.py`; query
+"terbaru"/"2 terakhir" di `utils/insights_engine.py:compute_growth_metrics`/
+`compute_health_metrics`/`compute_milestone_metrics`; daftar vaksinasi
+di `routes/children_routes.py:_build_vaccination_list`) — SEMUA
+sekarang punya tie-breaker `id` SEKUNDER (mis.
+`.order_by(IllnessLog.start_date.desc(), IllnessLog.id.desc())`), BUKAN
+cuma kolom tanggal/timestamp SENDIRIAN. Tanpa ini, 2 record dengan
+tanggal PERSIS sama urutannya TIDAK DIJAMIN stabil oleh SQLite —
+preview & rebuild PDF bisa saja membaca urutan yang beda walau DATANYA
+sama sekali tidak berubah, menghasilkan digest yang beda (`409` PALSU
+buat data yang sebenarnya tidak berubah). Diverifikasi test
+`test_deterministic_ordering_prevents_false_mismatch_for_same_date_records`.
+
+### Tanda tangan, BUKAN enkripsi
+
+`itsdangerous.URLSafeTimedSerializer` CUMA menjamin claims **tidak bisa
+diubah tanpa ketahuan** dan timestamp-nya **tidak bisa dipalsukan** —
+isinya sendiri cuma di-encode base64url, **bukan** dienkripsi. **Siapa
+pun** yang memegang string token bisa MEMBACA payload-nya (base64-decode
+biasa, tanpa kunci apa pun). Keamanannya bergantung **sepenuhnya** pada
+tidak pernah menaruh nilai sensitif di claims (lihat daftar field yang
+dikecualikan di atas) — **bukan** kerahasiaan token itu sendiri. Lihat
+juga docstring `utils/snapshot_token.py`.
+
+### `409` & error token — respons aman
+
+Digest tidak cocok → `409`, pesan: `"Data laporan konsultasi berubah
+sejak pratinjau dibuat. Buat pratinjau ulang sebelum mengunduh PDF."`
+Token hilang/rusak/kedaluwarsa/versi skema tidak cocok → `400`. Token
+sah TAPI buat anak/user LAIN → `403`. **Tidak ada** dari respons ini
+yang membocorkan isi claims/detail tanda tangan/kenapa persisnya
+ditolak — pesan generik & aman di semua kasus.
+
+### Kapabilitas Emergency Card — TIDAK berubah
+
+Refactor ini murni ekstraksi primitif GENERIK
+(`utils/snapshot_token.py`) — API publik `utils/emergency_card_snapshot.py`
+(nama fungsi, signature, perilaku) **tidak berubah sama sekali**,
+diverifikasi: seluruh test Emergency Card yang sudah ada tetap hijau
+TANPA modifikasi assertion.
+
+### Keterbatasan & risiko yang tersisa
+
+**JANGAN mengklaim "konsistensi snapshot sempurna" secara mutlak** —
+yang benar-benar diimplementasikan & dibuktikan test adalah: (1)
+SELURUH field yang tampil di preview JSON maupun PDF (termasuk isi tiap
+section terpilih, section `medical_profile`, teks transien
+questions/note) ikut ke digest, dan (2) perubahan APA PUN pada field
+itu — via endpoint mana pun di app ini, oleh caregiver mana pun —
+menghasilkan `409` sebelum PDF dirender. Bukan berarti "byte PDF
+akhirnya dijamin identik" pada tingkat presentasi (font-rendering
+reportlab dkk di luar cakupan ini) — kesetaraan yang dijamin adalah
+**LOGIS** (data sumbernya), persis prinsip "kesetaraan logis
+preview<->PDF" yang sudah didokumentasikan di atas.
+
+- **Jendela 15 menit tetap ada risiko residual kecil**: kalau data
+  berubah dan berubah KEMBALI ke nilai yang PERSIS SAMA (secara logis,
+  byte demi byte) dalam jendela itu, digest akan cocok lagi dan PDF
+  akan berhasil diunduh — App ini TIDAK mendeteksi "sempat berubah lalu
+  kembali", cuma "beda dari kondisi terakhir dipreview vs kondisi
+  sekarang". Risiko ini dianggap dapat diterima (skenario yang sangat
+  spesifik & tidak berbahaya — datanya toh sama).
+- **Token TIDAK BISA dicabut lebih awal** (server tidak menyimpan
+  state) — kalau caregiver ingin "membatalkan" sebuah preview
+  (mis. karena salah pilih section sensitif), satu-satunya cara adalah
+  menunggu token itu kedaluwarsa (maks 15 menit) atau membuat preview
+  baru (yang secara otomatis menggantikan token lama di frontend, TAPI
+  token lama itu sendiri SECARA TEKNIS tetap "sah" di server sampai
+  kedaluwarsa kalau digest-nya kebetulan masih cocok). Ini bukan
+  kerentanan (token tetap terikat child_id+user_id+SECRET_KEY server),
+  cuma keterbatasan model stateless yang disengaja.
+- **Allowlist di level kode section** (bukan per-field, lihat di atas)
+  berarti kalau SUATU SAAT sebuah section builder di
+  `utils/consultation_report.py` mulai mengembalikan nilai NON-JSON-safe
+  (mis. objek custom), `default=str` di `compute_sha256_digest` akan
+  mendiamkannya jadi string alih-alih gagal keras — trade-off sadar
+  demi ketahanan (lihat "Kebijakan kanonikalisasi" di atas), TAPI berarti
+  developer yang menambah field baru tetap perlu memastikan nilainya
+  `.isoformat()`/primitif JSON sebelum dikembalikan, konsisten konvensi
+  yang SUDAH ditegakkan di seluruh modul ini.
+- **Doctor Visit History yang sudah ada** (dicatat lewat "Catat Hasil
+  Kunjungan") sama sekali TIDAK terpengaruh mekanisme ini — itu tetap
+  endpoint CRUD biasa, bukan bagian dari snapshot preview/PDF.
+
 ## Offline limitations
 
 **Preview ONLINE-ONLY di Fase 1** (bukan keterbatasan teknis biasa —
@@ -443,6 +712,15 @@ request-level tetap tersedia lewat log request standar
 (`utils/observability.py`) berdasarkan timestamp bila benar-benar
 diperlukan untuk debugging operasional.
 
+**Urutan penulisan audit vs verifikasi snapshot** (Doctor Consultation
+Snapshot-Safe PDF Export): baris audit `doctor_consultation_pdf_export`
+CUMA ditulis SETELAH seluruh urutan pengecekan endpoint PDF lolos
+(termasuk pengecekan digest terakhir) — lihat "Konsistensi snapshot
+preview -> PDF" di atas. Request yang ditolak di langkah manapun
+(otorisasi/ukuran body/validasi payload/token/digest tidak cocok)
+**tidak pernah** menulis baris audit ATAUPUN merender PDF, diverifikasi
+langsung lewat test (bukan cuma diasumsikan dari urutan kode).
+
 ## Performance bounds
 
 Semua query di-scope ke child_id + periode (memakai kolom yang sudah
@@ -478,6 +756,16 @@ penulisan file ke disk server. `MAX_CONTENT_LENGTH` global (6MB, sudah
 ada di `config.py`) membatasi ukuran request; panjang `questions`/
 `additional_note` dibatasi 1000 karakter masing-masing sebagai lapis
 tambahan.
+
+Token snapshot (Doctor Consultation Snapshot-Safe PDF Export) **TIDAK
+menambah kebutuhan infrastruktur apa pun**: tanda tangan/verifikasi
+`itsdangerous` murni komputasi CPU (HMAC), tidak ada I/O jaringan/disk
+tambahan; token itu sendiri **tidak pernah** disimpan di server (server
+CUMA menghitung digest & menandatangani/memverifikasi, state-nya
+sepenuhnya hidup di string token yang dibawa klien) — nol tabel
+database baru, nol cache lintas-request, nol dependency Python baru
+(`itsdangerous` **sudah** jadi dependency Flask sendiri, dipakai
+`utils/auth.py:generate_token` sejak awal).
 
 ## Manual QA checklist
 
@@ -518,6 +806,19 @@ tambahan.
       belum melihat field pertanyaan/catatan ataupun tombol Unduh
       PDF/Catat Hasil Kunjungan (least-privilege default) — Owner/Editor
       baru melihatnya SETELAH preview pertama mereka berhasil.
+- [ ] Buka laporan konsultasi di 2 tab/perangkat berbeda sebagai 2
+      caregiver (Owner+Editor) untuk anak yang SAMA — di tab pertama,
+      preview dulu (mis. dengan section "Riwayat Obat" dicentang); di
+      tab KEDUA, tambah/ubah/hapus 1 log obat SETELAH preview tab
+      pertama diambil; kembali ke tab pertama, klik Unduh PDF → **409**,
+      pesan "Data laporan konsultasi berubah sejak pratinjau dibuat...",
+      preview lama TETAP kelihatan (bukan hilang), tombol "Buat
+      pratinjau ulang" berfungsi & memulihkan alur normal.
+- [ ] Preview, tunggu >15 menit (ATAU restart backend dengan
+      `SNAPSHOT_TOKEN_MAX_AGE_SECONDS` sementara diperkecil buat uji
+      cepat), lalu coba Unduh PDF — token kedaluwarsa, pesan aman
+      "Buat pratinjau ulang" tampil, TIDAK ada stack trace/detail token
+      yang bocor ke layar.
 
 ## Deployment steps
 

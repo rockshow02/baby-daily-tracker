@@ -394,7 +394,12 @@ def compute_growth_metrics(child_id, today, start_date, end_date):
     """
     measurements = (
         GrowthMeasurement.query.filter_by(child_id=child_id)
-        .order_by(GrowthMeasurement.measured_date.desc())
+        # `id` tie-breaker SEKUNDER -- dua pengukuran dengan
+        # `measured_date` PERSIS sama TIDAK BOLEH bikin "latest"/
+        # "previous" tertukar tergantung urutan penyimpanan internal
+        # yang tidak dijamin (krusial buat digest snapshot Doctor
+        # Consultation, lihat utils/consultation_snapshot.py).
+        .order_by(GrowthMeasurement.measured_date.desc(), GrowthMeasurement.id.desc())
         .limit(2)
         .all()
     )
@@ -473,7 +478,7 @@ def compute_health_metrics(child_id, start_date, end_date):
     # ke `dates` di atas — itu KHUSUS kejadian di dalam periode ini.
     latest_temp = (
         TemperatureLog.query.filter_by(child_id=child_id)
-        .order_by(TemperatureLog.timestamp.desc())
+        .order_by(TemperatureLog.timestamp.desc(), TemperatureLog.id.desc())
         .first()
     )
 
@@ -581,7 +586,7 @@ def compute_milestone_metrics(child_id, start_date, end_date):
     # `dates` di atas kalau achieved_date-nya di luar periode ini.
     latest = (
         MilestoneLog.query.filter_by(child_id=child_id)
-        .order_by(MilestoneLog.achieved_date.desc())
+        .order_by(MilestoneLog.achieved_date.desc(), MilestoneLog.id.desc())
         .first()
     )
 

@@ -12,7 +12,9 @@ persis pola test_reminders.py/test_insights.py.
 """
 import json
 import os
+import time
 from datetime import date, datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 from werkzeug.test import EnvironBuilder
@@ -29,6 +31,7 @@ from tests.test_roles_permissions import invite_and_join
 from utils.consultation_report import (
     INSIGHT_CODE_DESCRIPTIONS, MAX_CONSULTATION_BODY_BYTES, SENSITIVE_SECTIONS,
 )
+from utils.consultation_snapshot import decode_consultation_snapshot_token, digest_consultation_report
 
 FAKE_TODAY = date(2026, 8, 23)
 FAKE_NOW = datetime(2026, 8, 23, 10, 0, 0)
@@ -57,7 +60,41 @@ def _preview(client, token, child_id, period=None, sections=None, questions=None
     )
 
 
-def _pdf(client, token, child_id, period=None, sections=None, questions=None, note=None):
+def _tamper_token(token):
+    """
+    Rusak tanda tangan token SECARA ANDAL -- ganti karakter PERTAMA
+    segmen TANDA TANGAN (bagian setelah "." terakhir), BUKAN karakter
+    TERAKHIR token secara keseluruhan. Base64url TANPA padding
+    (dipakai itsdangerous) kadang menyisakan beberapa bit "kosong" di
+    posisi karakter PALING AKHIR sebuah string -- mengganti karakter di
+    posisi itu TIDAK SELALU mengubah byte hasil decode (flaky,
+    ditemukan langsung: pernah lolos verifikasi tanda tangan di 1 dari
+    banyak run test suite penuh). Karakter PERTAMA segmen tanda tangan
+    TIDAK PERNAH berada di posisi bit sisa semacam itu -- penggantian
+    di situ SELALU mengubah byte HMAC hasil decode.
+    """
+    head, sig = token.rsplit(".", 1)
+    mutated_sig = ("a" if sig[0] != "a" else "b") + sig[1:]
+    return f"{head}.{mutated_sig}"
+
+
+_AUTO_TOKEN = object()  # sentinel: "belum dikasih eksplisit -- ambil token segar dari preview yang MATCHING"
+
+
+def _pdf(client, token, child_id, period=None, sections=None, questions=None, note=None, snapshot_token=_AUTO_TOKEN):
+    """
+    Kalau `snapshot_token` TIDAK dikasih eksplisit, ambil token SEGAR
+    dulu lewat `_preview` memakai period/sections/questions/note yang
+    SAMA PERSIS (dan `token` user yang sama) -- kasus umum buat test
+    yang cuma mau membuktikan alur PDF berhasil BIASA, tanpa perlu
+    mengulang boilerplate preview->token di puluhan test yang sudah ada
+    (persis pola tests/test_medical_profile.py:_pdf_card). Test yang
+    mau menguji token itu SENDIRI (hilang/salah/kedaluwarsa/anak lain/
+    user lain/laporan basi) mengirim `snapshot_token` eksplisit --
+    termasuk `None` buat kasus "field tidak dikirim sama sekali"
+    (backend memperlakukan field absen & `null` SAMA PERSIS lewat
+    `data.get(...)`).
+    """
     body = {"period": period or {"preset": "7d"}}
     if sections is not None:
         body["sections"] = sections
@@ -65,6 +102,10 @@ def _pdf(client, token, child_id, period=None, sections=None, questions=None, no
         body["questions"] = questions
     if note is not None:
         body["additional_note"] = note
+    if snapshot_token is _AUTO_TOKEN:
+        preview_resp = _preview(client, token, child_id, period=period, sections=sections, questions=questions, note=note)
+        snapshot_token = (preview_resp.get_json() or {}).get("snapshot_token")
+    body["snapshot_token"] = snapshot_token
     return client.post(
         f"/api/children/{child_id}/doctor-consultation/pdf", json=body, headers=auth_headers(token)
     )
@@ -1094,3 +1135,573 @@ def test_oversized_pdf_request_from_authorized_role_creates_no_audit_event(clien
 
 def test_global_max_content_length_config_is_unchanged(client):
     assert client.application.config["MAX_CONTENT_LENGTH"] == 6 * 1024 * 1024
+
+
+# --------------------------------------------------------------------------
+# 12. Konsistensi snapshot preview -> PDF (token bertanda tangan) -- bug
+# review Agustus 2026, lihat backend/docs/DOCTOR_CONSULTATION.md bagian
+# "Konsistensi snapshot preview -> PDF (token bertanda tangan)" +
+# utils/consultation_snapshot.py.
+# --------------------------------------------------------------------------
+
+
+def test_preview_returns_a_consultation_snapshot_token(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    body = _preview(client, user["token"], child["id"]).get_json()
+    assert isinstance(body.get("snapshot_token"), str)
+    assert len(body["snapshot_token"]) > 20
+
+
+def test_snapshot_token_claims_contain_only_approved_fields(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    token = _preview(client, user["token"], child["id"]).get_json()["snapshot_token"]
+    with client.application.app_context():
+        claims = decode_consultation_snapshot_token(token, child_id=child["id"], user_id=user["id"])
+    assert set(claims.keys()) == {"v", "child_id", "user_id", "preview_at", "digest"}
+
+
+def test_no_sensitive_data_in_decoded_claims_or_serialized_token(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    secret_q = "RAHASIA-pertanyaan-unik-xyz"
+    secret_note = "RAHASIA-catatan-unik-abc"
+    preview_body = _preview(
+        client, user["token"], child["id"], sections=["questions", "note"], questions=secret_q, note=secret_note,
+    ).get_json()
+    token = preview_body["snapshot_token"]
+
+    with client.application.app_context():
+        claims = decode_consultation_snapshot_token(token, child_id=child["id"], user_id=user["id"])
+    haystack = token + json.dumps(claims)
+    for secret in (secret_q, secret_note, "RAHASIA", "pertanyaan", "catatan"):
+        assert secret not in haystack
+
+
+def test_valid_unchanged_snapshot_produces_a_pdf(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    resp = _pdf(client, user["token"], child["id"])
+    assert resp.status_code == 200
+    assert resp.data.startswith(b"%PDF-")
+
+
+def test_pdf_renderer_receives_a_report_logically_identical_to_preview(client, monkeypatch):
+    """Requirement: 'the renderer receives a report logically identical to the previewed report.' Diverifikasi langsung dengan menangkap argumen render_consultation_pdf yang SUNGGUHAN dipanggil endpoint, bukan cuma percaya status 200."""
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    db.session.add(MedicationLog(child_id=child["id"], medication_name="Amoxicillin Unik", timestamp=FAKE_NOW))
+    db.session.commit()
+
+    preview_body = _preview(client, user["token"], child["id"], sections=["medication"]).get_json()
+    token = preview_body["snapshot_token"]
+
+    original_render = consultation_routes_module.render_consultation_pdf
+    captured = {}
+
+    def _capture(report):
+        captured["report"] = report
+        return original_render(report)
+
+    monkeypatch.setattr(consultation_routes_module, "render_consultation_pdf", _capture)
+
+    resp = _pdf(client, user["token"], child["id"], sections=["medication"], snapshot_token=token)
+    assert resp.status_code == 200
+    assert captured["report"]["sections"] == preview_body["sections"]
+    assert captured["report"]["period"] == preview_body["period"]
+    assert captured["report"]["sections"]["medication"]["entries"][0]["medication_name"] == "Amoxicillin Unik"
+
+
+def test_later_wall_clock_alone_does_not_invalidate_unchanged_snapshot(client, monkeypatch):
+    """Requirement #6: endpoint PDF TIDAK PERNAH memakai now_wib() BARU buat MEMBANGUN ULANG laporan (cuma buat metadata audit/nama file) -- wall-clock maju TIDAK memengaruhi kecocokan digest selama data DB-nya sendiri tidak berubah."""
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    token = _preview(client, user["token"], child["id"]).get_json()["snapshot_token"]
+
+    later = FAKE_NOW + timedelta(hours=2)
+    monkeypatch.setattr(consultation_routes_module, "now_wib", lambda: later)
+
+    resp = _pdf(client, user["token"], child["id"], snapshot_token=token)
+    assert resp.status_code == 200
+    assert resp.data.startswith(b"%PDF-")
+
+
+def test_adding_a_selected_section_record_after_preview_causes_409(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    token = _preview(client, user["token"], child["id"], sections=["medication"]).get_json()["snapshot_token"]
+
+    db.session.add(MedicationLog(child_id=child["id"], medication_name="Obat Baru", timestamp=FAKE_NOW))
+    db.session.commit()
+
+    resp = _pdf(client, user["token"], child["id"], sections=["medication"], snapshot_token=token)
+    assert resp.status_code == 409
+    assert "Buat pratinjau ulang" in resp.get_json()["error"]
+
+
+def test_editing_a_selected_section_record_after_preview_causes_409(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    log = MedicationLog(child_id=child["id"], medication_name="Obat Lama", timestamp=FAKE_NOW)
+    db.session.add(log)
+    db.session.commit()
+
+    token = _preview(client, user["token"], child["id"], sections=["medication"]).get_json()["snapshot_token"]
+
+    log.medication_name = "Obat Diubah"
+    db.session.commit()
+
+    resp = _pdf(client, user["token"], child["id"], sections=["medication"], snapshot_token=token)
+    assert resp.status_code == 409
+
+
+def test_deleting_a_selected_section_record_after_preview_causes_409(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    log = MedicationLog(child_id=child["id"], medication_name="Obat Untuk Dihapus", timestamp=FAKE_NOW)
+    db.session.add(log)
+    db.session.commit()
+
+    token = _preview(client, user["token"], child["id"], sections=["medication"]).get_json()["snapshot_token"]
+
+    db.session.delete(log)
+    db.session.commit()
+
+    resp = _pdf(client, user["token"], child["id"], sections=["medication"], snapshot_token=token)
+    assert resp.status_code == 409
+
+
+def test_changes_in_an_unselected_section_do_not_invalidate_snapshot(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    token = _preview(client, user["token"], child["id"], sections=["feeding"]).get_json()["snapshot_token"]
+
+    # `medication` TIDAK dipilih -- perubahan di section ini TIDAK BOLEH memengaruhi digest.
+    db.session.add(MedicationLog(child_id=child["id"], medication_name="Obat Tak Terpilih", timestamp=FAKE_NOW))
+    db.session.commit()
+
+    resp = _pdf(client, user["token"], child["id"], sections=["feeding"], snapshot_token=token)
+    assert resp.status_code == 200
+
+
+def test_medical_profile_change_causes_409_when_section_selected(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    token = _preview(client, user["token"], child["id"], sections=["medical_profile"]).get_json()["snapshot_token"]
+
+    client.put(
+        f"/api/children/{child['id']}/medical-profile",
+        json={"blood_type": "O+"}, headers=auth_headers(user["token"]),
+    )
+
+    resp = _pdf(client, user["token"], child["id"], sections=["medical_profile"], snapshot_token=token)
+    assert resp.status_code == 409
+
+
+def test_medical_profile_change_does_not_invalidate_preview_excluding_that_section(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    token = _preview(client, user["token"], child["id"], sections=["feeding"]).get_json()["snapshot_token"]
+
+    client.put(
+        f"/api/children/{child['id']}/medical-profile",
+        json={"blood_type": "O+"}, headers=auth_headers(user["token"]),
+    )
+
+    resp = _pdf(client, user["token"], child["id"], sections=["feeding"], snapshot_token=token)
+    assert resp.status_code == 200
+
+
+def test_child_display_data_change_after_preview_causes_409(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"], name="Nama Lama")
+    token = _preview(client, user["token"], child["id"], sections=["child_summary"]).get_json()["snapshot_token"]
+
+    client.put(
+        f"/api/children/{child['id']}", json={"nickname": "Panggilan Baru"}, headers=auth_headers(user["token"]),
+    )
+
+    resp = _pdf(client, user["token"], child["id"], sections=["child_summary"], snapshot_token=token)
+    assert resp.status_code == 409
+
+
+def test_changed_questions_cannot_be_exported_with_old_token(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    token = _preview(
+        client, user["token"], child["id"], sections=["questions"], questions="Pertanyaan asli",
+    ).get_json()["snapshot_token"]
+
+    resp = _pdf(
+        client, user["token"], child["id"], sections=["questions"], questions="Pertanyaan DIUBAH", snapshot_token=token,
+    )
+    assert resp.status_code == 409
+
+
+def test_changed_note_cannot_be_exported_with_old_token(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    token = _preview(
+        client, user["token"], child["id"], sections=["note"], note="Catatan asli",
+    ).get_json()["snapshot_token"]
+
+    resp = _pdf(
+        client, user["token"], child["id"], sections=["note"], note="Catatan DIUBAH", snapshot_token=token,
+    )
+    assert resp.status_code == 409
+
+
+def test_changed_section_selection_cannot_be_exported_with_old_token(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    token = _preview(client, user["token"], child["id"], sections=["feeding"]).get_json()["snapshot_token"]
+
+    resp = _pdf(client, user["token"], child["id"], sections=["feeding", "sleep"], snapshot_token=token)
+    assert resp.status_code == 409
+
+
+def test_changed_period_cannot_be_exported_with_old_token(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    token = _preview(client, user["token"], child["id"], period={"preset": "7d"}).get_json()["snapshot_token"]
+
+    resp = _pdf(client, user["token"], child["id"], period={"preset": "14d"}, snapshot_token=token)
+    assert resp.status_code == 409
+
+
+def test_canonicalization_is_stable_regardless_of_dict_key_order():
+    report_a = {
+        "child_id": 1, "child_display_name": "Dedek",
+        "period": {
+            "preset": "7d", "start_date": "2026-08-17", "end_date": "2026-08-23",
+            "timezone": "Asia/Jakarta", "days": 7,
+        },
+        "generated_at": "2026-08-23T10:00:00+07:00", "disclaimer": "d", "privacy_note": "p",
+        "generated_statement": "g", "included_sections": ["feeding"], "sensitive_sections_included": [],
+        "sections": {"feeding": {"total_events": 3, "by_type": {"asi_langsung": 3, "sufor": 0}}},
+    }
+    report_b = dict(reversed(list(report_a.items())))
+    report_b["period"] = dict(reversed(list(report_a["period"].items())))
+    report_b["sections"] = {"feeding": dict(reversed(list(report_a["sections"]["feeding"].items())))}
+    report_b["sections"]["feeding"]["by_type"] = dict(reversed(list(report_a["sections"]["feeding"]["by_type"].items())))
+
+    assert digest_consultation_report(report_a) == digest_consultation_report(report_b)
+
+
+def test_deterministic_ordering_prevents_false_mismatch_for_same_date_records(client, monkeypatch):
+    """
+    Regresi buat perbaikan tie-breaker `id` di utils/consultation_report.py
+    (requirement: 'deterministic database ordering prevents false
+    mismatches') -- 2 record ILLNESS dengan `start_date` PERSIS SAMA
+    TIDAK BOLEH bikin preview & rebuild PDF menghasilkan digest yang
+    beda gara-gara urutan baris SQLite yang (tanpa tie-breaker) tidak
+    dijamin stabil.
+    """
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    db.session.add(IllnessLog(child_id=child["id"], illness_name="Flu", start_date=FAKE_TODAY))
+    db.session.add(IllnessLog(child_id=child["id"], illness_name="Batuk", start_date=FAKE_TODAY))
+    db.session.commit()
+
+    token = _preview(client, user["token"], child["id"], sections=["illness"]).get_json()["snapshot_token"]
+    resp = _pdf(client, user["token"], child["id"], sections=["illness"], snapshot_token=token)
+    assert resp.status_code == 200
+
+
+def test_expired_consultation_snapshot_token_is_rejected(client, monkeypatch):
+    """
+    Token digenerate LANGSUNG lewat `generate_consultation_snapshot_token`
+    (bukan lewat HTTP POST .../preview) dengan `time.time()` dibekukan
+    ke 1 jam yang lalu HANYA selama panggilan itu -- BUKAN lewat
+    endpoint preview beneran, yang bakal ikut merusak token LOGIN
+    (`user["token"]`, juga bertanda tangan itsdangerous berbasis
+    `time.time()`) kalau jam sistem ikut dimundurkan saat request HTTP
+    itu diproses.
+    """
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+
+    from utils.consultation_snapshot import generate_consultation_snapshot_token
+    real_time = time.time
+    with client.application.app_context():
+        with patch("time.time", return_value=real_time() - 3600):
+            token = generate_consultation_snapshot_token(
+                child_id=child["id"], user_id=user["id"],
+                preview_at=FAKE_NOW.isoformat(), report_digest="expired-token-digest-never-checked",
+            )
+
+    resp = _pdf(client, user["token"], child["id"], snapshot_token=token)
+    assert resp.status_code == 400
+
+
+def test_tampered_consultation_snapshot_token_is_rejected(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    token = _preview(client, user["token"], child["id"]).get_json()["snapshot_token"]
+
+    tampered = _tamper_token(token)
+    resp = _pdf(client, user["token"], child["id"], snapshot_token=tampered)
+    assert resp.status_code == 400
+
+
+def test_wrong_child_consultation_snapshot_token_is_rejected(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child_a = create_child(client, user["token"], name="Anak A")
+    child_b = create_child(client, user["token"], name="Anak B")
+    token_for_a = _preview(client, user["token"], child_a["id"]).get_json()["snapshot_token"]
+
+    resp = _pdf(client, user["token"], child_b["id"], snapshot_token=token_for_a)
+    assert resp.status_code == 403
+
+
+def test_wrong_user_consultation_snapshot_token_is_rejected(client, monkeypatch):
+    _freeze(monkeypatch)
+    owner = register(client, name="Pemilik", email="owner-consnap1@example.com")
+    child = create_child(client, owner["token"])
+    editor = register(client, name="Editor", email="editor-consnap1@example.com")
+    invite_and_join(client, owner["token"], child["id"], editor["token"], "editor")
+
+    token_for_owner = _preview(client, owner["token"], child["id"]).get_json()["snapshot_token"]
+    resp = _pdf(client, editor["token"], child["id"], snapshot_token=token_for_owner)
+    assert resp.status_code == 403
+
+
+def test_missing_consultation_snapshot_token_is_rejected(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    resp = _pdf(client, user["token"], child["id"], snapshot_token=None)
+    assert resp.status_code == 400
+
+
+def test_invalid_schema_version_token_is_rejected(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    with client.application.app_context():
+        from utils.consultation_snapshot import CONSULTATION_SNAPSHOT_SALT
+        from utils.snapshot_token import generate_signed_snapshot_token
+        bad_token = generate_signed_snapshot_token(
+            salt=CONSULTATION_SNAPSHOT_SALT,
+            claims={
+                "v": 999, "child_id": child["id"], "user_id": user["id"],
+                "preview_at": FAKE_NOW.isoformat(), "digest": "whatever",
+            },
+        )
+    resp = _pdf(client, user["token"], child["id"], snapshot_token=bad_token)
+    assert resp.status_code == 400
+
+
+def test_pdf_rejects_declared_oversized_body(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    big_body = _json_body_of_exact_size(MAX_CONSULTATION_BODY_BYTES + 5_000)
+    resp = client.post(
+        f"/api/children/{child['id']}/doctor-consultation/pdf",
+        data=big_body, content_type="application/json", headers=auth_headers(user["token"]),
+    )
+    assert resp.status_code == 413
+
+
+def test_pdf_rejects_missing_content_length_oversized_body(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    big_body = _json_body_of_exact_size(MAX_CONSULTATION_BODY_BYTES + 5_000)
+    status_code, _ = _post_without_content_length(
+        client, f"/api/children/{child['id']}/doctor-consultation/pdf", user["token"], big_body,
+    )
+    assert status_code == 413
+
+
+def test_pdf_body_at_exact_boundary_passes_size_check(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    body = _json_body_of_exact_size(MAX_CONSULTATION_BODY_BYTES, extra={"snapshot_token": "x"})
+    resp = client.post(
+        f"/api/children/{child['id']}/doctor-consultation/pdf",
+        data=body, content_type="application/json", headers=auth_headers(user["token"]),
+    )
+    assert resp.status_code != 413
+
+
+def test_pdf_body_one_byte_over_boundary_is_rejected(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    body = _json_body_of_exact_size(MAX_CONSULTATION_BODY_BYTES + 1, extra={"snapshot_token": "x"})
+    resp = client.post(
+        f"/api/children/{child['id']}/doctor-consultation/pdf",
+        data=body, content_type="application/json", headers=auth_headers(user["token"]),
+    )
+    assert resp.status_code == 413
+
+
+def test_pdf_rejects_multibyte_utf8_oversized_body(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    base = {"period": {"preset": "7d"}}
+    base_len = len(json.dumps(base, ensure_ascii=False).encode("utf-8"))
+    emoji_count = (MAX_CONSULTATION_BODY_BYTES - base_len + 5_000) // 4
+    base["padding"] = "🩺" * emoji_count
+    body_over = json.dumps(base, ensure_ascii=False).encode("utf-8")
+    assert len(body_over) > MAX_CONSULTATION_BODY_BYTES
+    resp = client.post(
+        f"/api/children/{child['id']}/doctor-consultation/pdf",
+        data=body_over, content_type="application/json", headers=auth_headers(user["token"]),
+    )
+    assert resp.status_code == 413
+
+
+def test_pdf_rejects_malformed_json_body(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    resp = client.post(
+        f"/api/children/{child['id']}/doctor-consultation/pdf",
+        data="{not valid json", headers={**auth_headers(user["token"]), "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 400
+
+
+def test_pdf_rejects_non_object_json_body(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    resp = client.post(
+        f"/api/children/{child['id']}/doctor-consultation/pdf", json=["bukan", "objek"], headers=auth_headers(user["token"]),
+    )
+    assert resp.status_code == 400
+
+
+def test_viewer_gets_same_403_for_pdf_regardless_of_token_validity(client, monkeypatch):
+    _freeze(monkeypatch)
+    owner = register(client, name="Pemilik", email="owner-consnap2@example.com")
+    child = create_child(client, owner["token"])
+    viewer = register(client, name="Viewer", email="viewer-consnap2@example.com")
+    invite_and_join(client, owner["token"], child["id"], viewer["token"], "viewer")
+
+    valid_owner_token = _preview(client, owner["token"], child["id"]).get_json()["snapshot_token"]
+
+    resp_missing = _pdf(client, viewer["token"], child["id"], snapshot_token=None)
+    resp_garbage = _pdf(client, viewer["token"], child["id"], snapshot_token="garbage")
+    resp_not_theirs = _pdf(client, viewer["token"], child["id"], snapshot_token=valid_owner_token)
+
+    bodies = [r.get_json() for r in (resp_missing, resp_garbage, resp_not_theirs)]
+    for resp in (resp_missing, resp_garbage, resp_not_theirs):
+        assert resp.status_code == 403
+    assert all(b == bodies[0] for b in bodies)
+
+
+def test_no_pdf_renderer_called_for_rejected_or_stale_requests(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("render_consultation_pdf should not be called for a rejected/stale request")
+
+    monkeypatch.setattr(consultation_routes_module, "render_consultation_pdf", _fail_if_called)
+
+    assert _pdf(client, user["token"], child["id"], snapshot_token=None).status_code == 400
+
+    token = _preview(client, user["token"], child["id"]).get_json()["snapshot_token"]
+    assert _pdf(client, user["token"], child["id"], snapshot_token=_tamper_token(token)).status_code == 400
+
+    token2 = _preview(client, user["token"], child["id"], sections=["medication"]).get_json()["snapshot_token"]
+    db.session.add(MedicationLog(child_id=child["id"], medication_name="Baru", timestamp=FAKE_NOW))
+    db.session.commit()
+    assert _pdf(
+        client, user["token"], child["id"], sections=["medication"], snapshot_token=token2,
+    ).status_code == 409
+
+
+def test_no_audit_event_for_rejected_or_stale_pdf_requests(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    before = CaregiverAuditEvent.query.filter_by(
+        child_id=child["id"], entity_type="doctor_consultation_pdf_export",
+    ).count()
+
+    _pdf(client, user["token"], child["id"], snapshot_token=None)
+    _pdf(client, user["token"], child["id"], snapshot_token="garbage-token")
+    token = _preview(client, user["token"], child["id"], sections=["medication"]).get_json()["snapshot_token"]
+    db.session.add(MedicationLog(child_id=child["id"], medication_name="Baru2", timestamp=FAKE_NOW))
+    db.session.commit()
+    _pdf(client, user["token"], child["id"], sections=["medication"], snapshot_token=token)
+
+    after = CaregiverAuditEvent.query.filter_by(
+        child_id=child["id"], entity_type="doctor_consultation_pdf_export",
+    ).count()
+    assert after == before
+
+
+def test_successful_pdf_export_creates_exactly_one_audit_event(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    before = CaregiverAuditEvent.query.filter_by(
+        child_id=child["id"], entity_type="doctor_consultation_pdf_export",
+    ).count()
+
+    resp = _pdf(client, user["token"], child["id"])
+    assert resp.status_code == 200
+
+    after = CaregiverAuditEvent.query.filter_by(
+        child_id=child["id"], entity_type="doctor_consultation_pdf_export",
+    ).count()
+    assert after == before + 1
+
+
+def test_emergency_card_token_cannot_be_used_for_doctor_consultation(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+
+    from utils.emergency_card_snapshot import generate_snapshot_token as generate_emergency_card_token
+    with client.application.app_context():
+        foreign_token = generate_emergency_card_token(
+            child_id=child["id"], user_id=user["id"], preview_at=FAKE_NOW.isoformat(), report_digest="whatever",
+        )
+
+    resp = _pdf(client, user["token"], child["id"], snapshot_token=foreign_token)
+    assert resp.status_code == 400
+
+
+def test_doctor_consultation_token_cannot_be_used_for_emergency_card(client, monkeypatch):
+    _freeze(monkeypatch)
+    user = register(client)
+    child = create_child(client, user["token"])
+    consultation_token = _preview(client, user["token"], child["id"]).get_json()["snapshot_token"]
+
+    resp = client.post(
+        f"/api/children/{child['id']}/emergency-card/pdf",
+        json={"snapshot_token": consultation_token}, headers=auth_headers(user["token"]),
+    )
+    assert resp.status_code == 400

@@ -286,7 +286,13 @@ def list_vaccine_schedule():
 
 def _build_vaccination_list(child, age_months, reference_date=None):
     reference_date = reference_date or today_wib()
-    schedule = VaccineSchedule.query.order_by(VaccineSchedule.order_index.asc()).all()
+    # `id` tie-breaker SEKUNDER -- `order_index` seharusnya unik (tabel
+    # acuan Kemenkes yang di-seed sekali), TAPI ditambahkan defensif
+    # (requirement: "audit every report section for unstable database
+    # ordering") biar output ini SELALU deterministik lintas panggilan,
+    # termasuk saat dipakai Doctor Consultation snapshot digest (lihat
+    # utils/consultation_snapshot.py).
+    schedule = VaccineSchedule.query.order_by(VaccineSchedule.order_index.asc(), VaccineSchedule.id.asc()).all()
     existing = {cv.vaccine_schedule_id: cv for cv in child.vaccinations}
 
     result = []

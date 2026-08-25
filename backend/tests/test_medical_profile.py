@@ -19,7 +19,7 @@ from models import CaregiverAuditEvent, Child, ChildMedicalProfile, MedicationSc
 from tests.conftest import auth_headers, create_child, register
 from tests.test_doctor_consultation import _post_without_content_length
 from tests.test_roles_permissions import invite_and_join
-from utils.emergency_card_snapshot import decode_snapshot_token, digest_emergency_card_report
+from utils.emergency_card_snapshot import decode_snapshot_token, digest_emergency_card_report, generate_snapshot_token
 
 SAMPLE_PAYLOAD = {
     "blood_type": "O+",
@@ -50,6 +50,25 @@ def _put_profile(client, token, child_id, payload):
 
 def _review_profile(client, token, child_id):
     return client.post(f"/api/children/{child_id}/medical-profile/review", json={}, headers=auth_headers(token))
+
+
+def _tamper_token(token):
+    """
+    Rusak tanda tangan token SECARA ANDAL -- ganti karakter PERTAMA
+    segmen TANDA TANGAN (bagian setelah "." terakhir), BUKAN karakter
+    TERAKHIR token secara keseluruhan. Base64url TANPA padding
+    (dipakai itsdangerous) kadang menyisakan beberapa bit "kosong" di
+    posisi karakter PALING AKHIR sebuah string -- mengganti karakter di
+    posisi itu TIDAK SELALU mengubah byte hasil decode (flaky,
+    ditemukan langsung lewat test Doctor Consultation setara yang
+    pernah lolos verifikasi tanda tangan di 1 dari banyak run test
+    suite penuh). Karakter PERTAMA segmen tanda tangan TIDAK PERNAH
+    berada di posisi bit sisa semacam itu -- penggantian di situ SELALU
+    mengubah byte HMAC hasil decode.
+    """
+    head, sig = token.rsplit(".", 1)
+    mutated_sig = ("a" if sig[0] != "a" else "b") + sig[1:]
+    return f"{head}.{mutated_sig}"
 
 
 _AUTO_TOKEN = object()  # sentinel: "belum dikasih eksplisit -- ambil token segar dari preview"
@@ -583,13 +602,26 @@ def test_medical_profile_section_never_leaks_when_not_selected(client):
 
 
 def test_consultation_pdf_with_medical_profile_section_renders_successfully(client):
+    """
+    Endpoint PDF konsultasi butuh `snapshot_token` dari preview
+    (Doctor Consultation Snapshot-Safe PDF Export -- lihat
+    backend/docs/DOCTOR_CONSULTATION.md) -- preview dulu pakai payload
+    yang SAMA PERSIS sebelum unduh, konsisten sama seluruh test PDF
+    konsultasi lain (tests/test_doctor_consultation.py:_pdf).
+    """
     user = register(client)
     child = create_child(client, user["token"])
     _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
 
+    body = {"period": {"preset": "7d"}, "sections": ["medical_profile"]}
+    preview = client.post(
+        f"/api/children/{child['id']}/doctor-consultation/preview", json=body, headers=auth_headers(user["token"]),
+    )
+    assert preview.status_code == 200, preview.get_json()
+
     resp = client.post(
         f"/api/children/{child['id']}/doctor-consultation/pdf",
-        json={"period": {"preset": "7d"}, "sections": ["medical_profile"]},
+        json={**body, "snapshot_token": preview.get_json()["snapshot_token"]},
         headers=auth_headers(user["token"]),
     )
     assert resp.status_code == 200
@@ -882,13 +914,30 @@ def test_unchanged_data_with_later_wall_clock_still_exports_previewed_snapshot(c
 
 
 def test_expired_snapshot_token_is_rejected(client):
+    """
+    Token digenerate LANGSUNG lewat `generate_snapshot_token` (bukan
+    lewat HTTP POST .../preview) dengan `time.time()` dibekukan ke 1
+    jam yang lalu HANYA selama panggilan itu -- BUKAN lewat endpoint
+    preview beneran (bug review: membekukan `time.time()` di sekitar
+    request HTTP ikut merusak TOKEN LOGIN `user["token"]`, yang JUGA
+    bertanda tangan itsdangerous berbasis `time.time()` -- preview yang
+    dipanggil di dalam blok patch bakal balas 401 "Belum login", bukan
+    200, membuat `token` yang tertangkap jadi `None` alih-alih token
+    yang BENERAN kedaluwarsa, sehingga test sebelumnya SECARA TIDAK
+    SENGAJA cuma menguji 'token hilang', BUKAN 'token kedaluwarsa'
+    seperti namanya).
+    """
     user = register(client)
     child = create_child(client, user["token"])
     _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
 
     real_time = time.time
-    with patch("time.time", return_value=real_time() - 3600):
-        token = _snapshot_token_from_preview(client, user["token"], child["id"])
+    with client.application.app_context():
+        with patch("time.time", return_value=real_time() - 3600):
+            token = generate_snapshot_token(
+                child_id=child["id"], user_id=user["id"],
+                preview_at=datetime.now().isoformat(), report_digest="expired-token-digest-never-checked",
+            )
 
     resp = _pdf_card(client, user["token"], child["id"], snapshot_token=token)
     assert resp.status_code == 400
@@ -900,7 +949,7 @@ def test_tampered_snapshot_token_is_rejected(client):
     _put_profile(client, user["token"], child["id"], SAMPLE_PAYLOAD)
     token = _snapshot_token_from_preview(client, user["token"], child["id"])
 
-    tampered = token[:-1] + ("a" if token[-1] != "a" else "b")
+    tampered = _tamper_token(token)
     resp = _pdf_card(client, user["token"], child["id"], snapshot_token=tampered)
     assert resp.status_code == 400
 
@@ -1047,7 +1096,7 @@ def test_no_pdf_renderer_called_for_rejected_requests(client, monkeypatch):
     assert _pdf_card(client, user["token"], child["id"], snapshot_token=None).status_code == 400
 
     token = _snapshot_token_from_preview(client, user["token"], child["id"])
-    assert _pdf_card(client, user["token"], child["id"], snapshot_token=token[:-1] + "x").status_code == 400
+    assert _pdf_card(client, user["token"], child["id"], snapshot_token=_tamper_token(token)).status_code == 400
 
     token2 = _snapshot_token_from_preview(client, user["token"], child["id"])
     _put_profile(client, user["token"], child["id"], {**SAMPLE_PAYLOAD, "blood_type": "A-"})

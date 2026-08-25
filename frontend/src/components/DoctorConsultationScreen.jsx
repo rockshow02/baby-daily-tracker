@@ -24,17 +24,34 @@ import { formatDateWIB } from "../utils/consultationFormat";
  * render kondisional `{showConsultation && (...)}`, bukan `display:none`
  * — unmount beneran, bukan cuma disembunyikan).
  *
- * KONSISTENSI PREVIEW <-> PDF (bug review Agustus 2026): PDF WAJIB
- * merepresentasikan PERSIS apa yang sudah di-preview & disetujui user,
- * TIDAK PERNAH payload form yang lebih baru. `activeSnapshot` di bawah
- * adalah SATU-SATUNYA sumber kebenaran buat export — pasangan
- * `{payload, report}` yang immutable & atomik (dibuat ulang UTUH, tidak
- * pernah dimutasi sebagian), CUMA di-set kalau respons preview itu
- * BENERAN masih yang terbaru (lihat `requestSeqRef`) DAN payload yang
- * dikirim PERSIS sama dengan form SAAT respons itu tiba. Perubahan
- * input apa pun setelah snapshot ada langsung menandainya `stale` —
- * tombol Unduh PDF/Catat Hasil Kunjungan disembunyikan sampai preview
- * diulang.
+ * KONSISTENSI PREVIEW <-> PDF -- DUA LAPIS (bug review Agustus 2026,
+ * DIPERKUAT lagi lewat "Doctor Consultation Snapshot-Safe PDF Export"):
+ *
+ *   1. LOKAL (form vs snapshot yang SAMA instance): `activeSnapshot`
+ *      adalah SATU-SATUNYA sumber kebenaran buat export — TRIPLET
+ *      `{payload, report, snapshotToken}` yang immutable & atomik
+ *      (dibuat ulang UTUH, tidak pernah dimutasi sebagian), CUMA di-set
+ *      kalau respons preview itu BENERAN masih yang terbaru (lihat
+ *      `requestSeqRef`) DAN payload yang dikirim PERSIS sama dengan
+ *      form SAAT respons itu tiba. Perubahan input apa pun setelah
+ *      snapshot ada langsung menandainya `stale` — tombol Unduh PDF/
+ *      Catat Hasil Kunjungan disembunyikan sampai preview diulang.
+ *   2. SERVER (data eksternal yang TIDAK BISA diketahui frontend ini):
+ *      `snapshotToken` (field `snapshot_token` dari respons preview)
+ *      WAJIB dikirim balik APA ADANYA ke endpoint PDF bersama payload
+ *      yang SAMA — backend yang MEMBUKTIKAN kecocokan lewat digest
+ *      kriptografis (lihat backend/docs/DOCTOR_CONSULTATION.md bagian
+ *      "Konsistensi snapshot preview -> PDF (token bertanda tangan)"),
+ *      BUKAN cuma dipercaya klien. Ini melindungi dari perubahan yang
+ *      TIDAK BISA diketahui lapis 1 sama sekali — caregiver LAIN
+ *      mengubah data section yang dipilih di antara waktu preview &
+ *      unduh. Respons `409` (data berubah) ATAUPUN `400`/`403` (token
+ *      hilang/rusak/kedaluwarsa/salah anak/salah user) dari endpoint
+ *      PDF SEMUANYA ditangani SAMA (`serverStaleMessage`): preview LAMA
+ *      yang sudah ditampilkan TETAP kelihatan (buat perbandingan),
+ *      tombol Unduh PDF dinonaktifkan, tombol "Buat pratinjau ulang"
+ *      eksplisit ditampilkan — TIDAK PERNAH diam-diam mengunduh PDF
+ *      yang berbeda dari yang sudah direview.
  *
  * KAPABILITAS LEAST-PRIVILEGE (bug review Agustus 2026): SEBELUM ada
  * respons preview yang berhasil (backend belum pernah bilang APA yang
@@ -74,6 +91,21 @@ const PERIOD_PRESETS = [
 
 const QUESTIONS_MAX_LEN = 1000;
 const NOTE_MAX_LEN = 1000;
+
+// Pesan Indonesia AMAN dipakai persis sama saat backend balas 409
+// ("digest snapshot laporan konsultasi beda dari yang barusan dibangun
+// ulang" -- utils/consultation_snapshot.py) -- dipakai sebagai
+// FALLBACK kalau karena suatu alasan respons error tidak menyertakan
+// pesan sendiri; backend SELALU menyertakan pesannya sendiri di
+// praktiknya, ini murni jaring pengaman.
+const STALE_SNAPSHOT_MESSAGE =
+  "Data laporan konsultasi berubah sejak pratinjau dibuat. Buat pratinjau ulang sebelum mengunduh PDF.";
+// Status HTTP yang SEMUANYA berarti "token pratinjau/snapshot ini tidak
+// bisa lagi dipercaya buat mengunduh PDF -- WAJIB pratinjau ulang":
+// 409 = digest cocok tapi datanya sudah berubah (kasus utama defect
+// ini), 400/403 = token hilang/rusak/kedaluwarsa/salah anak/salah user
+// (lihat backend/routes/doctor_consultation_routes.py).
+const STATUSES_REQUIRING_FRESH_PREVIEW = new Set([400, 403, 409]);
 
 function useOnlineStatus() {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -135,10 +167,16 @@ export default function DoctorConsultationScreen({ child, onRecordVisit, onClose
   const [note, setNote] = useState("");
   const [status, setStatus] = useState("idle"); // idle | loading | ready | error
   const [errorMessage, setErrorMessage] = useState("");
-  // { payload, report } -- SATU-SATUNYA sumber kebenaran buat export;
-  // cuma diganti UTUH (tidak pernah dimutasi sebagian), lihat docstring modul.
+  // { payload, report, snapshotToken } -- SATU-SATUNYA sumber kebenaran
+  // buat export; cuma diganti UTUH (tidak pernah dimutasi sebagian),
+  // lihat docstring modul.
   const [activeSnapshot, setActiveSnapshot] = useState(null);
   const [stale, setStale] = useState(false);
+  // Pesan Indonesia dari lapis SERVER (409 data berubah, ATAUPUN 400/403
+  // token bermasalah) -- BEDA dari `stale` (lapis LOKAL, form vs
+  // snapshot) di atas, lihat docstring modul. `null` = tidak ada
+  // masalah server yang diketahui.
+  const [serverStaleMessage, setServerStaleMessage] = useState(null);
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState("");
   const [confirmingExport, setConfirmingExport] = useState(false);
@@ -148,6 +186,14 @@ export default function DoctorConsultationScreen({ child, onRecordVisit, onClose
   // respons yang lebih lama yang kebetulan tiba belakangan dibuang diam-diam.
   const requestSeqRef = useRef(0);
   const prevChildIdRef = useRef(child.id);
+  // Dipakai runPreview/handleDownload buat MENCEGAH setState setelah
+  // komponen ini unmount (mis. layar ditutup selagi request masih
+  // terbang) -- TIDAK PERNAH ada state update basi yang nyangkut.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   // Penghitung EDIT (BUKAN state React) -- dibaca lewat `.current` yang
   // SELALU nilai terkini, TIDAK PERNAH kena masalah closure basi kayak
   // variabel state yang ditangkap saat komponen render (nilai `presetKey`
@@ -195,6 +241,7 @@ export default function DoctorConsultationScreen({ child, onRecordVisit, onClose
     setActiveSnapshot(null);
     setStatus("idle");
     setStale(false);
+    setServerStaleMessage(null);
     setQuestions("");
     setNote("");
     setConfirmingExport(false);
@@ -223,6 +270,7 @@ export default function DoctorConsultationScreen({ child, onRecordVisit, onClose
   const markEdited = () => {
     editCounterRef.current += 1;
     setStale(true);
+    setServerStaleMessage(null); // edit lokal menggantikan alasan basi -- pesan server lama sudah tidak relevan
     setConfirmingExport(false);
   };
 
@@ -262,7 +310,7 @@ export default function DoctorConsultationScreen({ child, onRecordVisit, onClose
     setErrorMessage("");
     try {
       const res = await api.previewDoctorConsultation(child.id, payloadAtSend);
-      if (seq !== requestSeqRef.current) return; // permintaan lebih baru sudah menggantikan ini -- buang diam-diam
+      if (!mountedRef.current || seq !== requestSeqRef.current) return; // permintaan lebih baru sudah menggantikan ini (atau komponen sudah unmount) -- buang diam-diam
 
       // Kalau user sempat ganti input SELAGI request ini terbang
       // (editCounterRef berubah antara dikirim & tiba), snapshot yang
@@ -270,11 +318,17 @@ export default function DoctorConsultationScreen({ child, onRecordVisit, onClose
       // benar), TAPI sudah tidak mencerminkan form SAAT INI -- langsung
       // basi, jangan sempat kelihatan "up to date" walau sedetik.
       const editedDuringFlight = editCounterRef.current !== editCounterAtSend;
-      setActiveSnapshot({ payload: payloadAtSend, report: res });
+      // `snapshot_token` dipisah dari `report` (bukan sekadar field
+      // tambahan di dalamnya) -- report + payload + token diganti
+      // BERSAMAAN, 1 setState (requirement: "successful new preview
+      // atomically replaces report, payload, and token").
+      const { snapshot_token: snapshotToken, ...report } = res;
+      setActiveSnapshot({ payload: payloadAtSend, report, snapshotToken });
+      setServerStaleMessage(null);
       setStatus("ready");
       setStale(editedDuringFlight);
     } catch (err) {
-      if (seq !== requestSeqRef.current) return;
+      if (!mountedRef.current || seq !== requestSeqRef.current) return;
       setStatus("error");
       setErrorMessage(err?.message || "Gagal membuat pratinjau konsultasi.");
     }
@@ -285,22 +339,46 @@ export default function DoctorConsultationScreen({ child, onRecordVisit, onClose
     // ditampilkan -- TIDAK PERNAH buildNormalizedPayload() ulang dari
     // form saat ini (itu justru bug yang lagi diperbaiki di sini).
     const snapshot = activeSnapshot;
-    if (!snapshot || stale || status !== "ready" || downloading || !isOnline || !canExport) return;
+    if (
+      !snapshot || !snapshot.snapshotToken || stale || !!serverStaleMessage ||
+      status !== "ready" || downloading || !isOnline || !canExport
+    ) return;
     setDownloadError("");
     setDownloading(true);
     try {
       const filename = `konsultasi-${(child.nickname || child.name).toLowerCase().replace(/\s+/g, "-")}-${snapshot.report.period.end_date}.pdf`;
-      await api.downloadAuthenticatedPost(api.doctorConsultationPdfUrl(child.id), snapshot.payload, filename);
+      // `snapshot_token` ditambahkan ALONGSIDE field payload yang sudah
+      // ada (period/sections/questions/additional_note) -- bentuk body
+      // flat yang SAMA, TIDAK ADA nesting `{payload: {...}}` baru (lihat
+      // backend/docs/DOCTOR_CONSULTATION.md, kontrak yang dipilih
+      // secara sadar demi kompatibilitas maksimal dengan bentuk request
+      // yang sudah ada). `snapshot.payload` dikirim APA ADANYA -- TIDAK
+      // PERNAH dibangun ulang dari form saat ini.
+      await api.downloadAuthenticatedPost(
+        api.doctorConsultationPdfUrl(child.id),
+        { ...snapshot.payload, snapshot_token: snapshot.snapshotToken },
+        filename,
+      );
+      if (!mountedRef.current) return;
     } catch (err) {
-      setDownloadError(err?.message || "Gagal mengunduh PDF.");
+      if (!mountedRef.current) return;
+      if (STATUSES_REQUIRING_FRESH_PREVIEW.has(err?.status)) {
+        // Preview LAMA (`activeSnapshot`) SENGAJA TIDAK disentuh --
+        // tetap kelihatan buat perbandingan, TIDAK PERNAH dibuang diam-diam.
+        setServerStaleMessage(err.message || STALE_SNAPSHOT_MESSAGE);
+      } else {
+        setDownloadError(err?.message || "Gagal mengunduh PDF.");
+      }
     } finally {
-      setDownloading(false);
-      setConfirmingExport(false);
+      if (mountedRef.current) {
+        setDownloading(false);
+        setConfirmingExport(false);
+      }
     }
   };
 
   const requestDownload = () => {
-    if (!activeSnapshot || stale || status !== "ready") return;
+    if (!activeSnapshot || !activeSnapshot.snapshotToken || stale || !!serverStaleMessage || status !== "ready") return;
     // Sumber kebenaran "section sensitif mana yang KEBENERAN kepilih"
     // dari `activeSnapshot.report.sensitive_sections_included`
     // (dipantulkan backend PERSIS buat payload snapshot ini) -- BUKAN
@@ -492,9 +570,21 @@ export default function DoctorConsultationScreen({ child, onRecordVisit, onClose
             </div>
 
             {stale && (
-              <p role="status" className="text-[11px] text-warn bg-warn/10 border border-warn/30 rounded-lg px-3 py-2 mb-4">
-                Pilihan laporan berubah. Buat pratinjau ulang sebelum mengunduh PDF.
-              </p>
+              <div role="status" className="text-[11px] text-warn bg-warn/10 border border-warn/30 rounded-lg px-3 py-2 mb-4 space-y-1.5">
+                <p>Pilihan laporan berubah. Buat pratinjau ulang sebelum mengunduh PDF.</p>
+                <button type="button" onClick={runPreview} className="text-warn font-semibold underline underline-offset-2">
+                  Buat pratinjau ulang
+                </button>
+              </div>
+            )}
+
+            {!stale && serverStaleMessage && (
+              <div role="status" className="text-[11px] text-warn bg-warn/10 border border-warn/30 rounded-lg px-3 py-2 mb-4 space-y-1.5">
+                <p>{serverStaleMessage}</p>
+                <button type="button" onClick={runPreview} className="text-warn font-semibold underline underline-offset-2">
+                  Buat pratinjau ulang
+                </button>
+              </div>
             )}
 
             {activeSnapshot.report.sensitive_sections_included.length > 0 && (
@@ -505,6 +595,16 @@ export default function DoctorConsultationScreen({ child, onRecordVisit, onClose
 
             <ConsultationPreview report={activeSnapshot.report} />
 
+            {/*
+              Gate render blok ini TETAP `!stale` (basi LOKAL -- form
+              diedit setelah snapshot ada) SAJA -- requirement "hides
+              Download PDF ... until re-previewed" yang SUDAH ADA (basi
+              lokal) WAJIB tetap menyembunyikan tombol seutuhnya. Basi
+              SERVER (`serverStaleMessage`, 409/400/403 dari endpoint
+              PDF) beda perlakuannya: tombol TETAP kelihatan tapi
+              DINONAKTIFKAN (requirement: "disables download", bukan
+              "hides") -- lihat `disabled` di bawah.
+            */}
             {!stale && canExport && (
               <>
                 {confirmingExport && (
@@ -525,7 +625,7 @@ export default function DoctorConsultationScreen({ child, onRecordVisit, onClose
                 <button
                   type="button"
                   onClick={requestDownload}
-                  disabled={!isOnline || downloading}
+                  disabled={!isOnline || downloading || !activeSnapshot?.snapshotToken || !!serverStaleMessage}
                   className="w-full py-3 mb-3 rounded-xl2 border border-feed text-feed text-sm font-semibold disabled:opacity-50"
                 >
                   {downloading ? "Mengunduh PDF..." : "Unduh PDF"}

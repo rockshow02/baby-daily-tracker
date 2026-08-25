@@ -39,20 +39,28 @@ TIDAK ADA state disimpan di server ANTARA preview & PDF -- token ITU
 SENDIRI yang membawa semua yang dibutuhkan (ditandatangani, jadi TIDAK
 BISA dipalsukan klien), persis prinsip "tanpa background/state
 persisten" yang ditegakkan di seluruh app ini.
+
+REFACTOR (Doctor Consultation Snapshot-Safe PDF Export): primitif
+tanda-tangan/verifikasi/hashing GENERIK diekstrak ke
+`utils/snapshot_token.py` supaya dipakai BERSAMA oleh fitur snapshot
+Doctor Consultation (`utils/consultation_snapshot.py`) TANPA
+menduplikasi logic kriptografi -- API PUBLIK modul ini (nama fungsi,
+signature, PERILAKU) TIDAK BERUBAH SAMA SEKALI, murni delegasi
+internal (diverifikasi: seluruh test Emergency Card yang sudah ada
+tetap hijau tanpa modifikasi).
 """
-import hashlib
-import hmac
-import json
+from utils.snapshot_token import (
+    SnapshotTokenError, SnapshotTokenInvalidError, SnapshotTokenUnauthorizedError,
+    compute_sha256_digest, decode_signed_snapshot_token, digests_match, generate_signed_snapshot_token,
+)
 
-from flask import current_app
-from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
-
-# Salt TERPISAH dari token login (utils/auth.py:generate_token) -- dua
-# jenis token ini SENGAJA tidak bisa saling dipakai silang (salt beda
-# -> kunci turunan HMAC-nya beda), walau SECRET_KEY dasarnya sama persis
-# (requirement: "Use the existing Flask SECRET_KEY with a standard
-# signed serializer already available through Flask/itsdangerous. Do
-# not invent custom cryptography").
+# Salt TERPISAH dari token login (utils/auth.py:generate_token) DAN dari
+# token snapshot Doctor Consultation (utils/consultation_snapshot.py) --
+# tiga jenis token ini SENGAJA tidak bisa saling dipakai silang (salt
+# beda -> kunci turunan HMAC-nya beda), walau SECRET_KEY dasarnya sama
+# persis (requirement: "Use the existing Flask SECRET_KEY with a
+# standard signed serializer already available through Flask/itsdangerous.
+# Do not invent custom cryptography").
 SNAPSHOT_TOKEN_SALT = "emergency-card-snapshot-v1"
 
 # 15 menit -- cukup buat caregiver baca preview & putuskan unduh PDF,
@@ -69,18 +77,6 @@ SNAPSHOT_TOKEN_MAX_AGE_SECONDS = 15 * 60
 # -- token cuma hidup <=15 menit, jadi "downtime" penolakan sesaat
 # setelah deploy versi baru TIDAK PERNAH jadi masalah praktis.
 EMERGENCY_CARD_SNAPSHOT_SCHEMA_VERSION = 1
-
-
-class SnapshotTokenError(ValueError):
-    """Basis error token snapshot Kartu Darurat -- TIDAK PERNAH di-raise langsung, lihat 2 subclass di bawah."""
-
-
-class SnapshotTokenInvalidError(SnapshotTokenError):
-    """Token hilang/rusak/tanda tangan salah/kedaluwarsa/versi skema tidak cocok -- caller balas 400 (bukan 409 -- ini BUKAN kasus 'data berubah', tokennya sendiri yang tidak bisa dipercaya lagi)."""
-
-
-class SnapshotTokenUnauthorizedError(SnapshotTokenError):
-    """Token SAH (tanda tangan & masa berlaku valid) TAPI diterbitkan buat anak/pengguna LAIN -- caller balas 403 (requirement: 'Confirm the token belongs to the same child and authenticated user')."""
 
 
 def _allergy_canonical(entry):
@@ -143,12 +139,13 @@ def canonicalize_emergency_card_report(summary):
     otomatis tidak pernah tersentuh) dan `snapshot_token` itu sendiri
     (jelas bukan bagian konten laporan).
 
-    Deterministik: `json.dumps(..., sort_keys=True)` di
-    `digest_emergency_card_report` menormalkan URUTAN KEY di SEMUA level
-    (termasuk dict alergi/kondisi/obat bersarang) -- urutan insersi dict
-    Python di sini SAMA SEKALI TIDAK memengaruhi digest akhir. Urutan
-    LIST alergi/kondisi/obat sendiri SUDAH deterministik dari sumbernya
-    (lihat utils/emergency_card_report.py:_sorted_allergies/_sorted_conditions,
+    Deterministik: `json.dumps(..., sort_keys=True)` (lihat
+    utils/snapshot_token.py:compute_sha256_digest) menormalkan URUTAN
+    KEY di SEMUA level (termasuk dict alergi/kondisi/obat bersarang) --
+    urutan insersi dict Python di sini SAMA SEKALI TIDAK memengaruhi
+    digest akhir. Urutan LIST alergi/kondisi/obat sendiri SUDAH
+    deterministik dari sumbernya (lihat
+    utils/emergency_card_report.py:_sorted_allergies/_sorted_conditions,
     dan _regular_medications yang di-ORDER BY medication_name+id ganda,
     BUKAN urutan ORM yang tidak stabil) -- fungsi ini TIDAK mengurutkan
     ulang, cuma memilih field per entri.
@@ -180,19 +177,8 @@ def canonicalize_emergency_card_report(summary):
 
 
 def digest_emergency_card_report(summary):
-    """
-    SHA-256 hex digest dari bentuk kanonik `summary` -- `sort_keys=True`
-    menjamin urutan key STABIL di semua level nested, `ensure_ascii=False`
-    + encode eksplisit `utf-8` (requirement), `separators=(",", ":")`
-    menghapus whitespace opsional (representasi paling ringkas & stabil,
-    tidak ada 2 cara berbeda buat "byte yang sama secara logis").
-    `None`/`[]`/`""`/angka/boolean semuanya dibedakan APA ADANYA oleh
-    `json.dumps` bawaan Python (requirement eksplisit) -- fungsi ini
-    TIDAK PERNAH menormalkan/mengoersi tipe sebelum di-dump.
-    """
-    canonical = canonicalize_emergency_card_report(summary)
-    encoded = json.dumps(canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    """SHA-256 hex digest dari bentuk kanonik `summary` -- lihat `utils/snapshot_token.py:compute_sha256_digest` buat detail encoding."""
+    return compute_sha256_digest(canonicalize_emergency_card_report(summary))
 
 
 def generate_snapshot_token(*, child_id, user_id, preview_at, report_digest):
@@ -202,14 +188,13 @@ def generate_snapshot_token(*, child_id, user_id, preview_at, report_digest):
     Claims SENGAJA minimal -- CUMA child_id/user_id/timestamp
     preview/digest/versi skema, TIDAK PERNAH golongan darah/alergi/
     kondisi/kontak/instruksi darurat/nilai medis apa pun (diverifikasi
-    langsung lewat test_emergency_card_pdf_snapshot.py::
+    langsung lewat tests/test_medical_profile.py::
     test_snapshot_token_claims_never_contain_medical_or_contact_values).
     `preview_at`: STRING ISO 8601 (hasil `.isoformat()` datetime naive
     WIB) -- disimpan sebagai string biar 100% round-trip lewat JSON
     (encoder default itsdangerous), diparse balik via
     `datetime.fromisoformat` di route saat rebuild laporan.
     """
-    serializer = URLSafeTimedSerializer(current_app.config["SECRET_KEY"], salt=SNAPSHOT_TOKEN_SALT)
     claims = {
         "v": EMERGENCY_CARD_SNAPSHOT_SCHEMA_VERSION,
         "child_id": child_id,
@@ -217,42 +202,22 @@ def generate_snapshot_token(*, child_id, user_id, preview_at, report_digest):
         "preview_at": preview_at,
         "digest": report_digest,
     }
-    return serializer.dumps(claims)
+    return generate_signed_snapshot_token(salt=SNAPSHOT_TOKEN_SALT, claims=claims)
 
 
 def decode_snapshot_token(token, *, child_id, user_id):
     """
     Balikin dict claims TERVERIFIKASI, ATAU raise salah satu subclass
-    `SnapshotTokenError` di atas:
-
-      - `SnapshotTokenInvalidError`: tanda tangan salah/rusak (token
-        diotak-atik/dipalsukan), kedaluwarsa (>SNAPSHOT_TOKEN_MAX_AGE_SECONDS),
-        payload bukan dict, ATAUPUN versi skema (`v`) TIDAK COCOK
-        `EMERGENCY_CARD_SNAPSHOT_SCHEMA_VERSION` server SAAT INI (server
-        sudah upgrade format sejak token ini diterbitkan).
-      - `SnapshotTokenUnauthorizedError`: token SAH TAPI `child_id`
-        ATAUPUN `user_id` di dalam claims BEDA dari yang diminta SEKARANG
-        (requirement: "Confirm the token belongs to the same child and
-        authenticated user" -- token curian/salah tempel dari
-        anak/sesi lain SELALU ditolak walau tanda tangannya valid).
-
-    Pesan error yang ditampilkan ke klien (dipilih oleh CALLER, bukan
-    fungsi ini) SENGAJA generik & tidak membedah alasan penolakan
-    spesifik -- TIDAK PERNAH membocorkan isi claims/detail tanda tangan.
+    `SnapshotTokenError` (diimpor dari `utils/snapshot_token.py`, lihat
+    docstring di sana buat penjelasan lengkap 2 subclass-nya):
+    `SnapshotTokenInvalidError` (400) ATAUPUN `SnapshotTokenUnauthorizedError`
+    (403). Pesan error yang ditampilkan ke klien dipilih oleh CALLER.
     """
-    serializer = URLSafeTimedSerializer(current_app.config["SECRET_KEY"], salt=SNAPSHOT_TOKEN_SALT)
-    try:
-        claims = serializer.loads(token, max_age=SNAPSHOT_TOKEN_MAX_AGE_SECONDS)
-    except (BadSignature, SignatureExpired):
-        raise SnapshotTokenInvalidError("invalid_or_expired")
-
-    if not isinstance(claims, dict) or claims.get("v") != EMERGENCY_CARD_SNAPSHOT_SCHEMA_VERSION:
-        raise SnapshotTokenInvalidError("invalid_or_expired")
-    if claims.get("child_id") != child_id or claims.get("user_id") != user_id:
-        raise SnapshotTokenUnauthorizedError("wrong_child_or_user")
-    return claims
-
-
-def digests_match(a, b):
-    """Perbandingan WAKTU-KONSTAN (requirement: 'Compare digests using a timing-safe comparison') -- jangan pernah `a == b` biasa buat nilai turunan kriptografis."""
-    return hmac.compare_digest(a or "", b or "")
+    return decode_signed_snapshot_token(
+        token,
+        salt=SNAPSHOT_TOKEN_SALT,
+        max_age_seconds=SNAPSHOT_TOKEN_MAX_AGE_SECONDS,
+        expected_schema_version=EMERGENCY_CARD_SNAPSHOT_SCHEMA_VERSION,
+        child_id=child_id,
+        user_id=user_id,
+    )

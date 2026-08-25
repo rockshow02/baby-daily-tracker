@@ -45,8 +45,15 @@ function makeReport(overrides = {}) {
     capabilities: { can_preview: true, can_export: true, can_add_private_notes: true, can_record_visit: true },
     request_id: "req-1",
     sensitive_section_codes: ["illness", "medication", "doctor_visits", "questions", "note"],
+    snapshot_token: "signed-token-1",
     ...overrides,
   };
+}
+
+function apiError(status, message) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
 }
 
 beforeEach(() => {
@@ -335,7 +342,10 @@ describe("DoctorConsultationScreen — preview/PDF snapshot consistency", () => 
     fireEvent.click(screen.getByRole("button", { name: "Ya, unduh" }));
     await waitFor(() => expect(apiMock.downloadAuthenticatedPost).toHaveBeenCalledTimes(1));
     const [, downloadedPayload] = apiMock.downloadAuthenticatedPost.mock.calls[0];
-    expect(downloadedPayload).toEqual(sentPayload);
+    // Body PDF sekarang WAJIB menyertakan snapshot_token ALONGSIDE field
+    // payload yang sama persis dikirim ke preview (bentuk flat, bukan
+    // nesting -- lihat backend/docs/DOCTOR_CONSULTATION.md).
+    expect(downloadedPayload).toEqual({ ...sentPayload, snapshot_token: sensitiveReport.snapshot_token });
   });
 
   it("cannot export a stale preview as though it still represented the current (later cleared) sensitive selection", async () => {
@@ -629,5 +639,148 @@ describe("DoctorConsultationScreen — human-readable preview (no raw JSON)", ()
     await screen.findByText("Paracetamol");
 
     expect(container.querySelector("table")).toBeNull();
+  });
+});
+
+// --------------------------------------------------------------------------
+// Doctor Consultation Snapshot-Safe PDF Export (bug review Agustus 2026)
+// -- lapis KEDUA, server-side, di ATAS `activeSnapshot` lokal yang sudah
+// ada. Lihat backend/docs/DOCTOR_CONSULTATION.md bagian "Konsistensi
+// snapshot preview -> PDF (token bertanda tangan)". Sebagian besar
+// requirement (edit periode/section/pertanyaan/catatan/ganti anak
+// membatalkan snapshot, konfirmasi privasi pakai daftar section
+// sensitif snapshot aktif, klik ganda cuma 1 request) SUDAH dibuktikan
+// oleh describe block "preview/PDF snapshot consistency" &
+// "least-privilege capability defaults" di atas -- TIDAK diulang di
+// sini, cuma perilaku BARU (token) yang ditambahkan.
+// --------------------------------------------------------------------------
+describe("DoctorConsultationScreen — snapshot-safe PDF export (signed token)", () => {
+  it("stores {payload, report, snapshotToken} atomically and sends the exact token + payload to the PDF endpoint", async () => {
+    apiMock.previewDoctorConsultation.mockResolvedValue(makeReport({ snapshot_token: "tok-abc-123" }));
+    apiMock.downloadAuthenticatedPost.mockResolvedValue();
+    render(<DoctorConsultationScreen child={testChild} onClose={vi.fn()} onRecordVisit={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Buat Pratinjau" }));
+    await waitFor(() => expect(apiMock.previewDoctorConsultation).toHaveBeenCalled());
+    const [, sentPayload] = apiMock.previewDoctorConsultation.mock.calls[0];
+
+    fireEvent.click(await screen.findByRole("button", { name: "Unduh PDF" }));
+    await waitFor(() => expect(apiMock.downloadAuthenticatedPost).toHaveBeenCalledTimes(1));
+    const [url, body] = apiMock.downloadAuthenticatedPost.mock.calls[0];
+    expect(url).toBe("http://x/api/children/10/doctor-consultation/pdf");
+    expect(body).toEqual({ ...sentPayload, snapshot_token: "tok-abc-123" });
+  });
+
+  it("disables the PDF button when the preview response is missing a snapshot token", async () => {
+    const { snapshot_token, ...reportWithoutToken } = makeReport();
+    apiMock.previewDoctorConsultation.mockResolvedValue(reportWithoutToken);
+    render(<DoctorConsultationScreen child={testChild} onClose={vi.fn()} onRecordVisit={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Buat Pratinjau" }));
+    expect(await screen.findByRole("button", { name: "Unduh PDF" })).toBeDisabled();
+  });
+
+  it("on a 409 stale response: keeps the old preview visible, disables download, and shows 'Buat pratinjau ulang'", async () => {
+    apiMock.previewDoctorConsultation.mockResolvedValue(makeReport());
+    apiMock.downloadAuthenticatedPost.mockRejectedValue(
+      apiError(409, "Data laporan konsultasi berubah sejak pratinjau dibuat. Buat pratinjau ulang sebelum mengunduh PDF."),
+    );
+    render(<DoctorConsultationScreen child={testChild} onClose={vi.fn()} onRecordVisit={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Buat Pratinjau" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Unduh PDF" }));
+
+    expect(await screen.findByText(
+      "Data laporan konsultasi berubah sejak pratinjau dibuat. Buat pratinjau ulang sebelum mengunduh PDF.",
+    )).toBeInTheDocument();
+    // Preview yang SUDAH ditampilkan TETAP kelihatan (buat perbandingan) -- TIDAK dibuang.
+    expect(screen.getByText(/23 Agu 2026/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Unduh PDF" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Buat pratinjau ulang" })).toBeInTheDocument();
+  });
+
+  it("reloading the preview after a 409 replaces report, payload, and token atomically, clearing the stale state", async () => {
+    apiMock.previewDoctorConsultation.mockResolvedValueOnce(makeReport({ snapshot_token: "tok-old" }));
+    apiMock.downloadAuthenticatedPost.mockRejectedValueOnce(apiError(409, "basi"));
+    render(<DoctorConsultationScreen child={testChild} onClose={vi.fn()} onRecordVisit={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Buat Pratinjau" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Unduh PDF" }));
+    expect(await screen.findByText("basi")).toBeInTheDocument();
+
+    apiMock.previewDoctorConsultation.mockResolvedValueOnce(makeReport({ snapshot_token: "tok-new" }));
+    fireEvent.click(screen.getByRole("button", { name: "Buat pratinjau ulang" }));
+    await waitFor(() => expect(apiMock.previewDoctorConsultation).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText("basi")).not.toBeInTheDocument();
+    const downloadButton = await screen.findByRole("button", { name: "Unduh PDF" });
+    expect(downloadButton).not.toBeDisabled();
+
+    apiMock.downloadAuthenticatedPost.mockResolvedValueOnce();
+    fireEvent.click(downloadButton);
+    await waitFor(() => expect(apiMock.downloadAuthenticatedPost).toHaveBeenCalledTimes(2));
+    const [, secondBody] = apiMock.downloadAuthenticatedPost.mock.calls[1];
+    expect(secondBody.snapshot_token).toBe("tok-new");
+  });
+
+  it("treats an expired/invalid-token (400) response the same way as a 409 -- requires a fresh preview", async () => {
+    apiMock.previewDoctorConsultation.mockResolvedValue(makeReport());
+    apiMock.downloadAuthenticatedPost.mockRejectedValue(
+      apiError(400, "Token pratinjau tidak valid atau sudah kedaluwarsa. Buat pratinjau ulang sebelum mengunduh PDF."),
+    );
+    render(<DoctorConsultationScreen child={testChild} onClose={vi.fn()} onRecordVisit={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Buat Pratinjau" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Unduh PDF" }));
+
+    expect(await screen.findByText(
+      "Token pratinjau tidak valid atau sudah kedaluwarsa. Buat pratinjau ulang sebelum mengunduh PDF.",
+    )).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Unduh PDF" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Buat pratinjau ulang" })).toBeInTheDocument();
+  });
+
+  it("out-of-order preview responses cannot replace the latest snapshot (a slow response for a superseded child arrives late)", async () => {
+    const first = deferred();
+    apiMock.previewDoctorConsultation.mockReturnValueOnce(first.promise);
+    const { rerender } = render(<DoctorConsultationScreen child={testChild} onClose={vi.fn()} onRecordVisit={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Buat Pratinjau" }));
+    expect(screen.getByRole("button", { name: "Membuat pratinjau..." })).toBeDisabled();
+
+    // Anak berganti SELAGI request pertama masih terbang -- requestSeqRef
+    // dinaikkan (lihat useEffect child.id komponen), request lama itu
+    // otomatis "basi" begitu tiba.
+    const otherChild = { ...testChild, id: 99 };
+    apiMock.previewDoctorConsultation.mockResolvedValueOnce(makeReport({ snapshot_token: "tok-for-child-99" }));
+    rerender(<DoctorConsultationScreen child={otherChild} onClose={vi.fn()} onRecordVisit={vi.fn()} />);
+
+    // Request LAMA (anak 10) akhirnya selesai -- HARUS diabaikan total.
+    first.resolve(makeReport({ snapshot_token: "tok-for-child-10-stale", child_display_name: "Dedek Lama Basi" }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(screen.queryByText("Dedek Lama Basi")).not.toBeInTheDocument();
+  });
+
+  it("does not update state or log an error after unmounting while a preview request is in flight", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { promise, resolve } = deferred();
+    apiMock.previewDoctorConsultation.mockReturnValue(promise);
+    const { unmount } = render(<DoctorConsultationScreen child={testChild} onClose={vi.fn()} onRecordVisit={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Buat Pratinjau" }));
+
+    unmount();
+    resolve(makeReport());
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it("never writes the snapshot token, payload, or report to any browser storage (also proves nothing is queued offline, since this app's offline queue itself lives in localStorage)", async () => {
+    const setItemSpy = vi.spyOn(Storage.prototype, "setItem");
+    apiMock.previewDoctorConsultation.mockResolvedValue(makeReport({ snapshot_token: "tok-secret" }));
+    apiMock.downloadAuthenticatedPost.mockResolvedValue();
+    render(<DoctorConsultationScreen child={testChild} onClose={vi.fn()} onRecordVisit={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Buat Pratinjau" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Unduh PDF" }));
+    await waitFor(() => expect(apiMock.downloadAuthenticatedPost).toHaveBeenCalled());
+
+    expect(setItemSpy).not.toHaveBeenCalled();
   });
 });

@@ -336,7 +336,14 @@ def _growth_section(child_id, start_date, end_date, today):
             GrowthMeasurement.child_id == child_id,
             GrowthMeasurement.measured_date >= start_date,
             GrowthMeasurement.measured_date <= end_date,
-        ).order_by(GrowthMeasurement.measured_date.asc())
+        # `id` tie-breaker SEKUNDER -- 2 pengukuran dengan `measured_date`
+        # PERSIS sama urutannya TIDAK BOLEH bergantung ke urutan
+        # penyimpanan internal SQLite yang tidak dijamin (requirement:
+        # "audit every report section for unstable database ordering" --
+        # krusial buat digest snapshot preview->PDF tetap deterministik
+        # antara 2 request yang membaca data SAMA, lihat
+        # utils/consultation_snapshot.py).
+        ).order_by(GrowthMeasurement.measured_date.asc(), GrowthMeasurement.id.asc())
     )
     rows, total_count, truncated = _capped_query_result(query, MAX_GROWTH_ROWS)
     return {
@@ -386,7 +393,7 @@ def _illness_section(child_id, start_date, end_date):
         IllnessLog.child_id == child_id,
         IllnessLog.start_date >= start_date,
         IllnessLog.start_date <= end_date,
-    ).order_by(IllnessLog.start_date.desc())
+    ).order_by(IllnessLog.start_date.desc(), IllnessLog.id.desc())
     rows, total_count, truncated = _capped_query_result(query, MAX_ILLNESS_ROWS)
     return {
         "entries": [
@@ -459,7 +466,7 @@ def _medication_section(child_id, start_date, end_date, now):
         MedicationLog.child_id == child_id,
         MedicationLog.timestamp >= start_dt,
         MedicationLog.timestamp < end_dt,
-    ).order_by(MedicationLog.timestamp.desc())
+    ).order_by(MedicationLog.timestamp.desc(), MedicationLog.id.desc())
     rows, total_count, truncated = _capped_query_result(query, MAX_MEDICATION_ROWS)
     return {
         "entries": [
@@ -503,7 +510,7 @@ def _milestones_section(child_id, start_date, end_date):
         MilestoneLog.child_id == child_id,
         MilestoneLog.achieved_date >= start_date,
         MilestoneLog.achieved_date <= end_date,
-    ).order_by(MilestoneLog.achieved_date.desc())
+    ).order_by(MilestoneLog.achieved_date.desc(), MilestoneLog.id.desc())
     rows, total_count, truncated = _capped_query_result(query, MAX_MILESTONE_ROWS)
     return {
         # `custom_label` SENGAJA nggak pernah disertakan -- teks bebas,
@@ -519,7 +526,7 @@ def _doctor_visits_section(child_id, start_date, end_date):
         DoctorVisitLog.child_id == child_id,
         DoctorVisitLog.visit_date >= start_date,
         DoctorVisitLog.visit_date <= end_date,
-    ).order_by(DoctorVisitLog.visit_date.desc())
+    ).order_by(DoctorVisitLog.visit_date.desc(), DoctorVisitLog.id.desc())
     rows, total_count, truncated = _capped_query_result(query, MAX_DOCTOR_VISIT_ROWS)
     return {
         "entries": [

@@ -20,6 +20,7 @@ SINKRON, di memori, per-request (lihat utils/consultation_pdf.py),
 PERSIS prinsip PythonAnywhere Free yang sudah ditegakkan di seluruh app.
 """
 import re
+from datetime import datetime
 
 from flask import Blueprint, g, jsonify, request, send_file
 
@@ -39,11 +40,22 @@ from utils.consultation_report import (
     validate_questions,
     validate_sections,
 )
+from utils.consultation_snapshot import (
+    SnapshotTokenInvalidError, SnapshotTokenUnauthorizedError,
+    decode_consultation_snapshot_token, digest_consultation_report,
+    generate_consultation_snapshot_token,
+)
+from utils.snapshot_token import digests_match
 from utils.timezone_utils import now_wib, today_wib
 
 doctor_consultation_bp = Blueprint("doctor_consultation", __name__)
 
 _FILENAME_SAFE_RE = re.compile(r"[^a-z0-9-]+")
+
+MISSING_SNAPSHOT_TOKEN_MESSAGE = "Token pratinjau tidak ditemukan. Buat pratinjau ulang sebelum mengunduh PDF."
+INVALID_SNAPSHOT_TOKEN_MESSAGE = "Token pratinjau tidak valid atau sudah kedaluwarsa. Buat pratinjau ulang sebelum mengunduh PDF."
+UNAUTHORIZED_SNAPSHOT_TOKEN_MESSAGE = "Token pratinjau ini tidak berlaku untuk permintaan ini. Buat pratinjau ulang sebelum mengunduh PDF."
+STALE_SNAPSHOT_MESSAGE = "Data laporan konsultasi berubah sejak pratinjau dibuat. Buat pratinjau ulang sebelum mengunduh PDF."
 
 
 def _require_login_and_child(child_id):
@@ -142,52 +154,68 @@ def _read_json_body_within_limit():
     return request.get_json(silent=True), None
 
 
-def _parse_request_payload(role, capabilities):
+def _parse_request_payload(role, capabilities, today):
     """
     Validasi SELURUH body request -- period, sections, questions,
     additional_note -- SEKALI, dipakai SAMA PERSIS oleh endpoint preview
     maupun pdf (1 sumber kebenaran validasi). Balikin
-    (period, sections, questions_text, note_text, error_response_atau_None).
+    (period, sections, questions_text, note_text, data,
+    error_response_atau_None) -- `data` (dict JSON mentah yang SUDAH
+    lolos bounded-read) DIBALIKIN JUGA (bukan cuma field yang sudah
+    divalidasi) supaya endpoint PDF bisa membaca `data.get("snapshot_token")`
+    dari body yang SAMA PERSIS TANPA membaca ulang `request.stream`
+    (stream cuma bisa dibaca SEKALI -- baca ulang lewat
+    `_read_json_body_within_limit()` kedua kalinya bakal dapet body
+    KOSONG, lihat docstring fungsi itu).
+
+    `today`: SENGAJA parameter (bukan `today_wib()` dipanggil langsung
+    di sini) -- endpoint preview SELALU memakai tanggal SEKARANG,
+    endpoint PDF memakai tanggal SEKARANG di LANGKAH VALIDASI ini
+    (mengecek bentuk/rentang period yang DIKIRIM ULANG masih legal),
+    TAPI merekonstruksi ULANG period-nya lagi SETELAH token diverifikasi
+    memakai tanggal BEKU dari token (lihat export_consultation_pdf) --
+    2 tujuan berbeda, `today` yang mana dipakai di sini murni buat
+    validasi bentuk, BUKAN buat isi laporan yang akhirnya di-digest.
 
     Field top-level di luar 4 yang dikenal (`period`/`sections`/
-    `questions`/`additional_note`) SENGAJA diabaikan diam-diam (dibaca
-    lewat `data.get(...)`, TIDAK PERNAH divalidasi allowlist-nya) --
-    KONSISTEN sama konvensi SELURUH endpoint lain di app ini (mis.
-    routes/health_routes.py, routes/reminder_routes.py: semuanya baca
-    field yang dikenal satu-satu lewat `.get()`, TIDAK ADA yang menolak
-    key request tak dikenal). Menambahkan kebijakan "tolak field asing"
-    CUMA di endpoint ini bakal jadi perilaku validasi yang nggak
-    konsisten/mengejutkan dibanding endpoint lain, jadi SENGAJA tidak
-    ditambahkan di sini juga.
+    `questions`/`additional_note` -- ATAUPUN `snapshot_token` yang CUMA
+    dibaca endpoint PDF secara terpisah, lihat di atas) SENGAJA
+    diabaikan diam-diam (dibaca lewat `data.get(...)`, TIDAK PERNAH
+    divalidasi allowlist-nya) -- KONSISTEN sama konvensi SELURUH
+    endpoint lain di app ini (mis. routes/health_routes.py,
+    routes/reminder_routes.py: semuanya baca field yang dikenal
+    satu-satu lewat `.get()`, TIDAK ADA yang menolak key request tak
+    dikenal). Menambahkan kebijakan "tolak field asing" CUMA di endpoint
+    ini bakal jadi perilaku validasi yang nggak konsisten/mengejutkan
+    dibanding endpoint lain, jadi SENGAJA tidak ditambahkan di sini juga.
     """
     data, err = _read_json_body_within_limit()
     if err:
         payload, status = err
-        return None, None, None, None, (jsonify(payload), status)
+        return None, None, None, None, None, (jsonify(payload), status)
     if not isinstance(data, dict):
-        return None, None, None, None, (jsonify({"error": "Format data tidak valid"}), 400)
+        return None, None, None, None, None, (jsonify({"error": "Format data tidak valid"}), 400)
 
     try:
-        today = today_wib()
         period = resolve_consultation_period(data.get("period"), today)
         sections = validate_sections(data.get("sections"))
         questions_text = validate_questions(data.get("questions"))
         note_text = validate_note(data.get("additional_note"))
     except ConsultationValidationError as exc:
-        return None, None, None, None, (jsonify({"error": exc.message}), 400)
+        return None, None, None, None, None, (jsonify({"error": exc.message}), 400)
 
     wants_private_text = bool(questions_text) or bool(note_text)
     if wants_private_text and not capabilities["can_add_private_notes"]:
-        return None, None, None, None, (
+        return None, None, None, None, None, (
             jsonify({"error": "Peran Anda tidak bisa menambahkan pertanyaan/catatan tambahan."}), 403
         )
 
     if SECTION_MEDICAL_PROFILE in sections and not capabilities["can_include_medical_profile"]:
-        return None, None, None, None, (
+        return None, None, None, None, None, (
             jsonify({"error": "Peran Anda tidak bisa menyertakan bagian Profil Medis & Kartu Darurat."}), 403
         )
 
-    return period, sections, questions_text, note_text, None
+    return period, sections, questions_text, note_text, data, None
 
 
 def _safe_filename_component(text):
@@ -198,6 +226,15 @@ def _safe_filename_component(text):
 
 @doctor_consultation_bp.route("/children/<int:child_id>/doctor-consultation/preview", methods=["POST"])
 def preview_consultation(child_id):
+    """
+    Lihat backend/docs/DOCTOR_CONSULTATION.md bagian "Konsistensi
+    snapshot preview -> PDF (token bertanda tangan)" + docstring
+    utils/consultation_snapshot.py. `now` di-sample SEKALI di sini --
+    dipakai buat isi laporan (usia, "generated_at", resolusi period
+    preset, dll) DAN ikut ditandatangani di dalam `snapshot_token`
+    (field `preview_at`), biar endpoint PDF bisa membangun ulang
+    laporan yang SAMA PERSIS tanpa perlu menyimpan apa pun di server.
+    """
     child, err = _require_login_and_child(child_id)
     if err:
         return err
@@ -205,12 +242,19 @@ def preview_consultation(child_id):
     role = resolve_role(child, user_id)
     capabilities = _capabilities(role)
 
-    period, sections, questions_text, note_text, err = _parse_request_payload(role, capabilities)
+    today = today_wib()
+    period, sections, questions_text, note_text, _data, err = _parse_request_payload(role, capabilities, today)
     if err:
         return err
 
     now = now_wib()
     report = build_consultation_report(child, period, sections, questions_text, note_text, period["end_date"], now)
+
+    digest = digest_consultation_report(report)
+    snapshot_token = generate_consultation_snapshot_token(
+        child_id=child_id, user_id=user_id, preview_at=now.isoformat(), report_digest=digest,
+    )
+
     report["capabilities"] = capabilities
     report["request_id"] = getattr(g, "request_id", None) or "unknown"
     # `sensitive_sections_available` -- allowlist TETAP (bukan cuma yang
@@ -218,11 +262,30 @@ def preview_consultation(child_id):
     # "section ini sensitif" buat SEMUA opsi checkbox, bukan cuma yang
     # kebetulan lagi dicentang.
     report["sensitive_section_codes"] = sorted(SENSITIVE_SECTIONS)
+    report["snapshot_token"] = snapshot_token
     return jsonify(report)
 
 
 @doctor_consultation_bp.route("/children/<int:child_id>/doctor-consultation/pdf", methods=["POST"])
 def export_consultation_pdf(child_id):
+    """
+    Urutan pengecekan SENGAJA (lihat backend/docs/DOCTOR_CONSULTATION.md):
+    (1) login+akses anak, (2) otorisasi export Owner/Editor, (3) bounded
+    body read, (4) body harus objek JSON, (5) validasi payload &
+    section sensitif yang SUDAH ADA (period/sections/questions/note --
+    pakai `today_wib()` REAL, MURNI buat validasi bentuk/rentang), (6)
+    tanda tangan+kedaluwarsa+versi skema token, (7) token harus milik
+    anak+user yang SAMA, (8) parse `preview_at` dari token secara
+    defensif, (9) BANGUN ULANG laporan pakai payload yang DIKIRIM ULANG
+    + database TERKINI, TAPI period-nya di-RESOLVE ULANG memakai
+    `preview_at` BEKU (bukan `today_wib()` lagi) supaya preset periode
+    (mis. "7d") tetap merujuk rentang tanggal yang SAMA PERSIS kayak
+    saat preview, (10) hash pakai helper kanonik yang SAMA PERSIS
+    dipakai preview, (11) bandingkan digest TIMING-SAFE, (12) render
+    PDF CUMA kalau cocok, (13) audit CUMA ditulis SETELAH semua validasi
+    & pengecekan digest lolos. TIDAK PERNAH merender PDF ATAUPUN
+    menulis baris audit buat request yang ditolak di langkah manapun.
+    """
     child, err = _require_login_and_child(child_id)
     if err:
         return err
@@ -230,24 +293,66 @@ def export_consultation_pdf(child_id):
     role = resolve_role(child, user_id)
     capabilities = _capabilities(role)
 
-    # Otorisasi DULUAN, SEBELUM body (apalagi ukurannya) disentuh sama
-    # sekali -- Viewer yang ngirim body raksasa dapet 403 yang SAMA
-    # PERSIS kayak Viewer yang ngirim body kecil/valid, TIDAK PERNAH
-    # kebedain (413 vs 403) berdasarkan ukuran body-nya -- konsisten
-    # sama pola SELURUH endpoint lain di app ini (cek peran/akses
-    # SEBELUM validasi payload apa pun, lihat health_routes.py dkk),
-    # dan sekalian jadi jalur penolakan TERCEPAT (nol byte stream
-    # kebaca) buat request yang emang bakal ditolak apa pun isinya.
+    # Otorisasi DULUAN, SEBELUM body (apalagi ukurannya/token-nya)
+    # disentuh sama sekali -- Viewer yang ngirim body raksasa/token
+    # apa pun dapet 403 yang SAMA PERSIS kayak Viewer yang ngirim body
+    # kecil/valid, TIDAK PERNAH kebedain (413/400 vs 403) berdasarkan
+    # ukuran body ATAUPUN validitas token-nya -- konsisten sama pola
+    # SELURUH endpoint lain di app ini.
     if not capabilities["can_export"]:
         return jsonify({"error": "Peran Anda tidak bisa mengunduh PDF konsultasi."}), 403
 
-    period, sections, questions_text, note_text, err = _parse_request_payload(role, capabilities)
+    today = today_wib()
+    period, sections, questions_text, note_text, data, err = _parse_request_payload(role, capabilities, today)
     if err:
         return err
 
-    now = now_wib()
-    report = build_consultation_report(child, period, sections, questions_text, note_text, period["end_date"], now)
+    snapshot_token = data.get("snapshot_token")
+    if not snapshot_token or not isinstance(snapshot_token, str):
+        return jsonify({"error": MISSING_SNAPSHOT_TOKEN_MESSAGE}), 400
+
+    try:
+        claims = decode_consultation_snapshot_token(snapshot_token, child_id=child_id, user_id=user_id)
+    except SnapshotTokenUnauthorizedError:
+        return jsonify({"error": UNAUTHORIZED_SNAPSHOT_TOKEN_MESSAGE}), 403
+    except SnapshotTokenInvalidError:
+        return jsonify({"error": INVALID_SNAPSHOT_TOKEN_MESSAGE}), 400
+
+    try:
+        preview_at = datetime.fromisoformat(claims["preview_at"])
+    except (KeyError, TypeError, ValueError):
+        # Praktis MUSTAHIL kejadian (claims sudah lolos verifikasi tanda
+        # tangan itsdangerous, jadi isinya persis apa yang server SENDIRI
+        # tandatangani) -- tetap ditangani secara defensif.
+        return jsonify({"error": INVALID_SNAPSHOT_TOKEN_MESSAGE}), 400
+
+    # Re-resolve period pakai TANGGAL BEKU dari token (BUKAN `today` di
+    # atas, yang cuma buat validasi bentuk) -- requirement: "use the
+    # frozen preview timestamp for... period resolution". Custom range
+    # balikin start/end yang SAMA persis apa pun "today"-nya (sudah
+    # divalidasi legal di langkah 5); preset (mis. "7d") balikin
+    # start/end yang SAMA PERSIS kayak saat preview HANYA kalau di-
+    # resolve pakai tanggal preview yang BEKU ini.
+    try:
+        frozen_period = resolve_consultation_period(data.get("period"), preview_at.date())
+    except ConsultationValidationError:
+        return jsonify({"error": INVALID_SNAPSHOT_TOKEN_MESSAGE}), 400
+
+    report = build_consultation_report(
+        child, frozen_period, sections, questions_text, note_text, frozen_period["end_date"], preview_at,
+    )
+    current_digest = digest_consultation_report(report)
+    if not digests_match(current_digest, claims.get("digest")):
+        return jsonify({"error": STALE_SNAPSHOT_MESSAGE}), 409
+
     buffer = render_consultation_pdf(report)
+
+    # `export_now` (waktu EKSPOR sebenarnya, BUKAN `preview_at` yang
+    # dibekukan) dipakai CUMA buat metadata audit + nama file -- dua hal
+    # ini TIDAK memengaruhi kesetaraan isi laporan (bukan bagian dari
+    # digest), jadi tetap aman mencerminkan waktu unduh yang SEBENARNYA
+    # walau lebih belakangan dari waktu preview.
+    export_now = now_wib()
 
     # Audit CUMA buat PDF export (bukan preview -- preview itu baca doang,
     # dipanggil berkali-kali tiap section di-toggle, bakal jadi noise
@@ -263,10 +368,10 @@ def export_consultation_pdf(child_id):
     record_audit_event(
         child_id=child_id, actor_user_id=user_id, action="create",
         entity_type=DOCTOR_CONSULTATION_PDF_EXPORT_ENTITY_TYPE, entity_id=0,
-        recorded_at=now,
+        recorded_at=export_now,
     )
     db.session.commit()
 
-    filename = f"konsultasi-{_safe_filename_component(child.nickname or child.name)}-{period['end_date'].isoformat()}.pdf"
+    filename = f"konsultasi-{_safe_filename_component(child.nickname or child.name)}-{frozen_period['end_date'].isoformat()}.pdf"
     response = send_file(buffer, mimetype="application/pdf", as_attachment=True, download_name=filename)
     return response
