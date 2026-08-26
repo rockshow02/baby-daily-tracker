@@ -279,6 +279,12 @@ export const api = {
   optimizeMemoryPhoto: (childId, entryId) => request(`/children/${childId}/memory-storage/${entryId}/optimize`, {
     method: "POST",
   }),
+  listDevelopmentGoals: (childId) => request(`/children/${childId}/development-goals`),
+  createDevelopmentGoal: (childId,payload) => request(`/children/${childId}/development-goals`,{method:"POST",body:JSON.stringify(payload)}),
+  updateDevelopmentGoal: (id,payload) => request(`/development-goals/${id}`,{method:"PUT",body:JSON.stringify(payload)}),
+  deleteDevelopmentGoal: (id) => request(`/development-goals/${id}`,{method:"DELETE"}),
+  completeDevelopmentGoal: (id) => request(`/development-goals/${id}/complete`,{method:"POST"}),
+  reopenDevelopmentGoal: (id) => request(`/development-goals/${id}/reopen`,{method:"POST"}),
   createMemoryJournal: async (childId, { photo, caption, occurredDate }) => {
     const formData = new FormData();
     formData.append("photo", photo);

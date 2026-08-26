@@ -38,6 +38,7 @@ INVENTORY_TABLES = (
     ("medication_schedules", "Jadwal obat"),
     ("caregiver_handovers", "Serah-terima caregiver"),
     ("memory_journal_entries", "Jurnal kenangan"),
+    ("development_goals", "Tujuan perkembangan"),
 )
 
 

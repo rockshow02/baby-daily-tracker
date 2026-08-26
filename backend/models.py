@@ -658,6 +658,35 @@ class MemoryJournalEntry(db.Model):
         }
 
 
+class DevelopmentGoal(db.Model):
+    """Tujuan perkembangan keluarga; bukan target/diagnosis medis."""
+    __tablename__ = "development_goals"
+
+    id = db.Column(db.Integer, primary_key=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    category = db.Column(db.String(30), nullable=False)
+    title = db.Column(db.String(150), nullable=False)
+    target_date = db.Column(db.Date, nullable=False, index=True)
+    note = db.Column(db.String(500), nullable=True)
+    completed_at = db.Column(db.DateTime, nullable=True)
+    completed_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=now_wib)
+    updated_at = db.Column(db.DateTime, nullable=False, default=now_wib, onupdate=now_wib)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
+    completer = db.relationship("User", foreign_keys=[completed_by_user_id])
+    child = db.relationship("Child", backref=db.backref(
+        "development_goals", lazy="dynamic", cascade="all, delete-orphan"))
+
+    def to_dict(self):
+        return {"id": self.id, "child_id": self.child_id, "category": self.category,
+                "title": self.title, "target_date": self.target_date.isoformat(), "note": self.note,
+                "completed_at": self.completed_at.isoformat()+"+07:00" if self.completed_at else None,
+                "created_by_user_id": self.created_by_user_id,
+                "created_by_name": self.creator.name if self.creator else None,
+                "completed_by_name": self.completer.name if self.completer else None}
+
+
 class ChildCaregiver(db.Model):
     """
     Relasi banyak-ke-banyak antara User dan Child — satu anak bisa punya

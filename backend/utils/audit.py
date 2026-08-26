@@ -105,6 +105,7 @@ SAFE_CHANGED_FIELDS = {
     # namanya).
     "caregiver_handover": set(),
     "memory_journal": {"occurred_date"},
+    "development_goal": {"category", "target_date", "completed_at"},
 }
 
 PRIVATE_CHANGED_FIELDS = {
@@ -153,6 +154,7 @@ PRIVATE_CHANGED_FIELDS = {
     # sendiri, sama sensitifnya kayak `notes` di 12 tipe log lain).
     "caregiver_handover": {"note"},
     "memory_journal": {"caption"},
+    "development_goal": {"title", "note"},
 }
 
 # Urutan TETAP (bukan set) — dipakai buat pesan error yang deterministik
