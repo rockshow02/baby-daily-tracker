@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { api } from "../api/client";
 import RelatedArticles from "../components/RelatedArticles";
 import { todayWIB } from "../utils/date";
+import MemoryJournal from "../components/MemoryJournal";
 
 const MOODS = [
   { key: "ceria", label: "Ceria", icon: "😄", tone: "bg-feed-soft" },
@@ -96,6 +97,14 @@ export default function MomentsScreen({ child }) {
         >
           👣 Momen Penting
         </button>
+        <button
+          onClick={() => setActiveTab("memory")}
+          className={`flex-1 rounded-xl py-2.5 text-xs font-bold transition-colors ${
+            activeTab === "memory" ? "bg-sleep text-white shadow-sm" : "text-ink-muted"
+          }`}
+        >
+          📷 Galeri
+        </button>
       </div>
 
       {loading ? (
@@ -161,7 +170,7 @@ export default function MomentsScreen({ child }) {
             </div>
           )}
         </>
-      ) : (
+      ) : activeTab === "milestone" ? (
         <>
           <div className="mb-4 flex items-center justify-between gap-3">
             <div>
@@ -223,12 +232,14 @@ export default function MomentsScreen({ child }) {
             </div>
           )}
         </>
+      ) : (
+        <MemoryJournal child={child} />
       )}
 
-      <RelatedArticles
+      {activeTab !== "memory" && <RelatedArticles
         category={activeTab === "milestone" ? "milestone" : "mood"}
         ageMonths={(new Date() - new Date(child.birth_date)) / (1000 * 60 * 60 * 24 * 30.4375)}
-      />
+      />}
 
       {activeTab === "milestone" && (
         <RelatedArticles

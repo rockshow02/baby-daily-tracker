@@ -104,6 +104,7 @@ SAFE_CHANGED_FIELDS = {
     # berubah", field-nya TETAP ada, cuma tidak pernah "aman" disebut
     # namanya).
     "caregiver_handover": set(),
+    "memory_journal": {"occurred_date"},
 }
 
 PRIVATE_CHANGED_FIELDS = {
@@ -151,6 +152,7 @@ PRIVATE_CHANGED_FIELDS = {
     # berisi rincian perawatan/medis spesifik yang caregiver ketik
     # sendiri, sama sensitifnya kayak `notes` di 12 tipe log lain).
     "caregiver_handover": {"note"},
+    "memory_journal": {"caption"},
 }
 
 # Urutan TETAP (bukan set) — dipakai buat pesan error yang deterministik

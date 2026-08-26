@@ -6,7 +6,8 @@ from flask import Blueprint, current_app, jsonify, request, session
 from sqlalchemy import func
 
 from extensions import db
-from models import Child, ChildCaregiver, ChildInvite, User
+from models import Child, ChildCaregiver, ChildInvite, MemoryJournalEntry, User
+from utils.memory_journal_images import validated_journal_path
 from utils.access import get_accessible_child, get_accessible_children, resolve_role, ROLE_OWNER
 from utils.auth import get_current_user_id
 from utils.timezone_utils import now_wib
@@ -36,6 +37,7 @@ INVENTORY_TABLES = (
     ("reminders", "Pengingat"),
     ("medication_schedules", "Jadwal obat"),
     ("caregiver_handovers", "Serah-terima caregiver"),
+    ("memory_journal_entries", "Jurnal kenangan"),
 )
 
 
@@ -193,6 +195,8 @@ def delete_child_data(child_id):
         return error
 
     photo_path = _validated_photo_path(child.photo_filename)
+    journal_paths = [validated_journal_path(name) for (name,) in db.session.query(
+        MemoryJournalEntry.photo_filename).filter_by(child_id=child.id).all()]
     had_photo = bool(child.photo_filename)
     try:
         db.session.delete(child)
@@ -212,6 +216,15 @@ def delete_child_data(child_id):
             except OSError:
                 cleanup_warning = True
                 current_app.logger.warning("Child photo cleanup failed after database deletion")
+    for journal_path in journal_paths:
+        if not journal_path:
+            cleanup_warning = True
+            continue
+        try:
+            journal_path.unlink(missing_ok=True)
+        except OSError:
+            cleanup_warning = True
+            current_app.logger.warning("Memory Journal photo cleanup failed after database deletion")
     return jsonify({"success": True, "file_cleanup": "warning" if cleanup_warning else "ok"})
 
 

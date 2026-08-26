@@ -258,6 +258,39 @@ export const api = {
     return data;
   },
   photoUrl: (filename) => `${BASE_URL}/uploads/${filename}`,
+  listMemoryJournal: (childId) => request(`/children/${childId}/memory-journal`),
+  createMemoryJournal: async (childId, { photo, caption, occurredDate }) => {
+    const formData = new FormData();
+    formData.append("photo", photo);
+    formData.append("caption", caption || "");
+    formData.append("occurred_date", occurredDate);
+    const token = getToken();
+    let res;
+    try {
+      res = await fetch(`${BASE_URL}/children/${childId}/memory-journal`, {
+        method: "POST", credentials: "include",
+        headers: token ? { Authorization: `Bearer ${token}` } : {}, body: formData,
+      });
+    } catch (_) {
+      throw new ApiError({ kind: "network", message: "Foto hanya bisa diunggah saat online." });
+    }
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new ApiError({ kind: classifyHttpError(res.status), status: res.status,
+      message: toUserFacingErrorMessage(data?.error, "Upload foto gagal") });
+    return data;
+  },
+  updateMemoryJournal: (entryId, payload) => request(`/memory-journal/${entryId}`, {
+    method: "PUT", body: JSON.stringify(payload),
+  }),
+  deleteMemoryJournal: (entryId) => request(`/memory-journal/${entryId}`, { method: "DELETE" }),
+  loadMemoryJournalPhoto: async (entryId) => {
+    const token = getToken();
+    const res = await fetch(`${BASE_URL}/memory-journal/${entryId}/photo`, {
+      credentials: "include", headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) throw new Error("Foto tidak dapat dimuat");
+    return URL.createObjectURL(await res.blob());
+  },
   exportPdfUrl: (childId) => `${BASE_URL}/children/${childId}/export-pdf`,
   exportJsonUrl: (childId) => `${BASE_URL}/children/${childId}/export-json`,
 

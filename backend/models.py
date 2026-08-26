@@ -627,6 +627,37 @@ class MilestoneLog(db.Model):
 
 
 
+class MemoryJournalEntry(db.Model):
+    """Foto momen anak yang privat dan hanya dapat dibaca caregiver."""
+    __tablename__ = "memory_journal_entries"
+
+    id = db.Column(db.Integer, primary_key=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    occurred_date = db.Column(db.Date, nullable=False, index=True)
+    caption = db.Column(db.String(500), nullable=True)
+    photo_filename = db.Column(db.String(255), nullable=False, unique=True)
+    photo_size_bytes = db.Column(db.Integer, nullable=False)
+    photo_width = db.Column(db.Integer, nullable=False)
+    photo_height = db.Column(db.Integer, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=now_wib)
+    updated_at = db.Column(db.DateTime, nullable=False, default=now_wib, onupdate=now_wib)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
+    child = db.relationship("Child", backref=db.backref(
+        "memory_journal_entries", lazy="dynamic", cascade="all, delete-orphan"))
+
+    def to_dict(self):
+        return {
+            "id": self.id, "child_id": self.child_id,
+            "occurred_date": self.occurred_date.isoformat(), "caption": self.caption,
+            "photo_size_bytes": self.photo_size_bytes, "photo_width": self.photo_width,
+            "photo_height": self.photo_height, "created_by_user_id": self.created_by_user_id,
+            "created_by_name": self.creator.name if self.creator else None,
+            "created_at": self.created_at.isoformat() + "+07:00",
+            "updated_at": self.updated_at.isoformat() + "+07:00",
+        }
+
+
 class ChildCaregiver(db.Model):
     """
     Relasi banyak-ke-banyak antara User dan Child — satu anak bisa punya
