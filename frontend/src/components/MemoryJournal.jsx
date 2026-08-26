@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, getCurrentUserId } from "../api/client";
 import { todayWIB } from "../utils/date";
+import MemoryStorageManager from "./MemoryStorageManager";
 
 const draftKey = (childId) => `babytracker_memory_draft_${getCurrentUserId() || "anon"}_${childId}`;
 
@@ -27,6 +28,7 @@ export default function MemoryJournal({ child }) {
   const [occurredDate, setOccurredDate] = useState(stored.occurredDate || todayWIB());
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [showStorage, setShowStorage] = useState(false);
   const load = async () => { setLoading(true); try { setData(await api.listMemoryJournal(child.id)); } finally { setLoading(false); } };
   useEffect(() => { load(); }, [child.id]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
@@ -49,7 +51,7 @@ export default function MemoryJournal({ child }) {
     <div className="mb-4 flex items-center justify-between gap-3">
       <div><h2 className="text-base font-bold text-ink">Galeri kenangan</h2>
         <p className="text-xs text-ink-faint">Foto privat, hanya untuk caregiver {child.nickname || child.name}.</p></div>
-      {data.can_create && <button onClick={() => setShowForm(true)} className="shrink-0 rounded-full bg-feed px-3.5 py-2.5 text-xs font-bold text-white">+ Foto</button>}
+      <div className="flex shrink-0 gap-2">{data.can_manage_storage&&<button onClick={()=>setShowStorage(true)} className="rounded-full border border-void-hairline bg-white px-3 py-2.5 text-xs font-bold text-ink-muted">Storage</button>}{data.can_create && <button onClick={() => setShowForm(true)} className="rounded-full bg-feed px-3.5 py-2.5 text-xs font-bold text-white">+ Foto</button>}</div>
     </div>
     {loading ? <p className="py-10 text-center text-sm text-ink-faint">Memuat...</p> : data.items.length === 0 ?
       <div className="rounded-xl2 border border-dashed border-void-hairline bg-white/60 px-5 py-10 text-center">
@@ -83,5 +85,8 @@ export default function MemoryJournal({ child }) {
         <div className="flex gap-3"><button type="button" onClick={() => setShowForm(false)} className="flex-1 rounded-lg border border-void-hairline py-3 text-sm">Batal</button>
           <button disabled={submitting} className="flex-1 rounded-lg bg-feed py-3 text-sm font-bold text-white disabled:opacity-50">{submitting ? "Menyimpan..." : "Simpan"}</button></div>
       </form></div>}
+    {showStorage && (
+      <MemoryStorageManager child={child} onClose={() => setShowStorage(false)} onChanged={load} />
+    )}
   </section>;
 }

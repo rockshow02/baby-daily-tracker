@@ -283,6 +283,7 @@ EMERGENCY_CARD_PDF_EXPORT_ENTITY_TYPE = "emergency_card_pdf_export"
 CAREGIVER_HANDOVER_CLOSED_ENTITY_TYPE = "caregiver_handover_closed"
 CAREGIVER_HANDOVER_ACKNOWLEDGED_ENTITY_TYPE = "caregiver_handover_acknowledged"
 MONTHLY_STORY_PDF_EXPORT_ENTITY_TYPE = "monthly_story_pdf_export"
+MEMORY_JOURNAL_PHOTO_OPTIMIZED_ENTITY_TYPE = "memory_journal_photo_optimized"
 
 # Entity_type yang SENGAJA nggak punya entry SAFE_CHANGED_FIELDS sama
 # sekali — `changed_fields` buat SEMUANYA SELALU dipaksa None (lihat
@@ -300,6 +301,7 @@ NO_FIELD_DIFF_ENTITY_TYPES = (
     CAREGIVER_HANDOVER_CLOSED_ENTITY_TYPE,
     CAREGIVER_HANDOVER_ACKNOWLEDGED_ENTITY_TYPE,
     MONTHLY_STORY_PDF_EXPORT_ENTITY_TYPE,
+    MEMORY_JOURNAL_PHOTO_OPTIMIZED_ENTITY_TYPE,
 )
 
 # Dipakai endpoint baca (routes/audit_routes.py) buat validasi query

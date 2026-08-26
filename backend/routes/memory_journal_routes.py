@@ -46,7 +46,8 @@ def collection(child_id):
                    .order_by(MemoryJournalEntry.occurred_date.desc(), MemoryJournalEntry.id.desc())
                    .limit(100).all())
         return jsonify({"items": [_serialize(e, role, user_id) for e in entries],
-                        "can_create": role in WRITE_ROLES})
+                        "can_create": role in WRITE_ROLES,
+                        "can_manage_storage": role == "owner"})
     if role not in WRITE_ROLES:
         return jsonify({"error": "Peran Anda hanya bisa melihat galeri"}), 403
     occurred_date = _parse_date(request.form.get("occurred_date"))

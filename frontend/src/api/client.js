@@ -272,6 +272,13 @@ export const api = {
     method: "POST", body: JSON.stringify(payload),
   }),
   monthlyStoryPdfUrl: (childId) => `${BASE_URL}/children/${childId}/monthly-story/pdf`,
+  memoryStorage: (childId) => request(`/children/${childId}/memory-storage`),
+  cleanupMemoryStorage: (childId, payload) => request(`/children/${childId}/memory-storage/cleanup`, {
+    method: "POST", body: JSON.stringify(payload),
+  }),
+  optimizeMemoryPhoto: (childId, entryId) => request(`/children/${childId}/memory-storage/${entryId}/optimize`, {
+    method: "POST",
+  }),
   createMemoryJournal: async (childId, { photo, caption, occurredDate }) => {
     const formData = new FormData();
     formData.append("photo", photo);
