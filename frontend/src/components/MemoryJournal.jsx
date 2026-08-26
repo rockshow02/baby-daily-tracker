@@ -29,7 +29,11 @@ export default function MemoryJournal({ child }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [showStorage, setShowStorage] = useState(false);
-  const load = async () => { setLoading(true); try { setData(await api.listMemoryJournal(child.id)); } finally { setLoading(false); } };
+  const [query, setQuery] = useState("");
+  const [filters, setFilters] = useState({});
+  const [favoriteOnly, setFavoriteOnly] = useState(false);
+  const [sort, setSort] = useState("newest");
+  const load = async (nextFilters = filters) => { setLoading(true); try { setData(await api.listMemoryJournal(child.id, nextFilters)); } finally { setLoading(false); } };
   useEffect(() => { load(); }, [child.id]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     localStorage.setItem(draftKey(child.id), JSON.stringify({ caption, occurredDate }));
@@ -53,6 +57,10 @@ export default function MemoryJournal({ child }) {
         <p className="text-xs text-ink-faint">Foto privat, hanya untuk caregiver {child.nickname || child.name}.</p></div>
       <div className="flex shrink-0 gap-2">{data.can_manage_storage&&<button onClick={()=>setShowStorage(true)} className="rounded-full border border-void-hairline bg-white px-3 py-2.5 text-xs font-bold text-ink-muted">Storage</button>}{data.can_create && <button onClick={() => setShowForm(true)} className="rounded-full bg-feed px-3.5 py-2.5 text-xs font-bold text-white">+ Foto</button>}</div>
     </div>
+    <form onSubmit={(e)=>{e.preventDefault();const next={q:query,favorite:favoriteOnly?"true":"",sort};setFilters(next);load(next);}} className="mb-4 rounded-2xl border border-void-hairline bg-white p-3">
+      <div className="flex gap-2"><input value={query} onChange={(e)=>setQuery(e.target.value)} placeholder="Cari caption atau tag" className="min-w-0 flex-1 rounded-lg border border-void-hairline px-3 py-2 text-sm"/><button className="rounded-lg bg-sleep px-4 text-xs font-bold text-white">Cari</button></div>
+      <div className="mt-2 flex items-center gap-3"><label className="flex items-center gap-1.5 text-xs text-ink-muted"><input type="checkbox" checked={favoriteOnly} onChange={(e)=>setFavoriteOnly(e.target.checked)}/> Favorit</label><select value={sort} onChange={(e)=>setSort(e.target.value)} className="rounded-lg border border-void-hairline px-2 py-1.5 text-xs"><option value="newest">Terbaru</option><option value="oldest">Terlama</option></select>{Object.keys(filters).length>0&&<button type="button" onClick={()=>{setQuery("");setFavoriteOnly(false);setSort("newest");setFilters({});load({});}} className="text-xs text-warn">Reset</button>}</div>
+    </form>
     {loading ? <p className="py-10 text-center text-sm text-ink-faint">Memuat...</p> : data.items.length === 0 ?
       <div className="rounded-xl2 border border-dashed border-void-hairline bg-white/60 px-5 py-10 text-center">
         <div className="text-4xl">📸</div><p className="mt-3 text-sm font-bold text-ink">Belum ada foto kenangan</p>
@@ -60,13 +68,16 @@ export default function MemoryJournal({ child }) {
       <div className="grid grid-cols-2 gap-3">{data.items.map((entry) =>
         <article key={entry.id} className="overflow-hidden rounded-2xl border border-void-hairline bg-void-card shadow-sm">
           <div className="aspect-square"><JournalPhoto entry={entry} /></div>
-          <div className="p-3"><p className="text-xs font-semibold text-ink">{entry.caption || "Momen berharga"}</p>
+          <div className="p-3"><p className="text-xs font-semibold text-ink">{entry.is_favorite&&<span aria-label="Favorit">⭐ </span>}{entry.caption || "Momen berharga"}</p>
             <p className="mt-1 text-[11px] text-ink-faint">{new Date(`${entry.occurred_date}T00:00:00`).toLocaleDateString("id-ID")}</p>
+            {entry.tags?.length>0&&<div className="mt-2 flex flex-wrap gap-1">{entry.tags.map(tag=><button key={tag} onClick={()=>{setQuery(tag);const next={tag};setFilters(next);load(next);}} className="rounded-full bg-sky-soft px-2 py-1 text-[10px] text-sky">#{tag}</button>)}</div>}
             {entry.can_edit && <div className="mt-2 flex gap-3">
+              <button aria-label={entry.is_favorite?"Hapus dari favorit":"Tandai favorit"} onClick={async()=>{await api.updateMemoryJournal(entry.id,{is_favorite:!entry.is_favorite});await load();}} className="text-sm">{entry.is_favorite?"⭐":"☆"}</button>
               <button onClick={async () => {
                 const next = prompt("Ubah caption", entry.caption || "");
                 if (next !== null) { await api.updateMemoryJournal(entry.id, { caption: next }); await load(); }
               }} className="text-[11px] text-sleep">Edit caption</button>
+              <button onClick={async()=>{const value=prompt("Tag, pisahkan dengan koma (maks. 5)",(entry.tags||[]).join(", "));if(value!==null){await api.updateMemoryJournal(entry.id,{tags:value.split(",").map(x=>x.trim()).filter(Boolean)});await load();}}} className="text-[11px] text-sky">Tag</button>
               <button onClick={async () => { if (confirm("Hapus foto kenangan ini?")) { await api.deleteMemoryJournal(entry.id); await load(); } }} className="text-[11px] text-warn">Hapus</button>
             </div>}
           </div></article>)}</div>}

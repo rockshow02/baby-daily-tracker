@@ -104,7 +104,7 @@ SAFE_CHANGED_FIELDS = {
     # berubah", field-nya TETAP ada, cuma tidak pernah "aman" disebut
     # namanya).
     "caregiver_handover": set(),
-    "memory_journal": {"occurred_date"},
+    "memory_journal": {"occurred_date", "is_favorite"},
     "development_goal": {"category", "target_date", "completed_at"},
 }
 
@@ -153,7 +153,7 @@ PRIVATE_CHANGED_FIELDS = {
     # berisi rincian perawatan/medis spesifik yang caregiver ketik
     # sendiri, sama sensitifnya kayak `notes` di 12 tipe log lain).
     "caregiver_handover": {"note"},
-    "memory_journal": {"caption"},
+    "memory_journal": {"caption", "tags"},
     "development_goal": {"title", "note"},
 }
 

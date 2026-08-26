@@ -63,3 +63,27 @@ def test_memory_journal_rejects_invalid_image_and_future_date(client, app, tmp_p
         headers=headers, content_type="multipart/form-data")
     assert future.status_code == 400
     assert not list((tmp_path / "memory").glob("*")) if (tmp_path / "memory").exists() else True
+
+
+def test_memory_journal_search_tags_favorite_and_sort(client, app, tmp_path):
+    app.config["MEMORY_JOURNAL_UPLOAD_DIR"] = str(tmp_path / "memory")
+    owner = register(client); child = create_child(client, owner["token"]); headers = auth_headers(owner["token"])
+    first = client.post(f"/api/children/{child['id']}/memory-journal",
+        data={"occurred_date":"2026-08-10","caption":"Main di taman","photo":(_photo((40,40)),"a.jpg")},
+        headers=headers,content_type="multipart/form-data").get_json()
+    second = client.post(f"/api/children/{child['id']}/memory-journal",
+        data={"occurred_date":"2026-08-20","caption":"Makan bersama","photo":(_photo((40,40)),"b.jpg")},
+        headers=headers,content_type="multipart/form-data").get_json()
+    changed=client.put(f"/api/memory-journal/{first['id']}",json={"tags":["Keluarga","taman"],"is_favorite":True},headers=headers)
+    assert changed.status_code==200
+    assert changed.get_json()["tags"]==["keluarga","taman"] and changed.get_json()["is_favorite"] is True
+    by_caption=client.get(f"/api/children/{child['id']}/memory-journal?q=Main",headers=headers).get_json()["items"]
+    by_tag=client.get(f"/api/children/{child['id']}/memory-journal?q=keluarga",headers=headers).get_json()["items"]
+    favorites=client.get(f"/api/children/{child['id']}/memory-journal?favorite=true",headers=headers).get_json()["items"]
+    oldest=client.get(f"/api/children/{child['id']}/memory-journal?sort=oldest",headers=headers).get_json()["items"]
+    assert [x["id"] for x in by_caption]==[first["id"]]
+    assert [x["id"] for x in by_tag]==[first["id"]]
+    assert [x["id"] for x in favorites]==[first["id"]]
+    assert [x["id"] for x in oldest]==[first["id"],second["id"]]
+    invalid=client.put(f"/api/memory-journal/{first['id']}",json={"tags":["x"]*6},headers=headers)
+    assert invalid.status_code==400

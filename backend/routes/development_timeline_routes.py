@@ -61,6 +61,8 @@ def development_timeline(child_id):
         for row in date_query(MemoryJournalEntry, MemoryJournalEntry.occurred_date):
             events.append(_event("memory", row.id, row.occurred_date,
                 row.caption or "Kenangan baru", "Foto privat keluarga", "📷", row.id))
+            events[-1]["is_favorite"] = bool(row.metadata_record and row.metadata_record.is_favorite)
+            events[-1]["tags"] = sorted(tag.tag for tag in row.tag_records)
     if "milestone" in categories:
         labels = {"bisa_duduk": "Bisa duduk", "langkah_pertama": "Langkah pertama",
                   "kata_pertama": "Kata pertama", "gigi_pertama": "Gigi pertama"}

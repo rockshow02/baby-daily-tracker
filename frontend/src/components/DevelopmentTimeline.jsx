@@ -64,6 +64,8 @@ export default function DevelopmentTimeline({ child }) {
           <p className="text-[11px] font-mono text-ink-faint">{new Date(`${item.date}T00:00:00`).toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" })}</p>
           <h3 className="mt-1 text-sm font-bold text-ink">{item.title}</h3>
           {item.summary && <p className="mt-0.5 text-xs text-ink-muted">{item.summary}</p>}
+          {item.is_favorite&&<span className="mt-2 inline-block text-xs" aria-label="Favorit">⭐ Favorit</span>}
+          {item.tags?.length>0&&<div className="mt-2 flex flex-wrap gap-1">{item.tags.map(tag=><span key={tag} className="rounded-full bg-sky-soft px-2 py-1 text-[10px] text-sky">#{tag}</span>)}</div>}
           {item.photo_entry_id && <TimelinePhoto entryId={item.photo_entry_id} />}
         </article>)}
       </div>}

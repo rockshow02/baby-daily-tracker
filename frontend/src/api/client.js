@@ -258,7 +258,11 @@ export const api = {
     return data;
   },
   photoUrl: (filename) => `${BASE_URL}/uploads/${filename}`,
-  listMemoryJournal: (childId) => request(`/children/${childId}/memory-journal`),
+  listMemoryJournal: (childId, params = {}) => {
+    const search = new URLSearchParams();
+    Object.entries(params).forEach(([key,value]) => { if (value !== "" && value != null && value !== false) search.set(key,String(value)); });
+    return request(`/children/${childId}/memory-journal${search.toString()?`?${search}`:""}`);
+  },
   developmentTimeline: (childId, params = {}) => {
     const search = new URLSearchParams();
     if (params.categories?.length) search.set("categories", params.categories.join(","));

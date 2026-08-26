@@ -658,6 +658,25 @@ class MemoryJournalEntry(db.Model):
         }
 
 
+class MemoryJournalMetadata(db.Model):
+    __tablename__ = "memory_journal_metadata"
+    id = db.Column(db.Integer, primary_key=True)
+    entry_id = db.Column(db.Integer, db.ForeignKey("memory_journal_entries.id"), nullable=False, unique=True, index=True)
+    is_favorite = db.Column(db.Boolean, nullable=False, default=False)
+    entry = db.relationship("MemoryJournalEntry", backref=db.backref(
+        "metadata_record", uselist=False, cascade="all, delete-orphan"))
+
+
+class MemoryJournalTag(db.Model):
+    __tablename__ = "memory_journal_tags"
+    __table_args__ = (db.UniqueConstraint("entry_id", "tag", name="uq_memory_journal_tag"),)
+    id = db.Column(db.Integer, primary_key=True)
+    entry_id = db.Column(db.Integer, db.ForeignKey("memory_journal_entries.id"), nullable=False, index=True)
+    tag = db.Column(db.String(30), nullable=False, index=True)
+    entry = db.relationship("MemoryJournalEntry", backref=db.backref(
+        "tag_records", lazy="select", cascade="all, delete-orphan"))
+
+
 class DevelopmentGoal(db.Model):
     """Tujuan perkembangan keluarga; bukan target/diagnosis medis."""
     __tablename__ = "development_goals"
