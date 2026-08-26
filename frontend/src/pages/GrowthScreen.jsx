@@ -136,23 +136,26 @@ export default function GrowthScreen({ child }) {
   const latestWho = latestForType ? latestForType[`${activeType}_who`] : null;
 
   return (
-    <div className="min-h-screen px-6 pt-8 pb-32">
-      <h1 className="mb-1 text-3xl font-display text-ink">Tumbuh Kembang</h1>
-      <p className="mb-6 text-sm text-ink-muted">Acuan: WHO Child Growth Standards</p>
+    <div className="min-h-screen px-4 pb-28 pt-6 sm:px-6 sm:pt-8">
+      <header className="mb-5">
+        <p className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-diaper">Perjalanan si kecil</p>
+        <h1 className="font-display text-3xl font-bold leading-tight text-ink">Tumbuh Kembang</h1>
+        <p className="mt-1 text-sm text-ink-muted">Pantau pertumbuhan {child.name} berdasarkan standar WHO.</p>
+      </header>
 
       {/* tab jenis ukuran */}
-      <div className="flex gap-2 mb-5">
+      <div className="scrollbar-hidden -mx-1 mb-5 flex gap-2 overflow-x-auto px-1 pb-1" aria-label="Jenis pengukuran">
         {TYPES.map((t) => (
           <button
             key={t.key}
             onClick={() => setActiveType(t.key)}
-            className={`flex-1 flex flex-col items-center gap-1 py-3 rounded-xl2 border text-xs font-medium ${
+            className={`flex min-w-[6.5rem] flex-1 items-center justify-center gap-2 rounded-2xl border px-3 py-3 text-xs font-bold transition-colors ${
               activeType === t.key
-                ? "bg-feed/15 border-feed text-feed"
-                : "bg-void-card border-void-hairline text-ink-muted"
+                ? "border-diaper bg-diaper text-white shadow-sm"
+                : "border-void-hairline bg-void-card text-ink-muted"
             }`}
           >
-            <span className="text-lg">{t.icon}</span>
+            <span className="text-base" aria-hidden="true">{t.icon}</span>
             {t.label}
           </button>
         ))}
@@ -160,31 +163,37 @@ export default function GrowthScreen({ child }) {
 
       {/* status terbaru */}
       {latestWho && (
-        <div className="p-4 mb-4 border bg-void-card border-void-hairline rounded-xl2 shadow-soft">
-          <div className="flex items-center justify-between">
+        <section className="mb-4 overflow-hidden rounded-xl2 bg-gradient-to-br from-diaper-soft to-white p-4 shadow-soft sm:p-5">
+          <div className="flex items-start justify-between gap-3">
             <div>
-              <p className="mb-1 text-xs text-ink-faint">
-                Terbaru · {formatDate(latestForType.measured_date)}
+              <p className="mb-1 text-[11px] font-bold uppercase tracking-[0.14em] text-diaper">Pengukuran terbaru</p>
+              <p className="text-3xl font-bold text-ink">
+                {latestForType[activeTypeInfo.field]} <span className="text-base font-semibold text-ink-muted">{activeTypeInfo.unit}</span>
               </p>
-              <p className="text-2xl font-display text-ink">
-                {latestForType[activeTypeInfo.field]} <span className="text-sm text-ink-muted">{activeTypeInfo.unit}</span>
-              </p>
+              <p className="mt-1 text-xs text-ink-faint">{formatDate(latestForType.measured_date)}</p>
             </div>
-            <div className="text-right">
-              <p className={`text-sm font-semibold ${STATUS_COLOR[latestWho.status] || "text-ink"}`}>
+            <div className="max-w-[52%] rounded-2xl bg-white/80 px-3 py-2 text-right">
+              <p className={`text-xs font-bold leading-snug ${STATUS_COLOR[latestWho.status] || "text-ink"}`}>
                 {latestWho.status}
               </p>
-              <p className="text-xs text-ink-faint">Persentil {latestWho.percentile}</p>
+              <p className="mt-1 text-[11px] text-ink-faint">Persentil {latestWho.percentile}</p>
             </div>
           </div>
-        </div>
+        </section>
       )}
 
       {/* chart */}
       {loading ? (
         <p className="py-10 text-sm text-center text-ink-faint">Memuat grafik...</p>
       ) : (
-        <div className="p-4 mb-6 border bg-void-card border-void-hairline rounded-xl2 shadow-soft">
+        <section className="mb-6 rounded-xl2 border border-void-hairline bg-void-card p-4 shadow-soft sm:p-5">
+          <div className="mb-3 flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-base font-bold text-ink">Grafik pertumbuhan</h2>
+              <p className="text-xs text-ink-faint">{activeTypeInfo.label} menurut usia</p>
+            </div>
+            <span className="rounded-full bg-void-raised px-3 py-1 text-[11px] font-bold text-ink-muted">{activeTypeInfo.unit}</span>
+          </div>
           <GrowthChart measurementType={activeType} referenceCurve={referenceCurve} childPoints={childPoints} />
           <div className="flex justify-center gap-4 mt-2">
             <span className="flex items-center gap-1.5 text-[11px] text-ink-muted">
@@ -194,11 +203,17 @@ export default function GrowthScreen({ child }) {
               <span className="w-3 h-0.5 bg-diaper/50 inline-block" /> Batas normal WHO
             </span>
           </div>
-        </div>
+          <p className="mt-3 text-center text-[10px] text-ink-faint">Data acuan WHO Child Growth Standards</p>
+        </section>
       )}
 
       {/* riwayat */}
-      <h2 className="font-mono text-xs text-ink-faint tracking-[0.2em] uppercase mb-3">Riwayat Pengukuran</h2>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h2 className="text-base font-bold text-ink">Riwayat pengukuran</h2>
+        <button onClick={openAddForm} className="rounded-full bg-feed-soft px-3 py-2 text-xs font-bold text-feed">
+          + Catat baru
+        </button>
+      </div>
       {measurements.length === 0 ? (
         <p className="text-sm text-ink-faint">Belum ada pengukuran tercatat.</p>
       ) : (
@@ -207,7 +222,7 @@ export default function GrowthScreen({ child }) {
             <div
               key={m.id}
               onClick={() => openEditForm(m)}
-              className="flex items-center justify-between px-4 py-3 border cursor-pointer bg-void-card border-void-hairline rounded-xl2 active:bg-void-raised"
+              className="flex cursor-pointer items-center justify-between gap-3 rounded-2xl border border-void-hairline bg-void-card px-4 py-3.5 active:bg-void-raised"
             >
               <div>
                 <p className="font-mono text-xs text-ink-faint">{formatDate(m.measured_date)}</p>
@@ -226,7 +241,7 @@ export default function GrowthScreen({ child }) {
                   e.stopPropagation();
                   handleDelete(m.id);
                 }}
-                className="px-2 py-1 text-xs text-ink-faint"
+                className="shrink-0 rounded-full px-2 py-1 text-xs text-ink-faint"
                 aria-label="Hapus catatan"
               >
                 Hapus
@@ -240,15 +255,6 @@ export default function GrowthScreen({ child }) {
         category="growth"
         ageMonths={(new Date() - new Date(child.birth_date)) / (1000 * 60 * 60 * 24 * 30.4375)}
       />
-
-      {/* tombol tambah */}
-      <button
-        onClick={openAddForm}
-        className="fixed flex items-center justify-center text-2xl text-white rounded-full bottom-6 right-6 w-14 h-14 bg-feed shadow-soft"
-        aria-label="Tambah pengukuran"
-      >
-        +
-      </button>
 
       {/* form tambah/edit pengukuran */}
       {showForm && (

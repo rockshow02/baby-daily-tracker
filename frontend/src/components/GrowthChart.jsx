@@ -41,9 +41,9 @@ export default function GrowthChart({ measurementType, referenceCurve, childPoin
   });
 
   return (
-    <div className="w-full h-64">
+    <div className="h-56 w-full sm:h-64">
       <ResponsiveContainer width="100%" height="100%">
-        <ComposedChart data={merged} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+        <ComposedChart data={merged} margin={{ top: 10, right: 8, left: -25, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#F0E2CC" vertical={false} />
           <XAxis
             dataKey="age_months"
