@@ -268,6 +268,10 @@ export const api = {
     const suffix = search.toString() ? `?${search}` : "";
     return request(`/children/${childId}/development-timeline${suffix}`);
   },
+  previewMonthlyStory: (childId, payload) => request(`/children/${childId}/monthly-story/preview`, {
+    method: "POST", body: JSON.stringify(payload),
+  }),
+  monthlyStoryPdfUrl: (childId) => `${BASE_URL}/children/${childId}/monthly-story/pdf`,
   createMemoryJournal: async (childId, { photo, caption, occurredDate }) => {
     const formData = new FormData();
     formData.append("photo", photo);
