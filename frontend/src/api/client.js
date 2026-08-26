@@ -294,6 +294,10 @@ export const api = {
   deleteDevelopmentGoal: (id) => request(`/development-goals/${id}`,{method:"DELETE"}),
   completeDevelopmentGoal: (id) => request(`/development-goals/${id}/complete`,{method:"POST"}),
   reopenDevelopmentGoal: (id) => request(`/development-goals/${id}/reopen`,{method:"POST"}),
+  listFamilyCheckIns: (childId) => request(`/children/${childId}/family-development-check-ins`),
+  createFamilyCheckIn: (childId,payload) => request(`/children/${childId}/family-development-check-ins`,{method:"POST",body:JSON.stringify(payload)}),
+  updateFamilyCheckIn: (id,payload) => request(`/family-development-check-ins/${id}`,{method:"PUT",body:JSON.stringify(payload)}),
+  deleteFamilyCheckIn: (id) => request(`/family-development-check-ins/${id}`,{method:"DELETE"}),
   createMemoryJournal: async (childId, { photo, caption, occurredDate }) => {
     const formData = new FormData();
     formData.append("photo", photo);

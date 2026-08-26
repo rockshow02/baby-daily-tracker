@@ -111,6 +111,7 @@ def create_app(config_overrides=None):
     from routes.memory_storage_routes import memory_storage_bp
     from routes.development_goal_routes import development_goal_bp
     from routes.development_calendar_routes import development_calendar_bp
+    from routes.family_check_in_routes import family_check_in_bp
 
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(children_bp, url_prefix="/api")
@@ -138,6 +139,7 @@ def create_app(config_overrides=None):
     app.register_blueprint(memory_storage_bp, url_prefix="/api")
     app.register_blueprint(development_goal_bp, url_prefix="/api")
     app.register_blueprint(development_calendar_bp, url_prefix="/api")
+    app.register_blueprint(family_check_in_bp, url_prefix="/api")
 
     with app.app_context():
         db.create_all()

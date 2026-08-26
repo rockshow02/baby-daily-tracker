@@ -106,6 +106,7 @@ SAFE_CHANGED_FIELDS = {
     "caregiver_handover": set(),
     "memory_journal": {"occurred_date", "is_favorite"},
     "development_goal": {"category", "target_date", "completed_at"},
+    "family_development_check_in": {"period_month", "areas", "linked_goal_id"},
 }
 
 PRIVATE_CHANGED_FIELDS = {
@@ -155,6 +156,7 @@ PRIVATE_CHANGED_FIELDS = {
     "caregiver_handover": {"note"},
     "memory_journal": {"caption", "tags"},
     "development_goal": {"title", "note"},
+    "family_development_check_in": {"reflection_note", "discuss_with_professional"},
 }
 
 # Urutan TETAP (bukan set) — dipakai buat pesan error yang deterministik

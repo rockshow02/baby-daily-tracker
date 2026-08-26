@@ -706,6 +706,42 @@ class DevelopmentGoal(db.Model):
                 "completed_by_name": self.completer.name if self.completer else None}
 
 
+class FamilyDevelopmentCheckIn(db.Model):
+    """Refleksi bulanan caregiver; bukan hasil skrining atau diagnosis."""
+    __tablename__ = "family_development_check_ins"
+    __table_args__ = (
+        db.UniqueConstraint("child_id", "created_by_user_id", "period_month",
+                            name="uq_family_check_in_caregiver_month"),
+        db.Index("ix_family_check_ins_child_month", "child_id", "period_month"),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    period_month = db.Column(db.Date, nullable=False)
+    areas = db.Column(db.JSON, nullable=False)
+    reflection_note = db.Column(db.String(1000), nullable=True)
+    discuss_with_professional = db.Column(db.Boolean, nullable=False, default=False)
+    linked_goal_id = db.Column(db.Integer, db.ForeignKey("development_goals.id", ondelete="SET NULL"), nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=now_wib)
+    updated_at = db.Column(db.DateTime, nullable=False, default=now_wib, onupdate=now_wib)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
+    linked_goal = db.relationship("DevelopmentGoal", foreign_keys=[linked_goal_id])
+    child = db.relationship("Child", backref=db.backref(
+        "family_development_check_ins", lazy="dynamic", cascade="all, delete-orphan"))
+
+    def to_dict(self):
+        return {"id": self.id, "child_id": self.child_id,
+                "period_month": self.period_month.strftime("%Y-%m"), "areas": self.areas,
+                "reflection_note": self.reflection_note,
+                "discuss_with_professional": self.discuss_with_professional,
+                "linked_goal_id": self.linked_goal_id,
+                "linked_goal_title": self.linked_goal.title if self.linked_goal else None,
+                "created_by_user_id": self.created_by_user_id,
+                "created_by_name": self.creator.name if self.creator else None,
+                "created_at": self.created_at.isoformat()+"+07:00",
+                "updated_at": self.updated_at.isoformat()+"+07:00"}
+
+
 class ChildCaregiver(db.Model):
     """
     Relasi banyak-ke-banyak antara User dan Child — satu anak bisa punya
