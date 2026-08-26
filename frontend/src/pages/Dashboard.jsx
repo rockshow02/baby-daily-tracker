@@ -573,7 +573,7 @@ export default function Dashboard({ child, onOpenProfile, reminderMonitor, onOpe
         <div className="flex items-center justify-between gap-4">
           <div>
             <p className="text-sm font-semibold text-ink-muted">{greeting}</p>
-            <h1 className="mt-0.5 font-display text-3xl leading-tight text-ink">Hari ini bersama si kecil</h1>
+            <h1 className="mt-0.5 font-display text-3xl leading-tight text-ink">Hari ini</h1>
           </div>
           <div className="flex items-center gap-2">
             {isToday && <SmartInsightsBell summary={summary} weeklyAverages={weeklyAverages} />}
@@ -590,7 +590,7 @@ export default function Dashboard({ child, onOpenProfile, reminderMonitor, onOpe
           </div>
         </div>
 
-        <div className="mt-5 flex items-center justify-between gap-3">
+        <div className="mt-5 flex flex-col gap-3 min-[380px]:flex-row min-[380px]:items-center min-[380px]:justify-between">
           <button type="button" onClick={onOpenProfile} className="flex min-w-0 items-center gap-3 text-left">
             {child.photo_filename ? (
               <img
@@ -604,11 +604,11 @@ export default function Dashboard({ child, onOpenProfile, reminderMonitor, onOpe
               </span>
             )}
             <span className="min-w-0">
-              <span className="block truncate text-lg font-extrabold text-ink">{child.nickname || child.name}</span>
+              <span className="block break-words text-lg font-extrabold leading-tight text-ink">{child.nickname || child.name}</span>
               <span className="block text-xs text-ink-muted">{summary ? formatAge(summary.age_days) : "Memuat usia..."} · Lihat profil ›</span>
             </span>
           </button>
-          <div className="flex flex-shrink-0 items-center rounded-full border border-void-hairline bg-white p-1 shadow-soft">
+          <div className="flex w-full flex-shrink-0 items-center justify-between rounded-full border border-void-hairline bg-white p-1 shadow-soft min-[380px]:w-auto min-[380px]:justify-start">
             <button type="button" aria-label="Hari sebelumnya" onClick={() => shiftDate(-1)} className="flex h-8 w-8 items-center justify-center rounded-full text-lg text-ink-muted hover:bg-void-raised">
               ‹
             </button>
@@ -621,37 +621,43 @@ export default function Dashboard({ child, onOpenProfile, reminderMonitor, onOpe
           </div>
         </div>
 
-        <div className="scrollbar-hidden mt-4 flex items-center gap-4 overflow-x-auto pb-1">
+        <div className="mt-4 grid grid-cols-3 gap-2" aria-label="Aksi data dan pengasuh">
           <button
             type="button"
+            aria-label="Export laporan PDF"
             onClick={() =>
               api.downloadAuthenticated(
                 api.exportPdfUrl(child.id),
                 `laporan-${child.name.toLowerCase()}.pdf`
               )
             }
-            className="inline-flex flex-shrink-0 items-center gap-1.5 text-xs font-semibold text-ink-muted"
+            className="flex min-h-12 flex-col items-center justify-center gap-0.5 rounded-2xl bg-white px-1.5 py-2 text-center text-[10px] font-semibold leading-tight text-ink-muted shadow-sm"
           >
-            📄 Export laporan PDF
+            <span className="text-base" aria-hidden="true">📄</span>
+            <span>Export PDF</span>
           </button>
           <button
             type="button"
+            aria-label="Backup data (JSON)"
             onClick={() =>
               api.downloadAuthenticated(
                 api.exportJsonUrl(child.id),
                 `backup-${child.name.toLowerCase()}.json`
               )
             }
-            className="inline-flex flex-shrink-0 items-center gap-1.5 text-xs font-semibold text-ink-muted"
+            className="flex min-h-12 flex-col items-center justify-center gap-0.5 rounded-2xl bg-white px-1.5 py-2 text-center text-[10px] font-semibold leading-tight text-ink-muted shadow-sm"
           >
-            💾 Backup data (JSON)
+            <span className="text-base" aria-hidden="true">💾</span>
+            <span>Backup JSON</span>
           </button>
           <button
             type="button"
+            aria-label="Serah Terima Pengasuh"
             onClick={() => setShowCaregiverHandover(true)}
-            className="inline-flex flex-shrink-0 items-center gap-1.5 text-xs font-semibold text-ink-muted"
+            className="flex min-h-12 flex-col items-center justify-center gap-0.5 rounded-2xl bg-white px-1.5 py-2 text-center text-[10px] font-semibold leading-tight text-ink-muted shadow-sm"
           >
-            🤝 Serah Terima Pengasuh
+            <span className="text-base" aria-hidden="true">🤝</span>
+            <span>Serah terima</span>
           </button>
         </div>
       </header>
@@ -678,18 +684,18 @@ export default function Dashboard({ child, onOpenProfile, reminderMonitor, onOpe
           <span className="text-xs text-ink-faint">{nursingCount + bottleCount + sleepLogs.length + diaperLogs.length} catatan</span>
         </div>
         <div className="grid grid-cols-3 gap-2.5">
-          <div className="rounded-xl2 bg-feed-soft p-3.5 text-center">
+          <div className="min-w-0 rounded-xl2 bg-feed-soft px-2 py-3.5 text-center">
             <span className="text-2xl" aria-hidden="true">🍼</span>
             <p className="mt-2 text-xl font-extrabold text-ink">{nursingCount + bottleCount}x</p>
             <p className="text-xs font-semibold text-ink-muted">Total susu</p>
             {bottleMl > 0 && <p className="mt-1 text-[10px] text-ink-faint">{bottleMl}ml dari botol</p>}
           </div>
-          <div className="rounded-xl2 bg-sleep-soft p-3.5 text-center">
+          <div className="min-w-0 rounded-xl2 bg-sleep-soft px-2 py-3.5 text-center">
             <span className="text-2xl" aria-hidden="true">🌙</span>
             <p className="mt-2 text-xl font-extrabold text-ink">{sleepH}j {sleepM}m</p>
             <p className="text-xs font-semibold text-ink-muted">Tidur</p>
           </div>
-          <div className="rounded-xl2 bg-diaper-soft p-3.5 text-center">
+          <div className="min-w-0 rounded-xl2 bg-diaper-soft px-2 py-3.5 text-center">
             <span className="text-2xl" aria-hidden="true">🧷</span>
             <p className="mt-2 text-xl font-extrabold text-ink">{wetCount + dirtyCount}x</p>
             <p className="text-xs font-semibold text-ink-muted">Popok</p>
@@ -698,30 +704,30 @@ export default function Dashboard({ child, onOpenProfile, reminderMonitor, onOpe
       </section>
 
       {canWrite && (
-        <section className="px-5 pt-6" aria-labelledby="quick-log-title">
+        <section className="px-5 pb-6 pt-6" aria-labelledby="quick-log-title">
           <h2 id="quick-log-title" className="mb-3 text-base font-extrabold text-ink">Catat cepat</h2>
           <div className="grid grid-cols-2 gap-3">
-            <button onClick={() => { setEditingItem(null); setSheetType("feeding"); }} className="flex items-center gap-3 rounded-xl2 bg-feed-soft p-4 text-left text-sm font-bold text-ink transition-transform active:scale-[0.98]">
-              <span className="flex h-11 w-11 items-center justify-center rounded-full bg-white text-2xl shadow-sm">🍼</span>
-              <span>Susu<span className="mt-0.5 block text-[11px] font-medium text-ink-muted">Catat sekarang ›</span></span>
+            <button onClick={() => { setEditingItem(null); setSheetType("feeding"); }} className="flex min-h-[76px] min-w-0 items-center gap-2 overflow-hidden rounded-xl2 bg-feed-soft p-3 text-left text-sm font-bold text-ink transition-transform active:scale-[0.98]">
+              <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-white text-xl shadow-sm">🍼</span>
+              <span className="min-w-0">Susu<span className="mt-0.5 hidden whitespace-nowrap text-[9px] font-medium text-ink-muted min-[360px]:block">Catat sekarang ›</span></span>
             </button>
-            <button onClick={() => { setEditingItem(null); setSheetType("sleep"); }} className="flex items-center gap-3 rounded-xl2 bg-sleep-soft p-4 text-left text-sm font-bold text-ink transition-transform active:scale-[0.98]">
-              <span className="flex h-11 w-11 items-center justify-center rounded-full bg-white text-2xl shadow-sm">🌙</span>
-              <span>Tidur<span className="mt-0.5 block text-[11px] font-medium text-ink-muted">Catat sekarang ›</span></span>
+            <button onClick={() => { setEditingItem(null); setSheetType("sleep"); }} className="flex min-h-[76px] min-w-0 items-center gap-2 overflow-hidden rounded-xl2 bg-sleep-soft p-3 text-left text-sm font-bold text-ink transition-transform active:scale-[0.98]">
+              <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-white text-xl shadow-sm">🌙</span>
+              <span className="min-w-0">Tidur<span className="mt-0.5 hidden whitespace-nowrap text-[9px] font-medium text-ink-muted min-[360px]:block">Catat sekarang ›</span></span>
             </button>
-            <button onClick={() => { setEditingItem(null); setSheetType("diaper"); }} className="flex items-center gap-3 rounded-xl2 bg-diaper-soft p-4 text-left text-sm font-bold text-ink transition-transform active:scale-[0.98]">
-              <span className="flex h-11 w-11 items-center justify-center rounded-full bg-white text-2xl shadow-sm">🧷</span>
-              <span>Popok<span className="mt-0.5 block text-[11px] font-medium text-ink-muted">Catat sekarang ›</span></span>
+            <button onClick={() => { setEditingItem(null); setSheetType("diaper"); }} className="flex min-h-[76px] min-w-0 items-center gap-2 overflow-hidden rounded-xl2 bg-diaper-soft p-3 text-left text-sm font-bold text-ink transition-transform active:scale-[0.98]">
+              <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-white text-xl shadow-sm">🧷</span>
+              <span className="min-w-0">Popok<span className="mt-0.5 hidden whitespace-nowrap text-[9px] font-medium text-ink-muted min-[360px]:block">Catat sekarang ›</span></span>
             </button>
-            <button onClick={() => setShowMoreMenu(true)} className="flex items-center gap-3 rounded-xl2 bg-sky-soft p-4 text-left text-sm font-bold text-ink transition-transform active:scale-[0.98]">
-              <span className="flex h-11 w-11 items-center justify-center rounded-full bg-white text-2xl text-sky shadow-sm">•••</span>
-              <span>Lainnya<span className="mt-0.5 block text-[11px] font-medium text-ink-muted">Catat aktivitas ›</span></span>
+            <button onClick={() => setShowMoreMenu(true)} className="flex min-h-[76px] min-w-0 items-center gap-2 overflow-hidden rounded-xl2 bg-sky-soft p-3 text-left text-sm font-bold text-ink transition-transform active:scale-[0.98]">
+              <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-white text-xl text-sky shadow-sm">•••</span>
+              <span className="min-w-0">Lainnya<span className="mt-0.5 hidden whitespace-nowrap text-[9px] font-medium text-ink-muted min-[360px]:block">Catat aktivitas ›</span></span>
             </button>
           </div>
         </section>
       )}
 
-      <div className="px-6">
+      <div className="px-5">
         <NextVaccineCard childId={child.id} />
       </div>
 

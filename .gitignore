@@ -5,6 +5,7 @@ backend/**/__pycache__/
 backend/.env
 backend/venv/
 backend/instance/*.db
+backend/instance/local-backups/
 backend/uploads/
 # Backup database (lokasi default di luar repo, ~/database-backups — ini
 # jaring pengaman tambahan kalau --backup-dir kebetulan diarahkan ke dalam repo)
