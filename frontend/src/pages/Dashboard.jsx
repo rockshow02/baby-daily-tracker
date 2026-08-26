@@ -93,7 +93,7 @@ export function isLocalOnlyId(id) {
   return typeof id === "string" && id.startsWith("local-");
 }
 
-export default function Dashboard({ child, onOpenProfile, reminderMonitor, onOpenReminders }) {
+export default function Dashboard({ child, onOpenProfile, reminderMonitor, onOpenReminders, onOpenMenu }) {
   const [date, setDate] = useState(todayStr());
   const [summary, setSummary] = useState(null);
   const [feedingLogs, setFeedingLogs] = useState([]);
@@ -563,47 +563,65 @@ export default function Dashboard({ child, onOpenProfile, reminderMonitor, onOpe
   const sleepM = Math.round((sleepActualHours % 1) * 60);
   const wetCount = diaperLogs.filter((l) => l.diaper_type === "pipis" || l.diaper_type === "keduanya").length;
   const dirtyCount = diaperLogs.filter((l) => l.diaper_type === "pup" || l.diaper_type === "keduanya").length;
+  const ongoingSleep = sleepLogs.find((log) => !log.end_time);
+  const greetingHour = new Date().getHours();
+  const greeting = greetingHour < 11 ? "Selamat pagi" : greetingHour < 15 ? "Selamat siang" : greetingHour < 19 ? "Selamat sore" : "Selamat malam";
 
   return (
-    <div className="min-h-screen pb-32">
-      {/* header */}
-      <header className="px-6 pt-8 pb-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            {child.photo_filename && (
-              <img
-                src={api.photoUrl(child.photo_filename)}
-                alt={child.name}
-                className="w-12 h-12 rounded-full object-cover border border-void-hairline"
-              />
-            )}
-            <div>
-              <p className="font-mono text-xs text-ink-faint tracking-[0.2em] uppercase">
-                {summary ? formatAge(summary.age_days) : "..."}
-              </p>
-              <h1 className="font-display text-3xl text-ink">{child.nickname || child.name}</h1>
-            </div>
+    <div className="min-h-screen pb-8">
+      <header className="px-5 pb-5 pt-5">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <p className="text-sm font-semibold text-ink-muted">{greeting}</p>
+            <h1 className="mt-0.5 font-display text-3xl leading-tight text-ink">Hari ini bersama si kecil</h1>
           </div>
           <div className="flex items-center gap-2">
             {isToday && <SmartInsightsBell summary={summary} weeklyAverages={weeklyAverages} />}
-            <div className="flex items-center gap-2 bg-void-card border border-void-hairline rounded-full px-1 py-1">
-              <button onClick={() => shiftDate(-1)} className="w-8 h-8 flex items-center justify-center text-ink-muted">
-                ‹
+            {onOpenMenu && (
+              <button
+                type="button"
+                onClick={onOpenMenu}
+                aria-label="Buka menu lainnya"
+                className="flex h-10 w-10 items-center justify-center rounded-full border border-void-hairline bg-white text-base text-ink-muted shadow-soft"
+              >
+                ☰
               </button>
-            <span className="font-mono text-xs text-ink-muted min-w-[64px] text-center">
-              {isToday ? "Hari ini" : new Date(date).toLocaleDateString("id-ID", { day: "2-digit", month: "short" })}
-            </span>
-            <button
-              onClick={() => shiftDate(1)}
-              disabled={isToday}
-              className="w-8 h-8 flex items-center justify-center text-ink-muted disabled:opacity-30"
-            >
-              ›
-            </button>
-            </div>
+            )}
           </div>
         </div>
-        <div className="flex items-center gap-4 mt-3">
+
+        <div className="mt-5 flex items-center justify-between gap-3">
+          <button type="button" onClick={onOpenProfile} className="flex min-w-0 items-center gap-3 text-left">
+            {child.photo_filename ? (
+              <img
+                src={api.photoUrl(child.photo_filename)}
+                alt={child.name}
+                className="h-14 w-14 rounded-full border-2 border-white object-cover shadow-soft"
+              />
+            ) : (
+              <span className="flex h-14 w-14 items-center justify-center rounded-full bg-feed-soft text-2xl shadow-soft" aria-hidden="true">
+                👶
+              </span>
+            )}
+            <span className="min-w-0">
+              <span className="block truncate text-lg font-extrabold text-ink">{child.nickname || child.name}</span>
+              <span className="block text-xs text-ink-muted">{summary ? formatAge(summary.age_days) : "Memuat usia..."} · Lihat profil ›</span>
+            </span>
+          </button>
+          <div className="flex flex-shrink-0 items-center rounded-full border border-void-hairline bg-white p-1 shadow-soft">
+            <button type="button" aria-label="Hari sebelumnya" onClick={() => shiftDate(-1)} className="flex h-8 w-8 items-center justify-center rounded-full text-lg text-ink-muted hover:bg-void-raised">
+              ‹
+            </button>
+            <span className="min-w-[64px] px-1 text-center text-xs font-bold text-ink-muted">
+              {isToday ? "Hari ini" : new Date(date).toLocaleDateString("id-ID", { day: "2-digit", month: "short" })}
+            </span>
+            <button type="button" aria-label="Hari berikutnya" onClick={() => shiftDate(1)} disabled={isToday} className="flex h-8 w-8 items-center justify-center rounded-full text-lg text-ink-muted hover:bg-void-raised disabled:opacity-25">
+              ›
+            </button>
+          </div>
+        </div>
+
+        <div className="scrollbar-hidden mt-4 flex items-center gap-4 overflow-x-auto pb-1">
           <button
             type="button"
             onClick={() =>
@@ -612,7 +630,7 @@ export default function Dashboard({ child, onOpenProfile, reminderMonitor, onOpe
                 `laporan-${child.name.toLowerCase()}.pdf`
               )
             }
-            className="inline-flex items-center gap-1.5 text-xs text-ink-muted"
+            className="inline-flex flex-shrink-0 items-center gap-1.5 text-xs font-semibold text-ink-muted"
           >
             📄 Export laporan PDF
           </button>
@@ -624,53 +642,84 @@ export default function Dashboard({ child, onOpenProfile, reminderMonitor, onOpe
                 `backup-${child.name.toLowerCase()}.json`
               )
             }
-            className="inline-flex items-center gap-1.5 text-xs text-ink-muted"
+            className="inline-flex flex-shrink-0 items-center gap-1.5 text-xs font-semibold text-ink-muted"
           >
             💾 Backup data (JSON)
           </button>
           <button
             type="button"
             onClick={() => setShowCaregiverHandover(true)}
-            className="inline-flex items-center gap-1.5 text-xs text-ink-muted"
+            className="inline-flex flex-shrink-0 items-center gap-1.5 text-xs font-semibold text-ink-muted"
           >
             🤝 Serah Terima Pengasuh
           </button>
         </div>
       </header>
 
-      {/* ringkasan harian ala PiyoLog */}
-      <div className="px-6 mb-4">
-        <div className="flex items-center justify-between bg-void-card border border-void-hairline rounded-xl2 px-3 py-2.5 overflow-x-auto gap-4">
-          <div className="flex flex-col items-center flex-shrink-0">
-            <span className="text-base">🤱</span>
-            <span className="text-[11px] text-ink font-semibold">{nursingCount}x</span>
+      {isToday && ongoingSleep && (
+        <section className="mx-5 mb-5 overflow-hidden rounded-[1.75rem] bg-gradient-to-br from-sleep to-[#B7A7F6] p-5 text-white shadow-soft" aria-label="Status tidur saat ini">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-semibold text-white/80">{child.nickname || child.name} sedang tidur</p>
+              <p className="mt-1 font-display text-3xl">Sejak {timeOf(ongoingSleep.start_time)}</p>
+              <p className="mt-1 text-xs text-white/75">Ketuk catatan tidur untuk mengakhiri sesi.</p>
+            </div>
+            <span className="baby-float text-6xl" aria-hidden="true">🌙</span>
           </div>
-          <div className="w-px h-8 bg-void-hairline flex-shrink-0" />
-          <div className="flex flex-col items-center flex-shrink-0">
-            <span className="text-base">🍼</span>
-            <span className="text-[11px] text-ink font-semibold">
-              {bottleCount}x <span className="text-ink-faint font-normal">{bottleMl}ml</span>
-            </span>
+        </section>
+      )}
+
+      <section className="px-5" aria-labelledby="daily-summary-title">
+        <div className="mb-3 flex items-end justify-between">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-[0.16em] text-feed">Ringkasan hari ini</p>
+            <h2 id="daily-summary-title" className="mt-1 text-xl font-extrabold text-ink">Aktivitas utama</h2>
           </div>
-          <div className="w-px h-8 bg-void-hairline flex-shrink-0" />
-          <div className="flex flex-col items-center flex-shrink-0">
-            <span className="text-base">🌙</span>
-            <span className="text-[11px] text-ink font-semibold">
-              {sleepH}j {sleepM}m
-            </span>
+          <span className="text-xs text-ink-faint">{nursingCount + bottleCount + sleepLogs.length + diaperLogs.length} catatan</span>
+        </div>
+        <div className="grid grid-cols-3 gap-2.5">
+          <div className="rounded-xl2 bg-feed-soft p-3.5 text-center">
+            <span className="text-2xl" aria-hidden="true">🍼</span>
+            <p className="mt-2 text-xl font-extrabold text-ink">{nursingCount + bottleCount}x</p>
+            <p className="text-xs font-semibold text-ink-muted">Total susu</p>
+            {bottleMl > 0 && <p className="mt-1 text-[10px] text-ink-faint">{bottleMl}ml dari botol</p>}
           </div>
-          <div className="w-px h-8 bg-void-hairline flex-shrink-0" />
-          <div className="flex flex-col items-center flex-shrink-0">
-            <span className="text-base">💧</span>
-            <span className="text-[11px] text-ink font-semibold">{wetCount}x</span>
+          <div className="rounded-xl2 bg-sleep-soft p-3.5 text-center">
+            <span className="text-2xl" aria-hidden="true">🌙</span>
+            <p className="mt-2 text-xl font-extrabold text-ink">{sleepH}j {sleepM}m</p>
+            <p className="text-xs font-semibold text-ink-muted">Tidur</p>
           </div>
-          <div className="w-px h-8 bg-void-hairline flex-shrink-0" />
-          <div className="flex flex-col items-center flex-shrink-0">
-            <span className="text-base">💩</span>
-            <span className="text-[11px] text-ink font-semibold">{dirtyCount}x</span>
+          <div className="rounded-xl2 bg-diaper-soft p-3.5 text-center">
+            <span className="text-2xl" aria-hidden="true">🧷</span>
+            <p className="mt-2 text-xl font-extrabold text-ink">{wetCount + dirtyCount}x</p>
+            <p className="text-xs font-semibold text-ink-muted">Popok</p>
           </div>
         </div>
-      </div>
+      </section>
+
+      {canWrite && (
+        <section className="px-5 pt-6" aria-labelledby="quick-log-title">
+          <h2 id="quick-log-title" className="mb-3 text-base font-extrabold text-ink">Catat cepat</h2>
+          <div className="grid grid-cols-2 gap-3">
+            <button onClick={() => { setEditingItem(null); setSheetType("feeding"); }} className="flex items-center gap-3 rounded-xl2 bg-feed-soft p-4 text-left text-sm font-bold text-ink transition-transform active:scale-[0.98]">
+              <span className="flex h-11 w-11 items-center justify-center rounded-full bg-white text-2xl shadow-sm">🍼</span>
+              <span>Susu<span className="mt-0.5 block text-[11px] font-medium text-ink-muted">Catat sekarang ›</span></span>
+            </button>
+            <button onClick={() => { setEditingItem(null); setSheetType("sleep"); }} className="flex items-center gap-3 rounded-xl2 bg-sleep-soft p-4 text-left text-sm font-bold text-ink transition-transform active:scale-[0.98]">
+              <span className="flex h-11 w-11 items-center justify-center rounded-full bg-white text-2xl shadow-sm">🌙</span>
+              <span>Tidur<span className="mt-0.5 block text-[11px] font-medium text-ink-muted">Catat sekarang ›</span></span>
+            </button>
+            <button onClick={() => { setEditingItem(null); setSheetType("diaper"); }} className="flex items-center gap-3 rounded-xl2 bg-diaper-soft p-4 text-left text-sm font-bold text-ink transition-transform active:scale-[0.98]">
+              <span className="flex h-11 w-11 items-center justify-center rounded-full bg-white text-2xl shadow-sm">🧷</span>
+              <span>Popok<span className="mt-0.5 block text-[11px] font-medium text-ink-muted">Catat sekarang ›</span></span>
+            </button>
+            <button onClick={() => setShowMoreMenu(true)} className="flex items-center gap-3 rounded-xl2 bg-sky-soft p-4 text-left text-sm font-bold text-ink transition-transform active:scale-[0.98]">
+              <span className="flex h-11 w-11 items-center justify-center rounded-full bg-white text-2xl text-sky shadow-sm">•••</span>
+              <span>Lainnya<span className="mt-0.5 block text-[11px] font-medium text-ink-muted">Catat aktivitas ›</span></span>
+            </button>
+          </div>
+        </section>
+      )}
 
       <div className="px-6">
         <NextVaccineCard childId={child.id} />
@@ -932,43 +981,6 @@ export default function Dashboard({ child, onOpenProfile, reminderMonitor, onOpe
       <div className="px-6">
         <RelatedArticles category="feeding" ageMonths={summary ? summary.age_days / 30.4375 : null} />
       </div>
-
-      {/* quick log bar — viewer (baca-saja) nggak ditawarin sama sekali,
-          backend juga bakal nolak POST-nya kalau somehow ke-panggil */}
-      {canWrite && (
-      <div className="fixed bottom-0 left-0 right-0 px-6 pb-6 pt-4 bg-gradient-to-t from-void via-void to-transparent">
-        <div className="max-w-sm mx-auto grid grid-cols-4 gap-2.5">
-          <button
-            onClick={() => { setEditingItem(null); setSheetType("feeding"); }}
-            className="flex flex-col items-center gap-1.5 bg-feed text-white rounded-xl2 py-3.5 font-medium text-xs"
-          >
-            <span className="text-xl">🍼</span>
-            Susu
-          </button>
-          <button
-            onClick={() => { setEditingItem(null); setSheetType("sleep"); }}
-            className="flex flex-col items-center gap-1.5 bg-sleep text-white rounded-xl2 py-3.5 font-medium text-xs"
-          >
-            <span className="text-xl">🌙</span>
-            Tidur
-          </button>
-          <button
-            onClick={() => { setEditingItem(null); setSheetType("diaper"); }}
-            className="flex flex-col items-center gap-1.5 bg-diaper text-white rounded-xl2 py-3.5 font-medium text-xs"
-          >
-            <span className="text-xl">💧</span>
-            Popok
-          </button>
-          <button
-            onClick={() => setShowMoreMenu(true)}
-            className="flex flex-col items-center gap-1.5 bg-void-raised border border-void-hairline text-ink rounded-xl2 py-3.5 font-medium text-xs"
-          >
-            <span className="text-xl">✚</span>
-            Lainnya
-          </button>
-        </div>
-      </div>
-      )}
 
       {/* menu "lainnya" */}
       {canWrite && showMoreMenu && (

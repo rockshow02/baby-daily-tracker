@@ -30,6 +30,7 @@ import CaregiverModal from "./components/CaregiverModal";
 import OfflineStatusBanner from "./components/OfflineStatusBanner";
 import SyncCenter from "./components/SyncCenter";
 import AuditTrailScreen from "./components/AuditTrailScreen";
+import BottomNavigation from "./components/BottomNavigation";
 
 const NAV_ITEMS = [
   { key: "daily", label: "Harian", icon: "🍼" },
@@ -286,9 +287,10 @@ function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, s
   };
 
   return (
-    <div>
+    <div className="min-h-screen pb-20">
       <OfflineStatusBanner sync={sync} onOpenDetail={() => setShowSyncCenter(true)} />
-      <div className="px-6 pt-4 flex items-center justify-between gap-2">
+      {(activeView !== "daily" || childrenList.length > 1) && (
+      <div className="app-page px-5 pt-4 flex items-center justify-between gap-2">
         {childrenList.length > 1 ? (
           <div className="flex gap-2 overflow-x-auto">
             {childrenList.map((c) => (
@@ -312,21 +314,25 @@ function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, s
           <p className="text-sm text-ink font-medium truncate">{activeChild.nickname || activeChild.name}</p>
         )}
 
-        <button
+        {activeView !== "daily" && <button
           onClick={() => setShowMenu(true)}
           className="flex items-center gap-1.5 bg-void-card border border-void-hairline rounded-full pl-3 pr-2 py-1.5 flex-shrink-0"
         >
           <span className="text-xs text-ink-muted whitespace-nowrap">{activeLabel}</span>
           <span className="text-ink-muted text-sm">☰</span>
         </button>
+        }
       </div>
+      )}
 
+      <main className="app-page">
       {activeView === "daily" && (
         <Dashboard
           child={activeChild}
           onOpenProfile={() => setActiveView("childProfile")}
           reminderMonitor={reminderMonitor}
           onOpenReminders={() => setActiveView("reminders")}
+          onOpenMenu={() => setShowMenu(true)}
         />
       )}
       {activeView === "growth" && <GrowthScreen child={activeChild} />}
@@ -353,6 +359,9 @@ function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, s
       {activeView === "privacy" && (
         <PrivacyDataScreen onAccessChanged={reloadChildren} onAccountDeleted={logout} />
       )}
+      </main>
+
+      <BottomNavigation activeView={activeView} onNavigate={setActiveView} />
 
       {showMenu && (
         <div className="fixed inset-0 z-50 flex items-start justify-end sm:items-center sm:justify-center">
