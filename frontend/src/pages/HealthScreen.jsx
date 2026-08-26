@@ -3,6 +3,9 @@ import { api } from "../api/client";
 import VaccinationScreen from "../components/VaccinationScreen";
 import SteppedDateTimeInput from "../components/SteppedDateTimeInput";
 import RelatedArticles from "../components/RelatedArticles";
+import DoctorConsultationScreen from "../components/DoctorConsultationScreen";
+import MedicationScheduleScreen from "./MedicationScheduleScreen";
+import MedicalProfileScreen from "./MedicalProfileScreen";
 import { todayWIB } from "../utils/date";
 
 const SUB_TABS = [
@@ -27,7 +30,7 @@ function fmtDateTime(iso) {
   return new Date(iso).toLocaleString("id-ID", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
-export default function HealthScreen({ child }) {
+export default function HealthScreen({ child, currentUserId }) {
   const [activeTab, setActiveTab] = useState("doctor");
   const [visits, setVisits] = useState([]);
   const [temps, setTemps] = useState([]);
@@ -38,6 +41,9 @@ export default function HealthScreen({ child }) {
   const [medicationForIllness, setMedicationForIllness] = useState(null); // illness id kalau nambah obat dari kartu sakit
   const [editingLog, setEditingLog] = useState(null);
   const [editingKind, setEditingKind] = useState(null);
+  const [showConsultation, setShowConsultation] = useState(false);
+  const [showMedicationSchedule, setShowMedicationSchedule] = useState(false);
+  const [showMedicalProfile, setShowMedicalProfile] = useState(false);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -81,18 +87,21 @@ export default function HealthScreen({ child }) {
   };
 
   return (
-    <div className="min-h-screen pb-32 px-6 pt-8">
-      <h1 className="font-display text-3xl text-ink mb-1">Kesehatan</h1>
-      <p className="text-sm text-ink-muted mb-6">Kunjungan dokter, suhu, sakit, dan obat</p>
+    <div className="min-h-screen px-4 pb-28 pt-6 sm:px-6 sm:pt-8">
+      <header className="mb-5">
+        <p className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-feed">Catatan kesehatan</p>
+        <h1 className="font-display text-3xl font-bold leading-tight text-ink">Kesehatan</h1>
+        <p className="mt-1 text-sm text-ink-muted">Pantau kondisi dan perawatan {child.nickname || child.name}.</p>
+      </header>
 
-      <div className="flex gap-2 mb-5 overflow-x-auto">
+      <div className="scrollbar-hidden -mx-1 mb-4 flex gap-2 overflow-x-auto px-1 pb-1" aria-label="Kategori kesehatan">
         {SUB_TABS.map((t) => (
           <button
             key={t.key}
             onClick={() => setActiveTab(t.key)}
-            className={`flex-1 flex flex-col items-center gap-1 py-3 rounded-xl2 border text-xs font-medium whitespace-nowrap px-2 ${
+            className={`flex min-w-[5.5rem] flex-1 flex-col items-center gap-1 rounded-2xl border px-2 py-3 text-xs font-bold whitespace-nowrap ${
               activeTab === t.key
-                ? "bg-feed/15 border-feed text-feed"
+                ? "border-feed bg-feed text-white shadow-sm"
                 : "bg-void-card border-void-hairline text-ink-muted"
             }`}
           >
@@ -102,12 +111,36 @@ export default function HealthScreen({ child }) {
         ))}
       </div>
 
+      {activeTab !== "vaccination" && (
+        <button
+          onClick={openAdd}
+          className="mb-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-feed-soft py-3 text-sm font-bold text-feed"
+        >
+          <span className="text-lg" aria-hidden="true">+</span>
+          Catat {SUB_TABS.find((tab) => tab.key === activeTab)?.label}
+        </button>
+      )}
+
       {loading ? (
         <p className="text-ink-faint text-sm text-center py-10">Memuat...</p>
       ) : (
         <>
           {activeTab === "doctor" && (
             <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => setShowConsultation(true)}
+                className="w-full py-2.5 mb-1 rounded-xl2 border border-feed text-feed text-sm font-semibold"
+              >
+                🩺 Siapkan Konsultasi
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowMedicalProfile(true)}
+                className="w-full py-2.5 mb-1 rounded-xl2 border border-feed text-feed text-sm font-semibold"
+              >
+                🩺 Profil Medis & Kartu Darurat
+              </button>
               {visits.length === 0 && <p className="text-ink-faint text-sm">Belum ada catatan kunjungan.</p>}
               {visits.map((v) => (
                 <div
@@ -256,6 +289,13 @@ export default function HealthScreen({ child }) {
 
           {activeTab === "medication" && (
             <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => setShowMedicationSchedule(true)}
+                className="w-full py-2.5 mb-1 rounded-xl2 border border-feed text-feed text-sm font-semibold"
+              >
+                💊 Jadwal Obat
+              </button>
               {medications.length === 0 && <p className="text-ink-faint text-sm">Belum ada catatan obat.</p>}
               {medications.map((m) => (
                 <div
@@ -296,16 +336,6 @@ export default function HealthScreen({ child }) {
         ageMonths={(new Date() - new Date(child.birth_date)) / (1000 * 60 * 60 * 24 * 30.4375)}
       />
 
-      {activeTab !== "vaccination" && (
-        <button
-          onClick={openAdd}
-          className="fixed bottom-6 right-6 w-14 h-14 rounded-full bg-feed text-white text-2xl shadow-soft flex items-center justify-center"
-          aria-label="Tambah catatan"
-        >
-          +
-        </button>
-      )}
-
       {showForm && (
         <HealthForm
           tab={editingLog ? editingKind : medicationForIllness ? "medication" : activeTab}
@@ -319,6 +349,36 @@ export default function HealthScreen({ child }) {
             setEditingKind(null);
           }}
           onSaved={loadAll}
+        />
+      )}
+
+      {showConsultation && (
+        <DoctorConsultationScreen
+          child={child}
+          onClose={() => setShowConsultation(false)}
+          onRecordVisit={() => {
+            setShowConsultation(false);
+            openAdd();
+          }}
+        />
+      )}
+
+      {showMedicationSchedule && (
+        <MedicationScheduleScreen
+          child={child}
+          currentUserId={currentUserId}
+          onClose={() => {
+            setShowMedicationSchedule(false);
+            loadAll();
+          }}
+        />
+      )}
+
+      {showMedicalProfile && (
+        <MedicalProfileScreen
+          child={child}
+          currentUserId={currentUserId}
+          onClose={() => setShowMedicalProfile(false)}
         />
       )}
     </div>

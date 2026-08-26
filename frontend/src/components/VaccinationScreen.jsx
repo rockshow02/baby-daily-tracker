@@ -10,6 +10,10 @@ export default function VaccinationScreen({ child }) {
   const [category, setCategory] = useState("wajib"); // 'wajib' | 'tambahan'
   const [ageMonths, setAgeMonths] = useState(0);
   const [vaccinations, setVaccinations] = useState([]);
+  const [summary, setSummary] = useState(null);
+  const [canUpdate, setCanUpdate] = useState(false);
+  const [statusFilter, setStatusFilter] = useState("pending");
+  const [disclaimer, setDisclaimer] = useState("");
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState(null);
   const [dateEditId, setDateEditId] = useState(null);
@@ -25,6 +29,12 @@ export default function VaccinationScreen({ child }) {
       const res = await api.listChildVaccinations(child.id);
       setAgeMonths(res.age_months);
       setVaccinations(res.vaccinations);
+      setSummary(res.summary || null);
+      setCanUpdate(res.can_update === true);
+      setDisclaimer(res.disclaimer || "");
+      setError("");
+    } catch (err) {
+      setError(err?.message || "Gagal memuat jadwal vaksinasi.");
     } finally {
       setLoading(false);
     }
@@ -55,6 +65,7 @@ export default function VaccinationScreen({ child }) {
   };
 
   const toggleGiven = async (v) => {
+    if (!canUpdate) return;
     if (v.given) {
       setError("");
       setSavingId(v.vaccine_schedule_id);
@@ -103,9 +114,20 @@ export default function VaccinationScreen({ child }) {
     }
   };
 
-  const filtered = vaccinations.filter((v) => v.category === category);
-  const givenCount = filtered.filter((v) => v.given).length;
-  const dueNotGiven = filtered.filter((v) => v.due && !v.given);
+  const categoryItems = vaccinations.filter((v) => v.category === category);
+  const filtered = categoryItems.filter((v) => {
+    if (statusFilter === "all") return true;
+    if (statusFilter === "given") return v.state === "given" || v.given;
+    if (statusFilter === "overdue") return v.state === "overdue";
+    return !v.given;
+  });
+  const givenCount = categoryItems.filter((v) => v.given).length;
+  const overdueNotGiven = categoryItems.filter((v) => v.state === "overdue" && !v.given);
+
+  const stateLabel = (v) => {
+    const state = v.state || (v.given ? "given" : v.due ? "due" : "upcoming");
+    return { given: "Sudah diberikan", upcoming: "Akan datang", due: "Waktunya", overdue: "Terlambat" }[state] || "Belum tercatat";
+  };
 
   return (
     <div>
@@ -126,6 +148,23 @@ export default function VaccinationScreen({ child }) {
         >
           Tambahan (IDAI)
         </button>
+      </div>
+
+      <div className="flex gap-1.5 mb-4 overflow-x-auto pb-1">
+        {[
+          ["pending", "Belum lengkap"], ["overdue", "Terlambat"], ["given", "Sudah diberikan"], ["all", "Semua"],
+        ].map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setStatusFilter(key)}
+            className={`px-3 py-1.5 rounded-full border text-[11px] whitespace-nowrap ${
+              statusFilter === key ? "bg-feed/15 border-feed text-feed" : "border-void-hairline text-ink-muted"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
       </div>
 
       {loading ? (
@@ -151,9 +190,14 @@ export default function VaccinationScreen({ child }) {
                 style={{ width: `${filtered.length ? (givenCount / filtered.length) * 100 : 0}%` }}
               />
             </div>
-            {dueNotGiven.length > 0 && (
+            {summary && (
+              <p className="mt-2 text-[11px] text-ink-faint">
+                Keseluruhan: {summary.given} diberikan · {summary.due} waktunya · {summary.overdue} terlambat
+              </p>
+            )}
+            {overdueNotGiven.length > 0 && (
               <p className="mt-2 text-xs text-warn">
-                {dueNotGiven.length} vaksin sudah waktunya tapi belum dicatat sudah diberikan
+                {overdueNotGiven.length} vaksin melewati lebih dari 30 hari dari tanggal rekomendasi
               </p>
             )}
             {category === "tambahan" && (
@@ -163,13 +207,21 @@ export default function VaccinationScreen({ child }) {
             )}
           </div>
 
+          {!canUpdate && (
+            <p className="px-3 py-2 mb-4 text-[11px] text-ink-faint border border-void-hairline rounded-lg">
+              Peran Anda hanya dapat melihat riwayat vaksinasi.
+            </p>
+          )}
+
+          {disclaimer && <p className="mb-4 text-[11px] text-ink-faint">{disclaimer}</p>}
+
           <div className="space-y-1.5">
             {filtered.map((v) => (
               <div key={v.vaccine_schedule_id} className="px-4 py-3 border bg-void-card border-void-hairline rounded-xl2">
                 <div className="flex items-center justify-between">
                   <button
                     onClick={() => toggleGiven(v)}
-                    disabled={savingId === v.vaccine_schedule_id}
+                    disabled={!canUpdate || savingId === v.vaccine_schedule_id}
                     className="flex items-center flex-1 gap-3 text-left disabled:opacity-50"
                   >
                     <div
@@ -189,9 +241,17 @@ export default function VaccinationScreen({ child }) {
                             Lebih awal
                           </span>
                         )}
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+                          v.state === "overdue" ? "bg-warn/15 text-warn" :
+                          v.state === "due" ? "bg-feed/15 text-feed" :
+                          v.given ? "bg-diaper/15 text-diaper" : "bg-void border border-void-hairline text-ink-faint"
+                        }`}>
+                          {stateLabel(v)}
+                        </span>
                       </div>
                       <p className="text-[11px] text-ink-faint font-mono">
                         usia {v.recommended_age_months} bln
+                        {v.recommended_date && ` · rekomendasi ${fmtDate(v.recommended_date)}`}
                         {v.is_optional && " · wilayah endemis"}
                         {v.given && v.given_date && ` · diberikan ${fmtDate(v.given_date)}`}
                         {!v.given && v.due && " · sudah waktunya"}
@@ -202,7 +262,7 @@ export default function VaccinationScreen({ child }) {
                       )}
                     </div>
                   </button>
-                  {v.given && (
+                  {canUpdate && v.given && (
                     <button
                       onClick={() => {
                         setDateEditId(v.vaccine_schedule_id);
@@ -250,6 +310,9 @@ export default function VaccinationScreen({ child }) {
               </div>
             ))}
           </div>
+          {filtered.length === 0 && (
+            <p className="py-8 text-sm text-center text-ink-faint">Tidak ada vaksin pada filter ini.</p>
+          )}
         </>
       )}
 

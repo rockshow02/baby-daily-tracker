@@ -41,7 +41,7 @@ def login():
     email = data.get("email", "").strip().lower()
     password = data.get("password", "")
 
-    user = User.query.filter_by(email=email).first()
+    user = User.query.filter_by(email=email, is_active=True).first()
     if not user or not user.check_password(password):
         return jsonify({"error": "Email atau password salah"}), 401
 

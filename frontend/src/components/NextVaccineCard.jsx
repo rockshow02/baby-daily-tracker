@@ -15,19 +15,20 @@ export default function NextVaccineCard({ childId, refreshKey }) {
   if (!data || !data.has_next) return null;
 
   const isOverdue = data.status === "overdue";
+  const isDue = data.status === "due";
 
   return (
     <div
-      className={`rounded-xl2 px-4 py-3.5 mb-4 border ${
+      className={`mb-4 rounded-xl2 border px-4 py-3.5 ${
         isOverdue ? "bg-warn/10 border-warn/30" : "bg-sleep/10 border-sleep/30"
       }`}
     >
-      <div className="flex items-center justify-between">
-        <div>
+      <div className="flex flex-col gap-2 min-[380px]:flex-row min-[380px]:items-start min-[380px]:justify-between min-[380px]:gap-3">
+        <div className="min-w-0">
           <p className="text-[11px] text-ink-faint uppercase tracking-wider font-mono mb-0.5">
-            {isOverdue ? "Vaksin Wajib Sudah Jatuh Tempo" : "Vaksin Wajib Berikutnya"}
+            {isOverdue ? "Vaksin Wajib Terlambat" : isDue ? "Vaksin Wajib Segera" : "Vaksin Wajib Berikutnya"}
           </p>
-          <p className={`font-display text-xl ${isOverdue ? "text-warn" : "text-sleep"}`}>
+          <p className={`font-display text-lg leading-tight ${isOverdue ? "text-warn" : "text-sleep"}`}>
             💉 {data.vaccine_name}
           </p>
           {isOverdue && data.overdue_count > 1 && (
@@ -36,10 +37,10 @@ export default function NextVaccineCard({ childId, refreshKey }) {
             </p>
           )}
         </div>
-        <div className="text-right">
+        <div className="flex-shrink-0 text-left min-[380px]:text-right">
           <p className="text-sm text-ink font-medium">usia {data.recommended_age_months} bln</p>
           <p className="text-[11px] text-ink-faint">
-            {isOverdue ? `sejak ${fmtDate(data.estimated_date)}` : `sekitar ${fmtDate(data.estimated_date)}`}
+            {isOverdue ? `direkomendasikan ${fmtDate(data.estimated_date)}` : isDue ? `waktunya sekitar ${fmtDate(data.estimated_date)}` : `sekitar ${fmtDate(data.estimated_date)}`}
           </p>
         </div>
       </div>

@@ -13,6 +13,11 @@ class User(db.Model):
     email = db.Column(db.String(120), unique=True, nullable=False, index=True)
     password_hash = db.Column(db.String(255), nullable=False)
     telegram_chat_id = db.Column(db.String(50), nullable=True)
+    # Privacy & Data Management Center: akun yang dihapus dipseudonimkan
+    # (bukan hard-delete) supaya atribusi historis lintas-caregiver tidak
+    # dipindahkan ke orang lain dan seluruh FK non-null tetap valid.
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    deleted_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     children = db.relationship("Child", backref="owner", lazy="dynamic", cascade="all, delete-orphan")
@@ -49,6 +54,20 @@ class Child(db.Model):
     diaper_logs = db.relationship("DiaperLog", backref="child", lazy="dynamic", cascade="all, delete-orphan")
     vaccinations = db.relationship(
         "ChildVaccination", backref="child", lazy="dynamic", cascade="all, delete-orphan"
+    )
+    # `idempotency_keys` SEBELUMNYA nggak punya relationship cascade sama
+    # sekali (beda dari SEMUA tabel child-scoped lain — termasuk
+    # `child_caregivers`, yang cascade-nya UDAH ada dari sisi lain, lihat
+    # `ChildCaregiver.child` -> backref `Child.caregivers` di bawah) —
+    # nggak ketauan selama ini soalnya SQLite nggak nge-enforce FK per
+    # default (lihat extensions.py, yang sekarang MENYALAKAN PRAGMA
+    # foreign_keys=ON permanen buat kebutuhan Issue 2 audit trail). Begitu
+    # FK beneran ditegakkan, hapus 1 Child yang masih py idempotency key
+    # (mis. abis dipakai idempotent_create() buat 1 log-nya) TANPA cascade
+    # ini bakal gagal IntegrityError — ditambahin di sini biar KONSISTEN
+    # sama pola cascade semua tabel child-scoped lain, BUKAN pengecualian.
+    idempotency_keys = db.relationship(
+        "IdempotencyKey", backref="child", lazy="dynamic", cascade="all, delete-orphan"
     )
 
     def to_dict(self):
@@ -94,6 +113,7 @@ class FeedingLog(db.Model):
             "volume_ml": self.volume_ml,
             "breast_side": self.breast_side,
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -129,6 +149,7 @@ class SleepLog(db.Model):
             "sleep_type": self.sleep_type,
             "duration_minutes": self.duration_minutes,
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -161,6 +182,7 @@ class DiaperLog(db.Model):
             "consistency": self.consistency,
             "color": self.color,
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -299,6 +321,7 @@ class PumpingLog(db.Model):
             "volume_ml": self.volume_ml,
             "breast_side": self.breast_side,
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -334,6 +357,7 @@ class ActivityLog(db.Model):
             "timestamp": self.timestamp.isoformat() + "+07:00",
             "duration_minutes": self.duration_minutes,
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -388,6 +412,7 @@ class GrowthMeasurement(db.Model):
             "height_cm": self.height_cm,
             "head_circumference_cm": self.head_circumference_cm,
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -426,6 +451,7 @@ class DoctorVisitLog(db.Model):
             "diagnosis": self.diagnosis,
             "next_visit_date": self.next_visit_date.isoformat() if self.next_visit_date else None,
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -458,6 +484,7 @@ class TemperatureLog(db.Model):
             "temperature_celsius": self.temperature_celsius,
             "method": self.method,
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -496,6 +523,7 @@ class IllnessLog(db.Model):
             "symptoms": self.symptoms,
             "notes": self.notes,
             "is_ongoing": self.end_date is None,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -530,6 +558,7 @@ class MedicationLog(db.Model):
             "dosage": self.dosage,
             "timestamp": self.timestamp.isoformat() + "+07:00",
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -558,6 +587,7 @@ class MoodLog(db.Model):
             "timestamp": self.timestamp.isoformat() + "+07:00",
             "mood": self.mood,
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -591,6 +621,7 @@ class MilestoneLog(db.Model):
             "custom_label": self.custom_label,
             "achieved_date": self.achieved_date.isoformat(),
             "notes": self.notes,
+            "created_by_user_id": self.created_by_user_id,
             "created_by_name": self.creator.name if self.creator else None,
         }
 
@@ -600,15 +631,32 @@ class ChildCaregiver(db.Model):
     """
     Relasi banyak-ke-banyak antara User dan Child — satu anak bisa punya
     beberapa pengasuh (orang tua, ART, dll), satu akun bisa akses beberapa anak.
+
+    Baris di tabel ini CUMA PERNAH merepresentasikan caregiver NON-PEMILIK
+    (`role` CUMA boleh `'editor'` atau `'viewer'`, ditegakkan CHECK
+    constraint di bawah — lihat Caregiver Roles & Permissions Phase 1,
+    backend/docs/ROLES_PERMISSIONS.md). PEMILIK anak SENGAJA TIDAK PERNAH
+    punya baris di sini — status pemilik SATU-SATUNYA sumber kebenarannya
+    tetap `Child.user_id` (lihat utils/access.py:resolve_role()), BUKAN
+    baris `role='owner'` di tabel ini kayak versi sebelumnya (yang bikin
+    2 sumber kebenaran ganda/kontradiktif buat 1 hal yang sama). Migrasi
+    Phase 1 (scripts/migrate_production.py) MENGHAPUS baris `role='owner'`
+    lama yang tersisa dari versi sebelumnya, dan mengonversi baris
+    `role='caregiver'` lama jadi `'editor'` (persis perilaku lama —
+    caregiver yang diundang SEBELUM fitur role ini selalu bisa
+    create/update/delete, sama kayak editor sekarang).
     """
     __tablename__ = "child_caregivers"
-    __table_args__ = (db.UniqueConstraint("child_id", "user_id", name="uq_child_caregiver"),)
+    __table_args__ = (
+        db.UniqueConstraint("child_id", "user_id", name="uq_child_caregiver"),
+        db.CheckConstraint("role IN ('editor', 'viewer')", name="ck_child_caregivers_role"),
+    )
 
     id = db.Column(db.Integer, primary_key=True)
     child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
 
-    role = db.Column(db.String(15), nullable=False, default="caregiver")  # 'owner' | 'caregiver'
+    role = db.Column(db.String(15), nullable=False, default="editor")  # 'editor' | 'viewer' — LIHAT docstring kelas
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     user = db.relationship("User")
@@ -617,6 +665,18 @@ class ChildCaregiver(db.Model):
     )
 
     def to_dict(self):
+        """
+        SENGAJA nyertain email apa adanya, TANPA cek siapa yang minta —
+        model nggak boleh (dan nggak bisa) tau konteks otorisasi
+        pemanggilnya. CUMA aman dipanggil dari endpoint yang SUDAH
+        ditegakkan owner-only di layer route (update_caregiver_role,
+        remove_caregiver — lihat routes/children_routes.py). Endpoint
+        BACA yang bisa diakses editor/viewer juga (list_caregivers)
+        SENGAJA TIDAK PERNAH manggil method ini — dia punya serializer
+        eksplisit sendiri (`_caregiver_entry()`) yang cuma nyertain email
+        kalau peminta-nya kebukti owner (Issue 2, lihat
+        backend/docs/ROLES_PERMISSIONS.md).
+        """
         return {
             "id": self.id,
             "user_id": self.user_id,
@@ -641,12 +701,28 @@ class ChildInvite(db.Model):
     used_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
     used_at = db.Column(db.DateTime, nullable=True)
 
+    # Peran yang DIPILIH PEMILIK pas bikin undangan ini ('editor' | 'viewer'
+    # — SAMA whitelist-nya kayak ChildCaregiver.role, ditegakkan CHECK
+    # constraint yang sama pola-nya di bawah). Diterapkan APA ADANYA ke
+    # ChildCaregiver.role begitu undangan ini dipakai (join_child) — user
+    # yang nerima undangan TIDAK PERNAH bisa milih/nimpa peran ini sendiri.
+    # Default 'editor' buat undangan yang dibikin SEBELUM kolom ini ada
+    # (lihat scripts/migrate_production.py) — PERSIS perilaku lama
+    # (caregiver yang gabung lewat undangan lama selalu bisa create/
+    # update/delete).
+    role = db.Column(db.String(15), nullable=False, default="editor")
+
     child = db.relationship("Child", backref=db.backref("invites", lazy="dynamic", cascade="all, delete-orphan"))
+
+    __table_args__ = (
+        db.CheckConstraint("role IN ('editor', 'viewer')", name="ck_child_invites_role"),
+    )
 
     def to_dict(self):
         return {
             "id": self.id,
             "code": self.code,
+            "role": self.role,
             "created_at": self.created_at.isoformat() + "Z",
             "expires_at": self.expires_at.isoformat() + "Z",
             "used": self.used_by is not None,
@@ -707,4 +783,648 @@ class WakeWindowGuideline(db.Model):
             "label": self.label,
             "min_wake_minutes": self.min_wake_minutes,
             "max_wake_minutes": self.max_wake_minutes,
+        }
+
+
+class IdempotencyKey(db.Model):
+    """
+    Rekaman request offline-queue yang sudah pernah diproses, dikunci per
+    (user, anak, endpoint, client_request_id). Dipakai buat nolak nyipta
+    record dobel kalau klien retry request yang sebenernya udah sukses
+    diproses server tapi responsnya nggak sempat nyampe balik ke klien
+    (koneksi putus pas offline-sync).
+    """
+    __tablename__ = "idempotency_keys"
+    __table_args__ = (
+        db.UniqueConstraint(
+            "user_id", "child_id", "endpoint", "client_request_id", name="uq_idempotency_key"
+        ),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
+    endpoint = db.Column(db.String(50), nullable=False)
+    client_request_id = db.Column(db.String(100), nullable=False)
+
+    # sha256 hex dari payload request yang dinormalisasi — BUKAN payload
+    # mentahnya (biar nggak nyimpen data kesehatan bayi dobel di tabel ini).
+    # Dipakai buat mastiin key yang sama dipakai ulang utk request yang
+    # ISINYA SAMA — kalau isinya beda, itu tandanya bug klien atau reuse
+    # key yang nggak sengaja, jadi ditolak (409) bukan diam-diam dianggap
+    # sama. Nullable buat kompatibilitas mundur ke baris lama sebelum kolom
+    # ini ada (lihat scripts/migrate_production.py).
+    fingerprint = db.Column(db.String(64), nullable=True)
+
+    response_status = db.Column(db.Integer, nullable=False)
+    response_body = db.Column(db.JSON, nullable=False)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+
+class CaregiverAuditEvent(db.Model):
+    """
+    Jejak audit IMUTABLE: siapa yang create/update/delete 1 record anak
+    (Caregiver Audit Trail — Phase 1, lihat backend/docs/AUDIT_TRAIL.md).
+
+    SENGAJA PRIVACY-MINIMAL — baris di tabel ini TIDAK PERNAH berisi:
+    isi request mentah, nilai field APA PUN (aman maupun privat — lihat
+    di bawah), catatan/teks bebas, nama anak, email user, token,
+    idempotency key, request ID, teks exception, atau URL endpoint.
+    Cukup metadata minimal biar caregiver yang berwenang paham APA yang
+    kejadian dan SIAPA yang ngelakuin — bukan salinan kedua data medisnya.
+
+    `changed_fields_json` (khusus event `update`) CUMA berisi NAMA field
+    yang berubah, dari 2 kemungkinan bentuk (kebijakan lengkapnya di
+    utils/audit.py):
+      - nama field ASLI (mis. `["timestamp", "volume_ml"]`) — CUMA kalau
+        field itu ada di whitelist utils/audit.py:SAFE_CHANGED_FIELDS
+        (field struktural/kategori/angka/waktu yang aman disebut
+        namanya);
+      - marker generik `"private_details"` (utils/audit.py:PRIVATE_MARKER)
+        — kalau field yang berubah ada di
+        utils/audit.py:PRIVATE_CHANGED_FIELDS (teks bebas kayak `notes`,
+        atau field yang NAMANYA AJA udah identitas medis spesifik kayak
+        nama obat/penyakit/diagnosis) — marker ini CUMA muncul SEKALI
+        biar pun beberapa field privat berubah bareng.
+    Nama field mentah dari request yang nggak ada di KEDUA whitelist itu
+    (typo, field baru yang belum dikenal, dst) otomatis dibuang, TIDAK
+    PERNAH lolos apa adanya — dan TIDAK PERNAH ada nilai lama/baru
+    tersimpan di kolom ini, bentuk apa pun field-nya.
+
+    `actor_user_id` SENGAJA nullable + FK-nya `ondelete="SET NULL"` —
+    kalau suatu saat akun user yang jadi actor di sini beneran dihapus
+    (belum ada fitur hapus akun lewat endpoint publik sekarang), baris
+    event ini TETAP ada (bukti audit harus tetap ada, TIDAK PERNAH ikut
+    kehapus), CUMA `actor_user_id`-nya di-null-kan OTOMATIS sama SQLite
+    sendiri (bukan kode Python yang nyusul nge-update manual), lalu
+    `to_dict()["actor_name"]` balik `None` (lewat relationship yang
+    gagal nemu User-nya) — bukan exception. Field lain di baris event-nya
+    (action/entity_type/entity_id/changed_fields_json/recorded_at/
+    created_at) SAMA SEKALI nggak kesentuh.
+
+    `ondelete="SET NULL"` ini CUMA beneran ditegakkan SQLite kalau
+    `PRAGMA foreign_keys=ON` aktif di koneksinya — makanya
+    extensions.py masang listener `Engine.connect` yang nyalain PRAGMA
+    itu buat SETIAP koneksi SQLite baru, PERMANEN (bukan cuma pas
+    migrasi) — lihat extensions.py buat detailnya. Buat database SQLite
+    yang tabel `caregiver_audit_events`-nya udah kebikin SEBELUM
+    perbaikan ini (FK constraint lama TANPA `ON DELETE SET NULL`),
+    scripts/migrate_production.py punya langkah migrasi tersendiri yang
+    ngebangun ulang tabelnya (rename+copy, BUKAN hapus+bikin ulang) biar
+    FK-nya kekoreksi TANPA kehilangan baris yang udah ada — lihat
+    `_ensure_audit_actor_fk_set_null()` di sana.
+
+    `child` pakai backref dengan `cascade="all, delete-orphan"` PERSIS
+    pola semua log lain di file ini — begitu 1 Child dihapus permanen,
+    SEMUA audit event anak itu ikut kehapus otomatis (konsisten sama
+    kebijakan hapus-permanen yang udah ada buat semua log anak lainnya,
+    bukan pengecualian).
+    """
+    __tablename__ = "caregiver_audit_events"
+
+    id = db.Column(db.Integer, primary_key=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
+    actor_user_id = db.Column(
+        db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+    action = db.Column(db.String(10), nullable=False)       # 'create' | 'update' | 'delete'
+    entity_type = db.Column(db.String(30), nullable=False)  # lihat utils/audit.py:ENTITY_TYPES
+    entity_id = db.Column(db.Integer, nullable=False)        # id record asli (bukan FK — record-nya bisa aja udah kehapus)
+
+    # List nama field yang berubah (CUMA buat action='update'; null buat create/delete)
+    changed_fields_json = db.Column(db.JSON, nullable=True)
+
+    # Waktu KEJADIAN ASLI record-nya (mis. FeedingLog.timestamp,
+    # GrowthMeasurement.measured_date) — null kalau entity_type-nya nggak
+    # punya field waktu kejadian yang jelas. BEDA dari created_at di bawah
+    # (kapan EVENT AUDIT ini sendiri dicatat).
+    recorded_at = db.Column(db.DateTime, nullable=True)
+
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+    actor = db.relationship("User", foreign_keys=[actor_user_id])
+    child = db.relationship(
+        "Child", backref=db.backref("audit_events", lazy="dynamic", cascade="all, delete-orphan")
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "action": self.action,
+            "entity_type": self.entity_type,
+            "entity_id": self.entity_id,
+            "changed_fields": self.changed_fields_json or [],
+            "recorded_at": (self.recorded_at.isoformat() + "+07:00") if self.recorded_at else None,
+            "created_at": self.created_at.isoformat() + "Z",
+            "actor_user_id": self.actor_user_id,
+            "actor_name": self.actor.name if self.actor else None,
+        }
+
+
+class Reminder(db.Model):
+    """
+    Definisi 1 pengingat perawatan (Care Reminders & Schedules — Phase 1,
+    lihat backend/docs/REMINDERS.md). SENGAJA CUMA nyimpen JADWAL +
+    METADATA, TIDAK PERNAH status "sudah lewat"/"jatuh tempo" — status
+    itu SELALU dihitung ULANG saat diminta (lihat
+    utils/reminder_engine.py) karena PythonAnywhere Free nggak punya
+    scheduler background yang bisa nge-update status di latar belakang
+    pada waktu yang tepat.
+
+    `title` SENGAJA diperlakukan sebagai teks POTENSIAL SENSITIF (bisa
+    aja diisi caregiver dengan nama obat/rincian medis, mis. "Kasih
+    Paracetamol 5ml") — TIDAK PERNAH dikirim ke notifikasi
+    browser/log/audit trail apa adanya, cuma teks generik per
+    `reminder_type` yang dipakai di sana (lihat routes/reminder_routes.py).
+    """
+    __tablename__ = "reminders"
+    __table_args__ = (
+        db.CheckConstraint(
+            "reminder_type IN ('medication','doctor_visit','vaccination','pumping','general')",
+            name="ck_reminders_type",
+        ),
+        # 'weekly'/'custom' SENGAJA belum masuk allowlist Phase 1 (lihat
+        # backend/docs/REMINDERS.md#scope) — kolom `recurrence` string
+        # bebas (bukan enum SQLite native) biar allowlist ini gampang
+        # diperluas nanti TANPA migrasi skema kolom, cuma ganti CHECK
+        # constraint-nya.
+        db.CheckConstraint("recurrence IN ('none','daily')", name="ck_reminders_recurrence"),
+        db.Index("ix_reminders_child_active", "child_id", "is_active"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+
+    reminder_type = db.Column(db.String(20), nullable=False)
+    title = db.Column(db.String(150), nullable=False)
+
+    # Wall-clock WIB naive (KONSISTEN sama semua kolom timestamp domain
+    # lain di app ini, lihat utils/timezone_utils.py) — buat pengingat
+    # 'daily', kolom ini jadi JANGKAR (tanggal awal + jam-menit tiap
+    # hari); okurensi hari-hari berikutnya dihitung dari jam:menit-nya,
+    # BUKAN disimpan baris terpisah per hari (lihat
+    # utils/reminder_engine.py).
+    scheduled_at = db.Column(db.DateTime, nullable=False, index=True)
+    recurrence = db.Column(db.String(10), nullable=False, default="none")
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
+    child = db.relationship(
+        "Child", backref=db.backref("reminders", lazy="dynamic", cascade="all, delete-orphan")
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "child_id": self.child_id,
+            "created_by_user_id": self.created_by_user_id,
+            "reminder_type": self.reminder_type,
+            "title": self.title,
+            "scheduled_at": self.scheduled_at.isoformat() + "+07:00",
+            "recurrence": self.recurrence,
+            "is_active": self.is_active,
+            "created_at": self.created_at.isoformat() + "Z",
+            "updated_at": self.updated_at.isoformat() + "Z",
+        }
+
+
+class ReminderAction(db.Model):
+    """
+    SATU aksi caregiver (selesai/lewati) atas SATU okurensi 1 Reminder.
+    Baris di sini SENGAJA CUMA dibikin buat okurensi yang BENERAN
+    di-selesaikan/dilewati caregiver — okurensi yang masih "pending"
+    TIDAK PERNAH punya baris (statusnya dihitung IMPLISIT: nggak ada
+    baris = pending), biar reminder harian yang udah aktif lama nggak
+    numpuk baris kosong nggak terbatas (lihat requirement "avoid
+    materializing unlimited future occurrences").
+
+    `occurrence_at` = jam kejadian okurensi spesifik itu (tanggal +
+    jam:menit dari `Reminder.scheduled_at`, WIB naive) — SATU-SATUNYA
+    kunci yang nentuin "okurensi yang MANA" (lihat UniqueConstraint di
+    bawah: 1 Reminder cuma boleh punya SATU baris aksi per
+    `occurrence_at`, apa pun statusnya — occurrence yang UDAH punya aksi
+    TIDAK PERNAH bisa dapet aksi ke-2 lewat jalur normal, lihat
+    routes/reminder_routes.py buat penanganan konflik 409-nya).
+
+    TIDAK ADA status 'pending' literal di sini (beda dari daftar status
+    okurensi yang "kelihatan" di API) — CHECK constraint di bawah SENGAJA
+    cuma izinin 'completed'/'skipped'.
+    """
+    __tablename__ = "reminder_actions"
+    __table_args__ = (
+        db.UniqueConstraint("reminder_id", "occurrence_at", name="uq_reminder_action_occurrence"),
+        db.CheckConstraint("status IN ('completed','skipped')", name="ck_reminder_actions_status"),
+        db.CheckConstraint(
+            "linked_log_type IS NULL OR linked_log_type IN ('medication_log','pumping_log','doctor_visit')",
+            name="ck_reminder_actions_linked_log_type",
+        ),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    reminder_id = db.Column(db.Integer, db.ForeignKey("reminders.id"), nullable=False, index=True)
+
+    occurrence_at = db.Column(db.DateTime, nullable=False, index=True)
+    status = db.Column(db.String(10), nullable=False)
+
+    acted_at = db.Column(db.DateTime, nullable=False)
+    acted_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+
+    # Diisi CUMA kalau aksi ini lahir dari alur "Catat sekarang" yang
+    # berhasil nyimpen 1 catatan perawatan (lihat routes/reminder_routes.py)
+    # — TIDAK PERNAH diisi otomatis tanpa konfirmasi eksplisit caregiver
+    # (requirement: jangan otomatis catat pemberian obat/vaksinasi cuma
+    # gara-gara pengingatnya jatuh tempo).
+    linked_log_type = db.Column(db.String(20), nullable=True)
+    linked_log_id = db.Column(db.Integer, nullable=True)
+
+    reminder = db.relationship(
+        "Reminder", backref=db.backref("actions", lazy="dynamic", cascade="all, delete-orphan")
+    )
+    actor = db.relationship("User", foreign_keys=[acted_by_user_id])
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "reminder_id": self.reminder_id,
+            "occurrence_at": self.occurrence_at.isoformat() + "+07:00",
+            "status": self.status,
+            "acted_at": self.acted_at.isoformat() + "+07:00",
+            "acted_by_user_id": self.acted_by_user_id,
+            "acted_by_name": self.actor.name if self.actor else None,
+            "linked_log_type": self.linked_log_type,
+            "linked_log_id": self.linked_log_id,
+        }
+
+
+class MedicationSchedule(db.Model):
+    """
+    Definisi 1 regimen pemberian obat berulang (Medication Schedule &
+    Adherence — Phase 1, lihat backend/docs/MEDICATION_SCHEDULE.md).
+    SENGAJA CUMA nyimpen JADWAL + METADATA, TIDAK PERNAH status
+    "jatuh tempo"/"terlambat" -- status okurensi SELALU dihitung ULANG
+    saat diminta (lihat utils/medication_schedule_engine.py), PERSIS
+    prinsip arsitektur `Reminder` di atas (PythonAnywhere Free nggak
+    punya scheduler background).
+
+    `medication_name`/`instructions` SENGAJA diperlakukan sebagai teks
+    POTENSIAL SENSITIF (nama obat spesifik/instruksi bebas caregiver)
+    -- TIDAK PERNAH masuk audit trail apa adanya, lihat utils/audit.py.
+    """
+    __tablename__ = "medication_schedules"
+    __table_args__ = (
+        db.Index("ix_medication_schedules_child_active", "child_id", "is_active"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+
+    medication_name = db.Column(db.String(150), nullable=False)
+    # Opsional BERPASANGAN (dua-duanya diisi, atau dua-duanya kosong) --
+    # ditegakkan di utils/medication_schedule_engine.py:validate_dose,
+    # BUKAN di kolom DB (SQLite CHECK constraint lintas-kolom nullable
+    # sering rewel, validasi Python di layer route SUDAH cukup buat
+    # Phase 1 -- lihat juga pola serupa reminder `recurrence`).
+    dose_value = db.Column(db.Float, nullable=True)
+    dose_unit = db.Column(db.String(20), nullable=True)
+    instructions = db.Column(db.Text, nullable=True)
+
+    start_date = db.Column(db.Date, nullable=False, index=True)
+    end_date = db.Column(db.Date, nullable=True)
+    # List string "HH:MM" (24 jam), TERURUT + UNIK -- ditegakkan di
+    # layer validasi (utils/medication_schedule_engine.py:validate_times_of_day)
+    # sebelum disimpan, BUKAN diasumsikan begitu saja tiap dibaca balik.
+    times_of_day = db.Column(db.JSON, nullable=False)
+    # Kolom timezone DISEDIAKAN (skema siap multi-zona nanti), TAPI
+    # Phase 1 CUMA nerima "Asia/Jakarta" -- SELURUH app ini WIB-only
+    # (lihat utils/timezone_utils.py), belum ada kebutuhan nyata buat
+    # zona lain, jadi belum ditambah kompleksitas konversi timezone
+    # asli. Ditegakkan di layer validasi, bukan CHECK constraint DB,
+    # biar gampang diperluas nanti tanpa migrasi skema.
+    timezone = db.Column(db.String(30), nullable=False, default="Asia/Jakarta")
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
+    child = db.relationship(
+        "Child", backref=db.backref("medication_schedules", lazy="dynamic", cascade="all, delete-orphan")
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "child_id": self.child_id,
+            "created_by_user_id": self.created_by_user_id,
+            "created_by_name": self.creator.name if self.creator else None,
+            "medication_name": self.medication_name,
+            "dose_value": self.dose_value,
+            "dose_unit": self.dose_unit,
+            "instructions": self.instructions,
+            "start_date": self.start_date.isoformat(),
+            "end_date": self.end_date.isoformat() if self.end_date else None,
+            "times_of_day": list(self.times_of_day or []),
+            "timezone": self.timezone,
+            "is_active": self.is_active,
+            "created_at": self.created_at.isoformat() + "Z",
+            "updated_at": self.updated_at.isoformat() + "Z",
+        }
+
+
+class MedicationDoseAction(db.Model):
+    """
+    SATU aksi caregiver (diberikan/dilewati) atas SATU okurensi dosis 1
+    MedicationSchedule -- pola SAMA PERSIS `ReminderAction` di atas
+    (baris CUMA dibikin buat okurensi yang BENERAN diaksi, okurensi
+    "pending" TIDAK PERNAH punya baris, `occurrence_at` = kunci unik
+    "okurensi yang MANA").
+
+    BEDA dari ReminderAction: dosis yang ditandai "administered" SELALU
+    otomatis membuat 1 MedicationLog (requirement produk: "without
+    requiring duplicate data entry") -- `medication_log_id` nyimpen
+    tautan itu, DIBUAT DALAM TRANSAKSI DATABASE YANG SAMA (lihat
+    routes/medication_schedule_routes.py), bukan lewat alur "Catat
+    sekarang" 2-langkah opsional kayak Reminder. `acted_at` = waktu
+    AKSI beneran dicatat (bisa mundur dari `occurrence_at` kalau
+    caregiver baru sempat nge-tap belakangan) -- SENGAJA field
+    terpisah dari `occurrence_at` (jadwal), lihat requirement "preserve
+    the distinction between scheduled time and actual administration
+    time".
+    """
+    __tablename__ = "medication_dose_actions"
+    __table_args__ = (
+        db.UniqueConstraint("schedule_id", "occurrence_at", name="uq_medication_dose_action_occurrence"),
+        db.CheckConstraint("status IN ('administered','skipped')", name="ck_medication_dose_actions_status"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    schedule_id = db.Column(db.Integer, db.ForeignKey("medication_schedules.id"), nullable=False, index=True)
+
+    occurrence_at = db.Column(db.DateTime, nullable=False, index=True)
+    status = db.Column(db.String(12), nullable=False)
+
+    acted_at = db.Column(db.DateTime, nullable=False)
+    acted_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+
+    # Diisi CUMA buat status='administered' (lihat docstring kelas) --
+    # TIDAK PERNAH diisi buat 'skipped' (nggak ada obat yang beneran
+    # diberikan, jadi TIDAK ADA MedicationLog yang dibuat sama sekali).
+    medication_log_id = db.Column(db.Integer, db.ForeignKey("medication_logs.id"), nullable=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    schedule = db.relationship(
+        "MedicationSchedule", backref=db.backref("actions", lazy="dynamic", cascade="all, delete-orphan")
+    )
+    actor = db.relationship("User", foreign_keys=[acted_by_user_id])
+    medication_log = db.relationship("MedicationLog", foreign_keys=[medication_log_id])
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "schedule_id": self.schedule_id,
+            "occurrence_at": self.occurrence_at.isoformat() + "+07:00",
+            "status": self.status,
+            "acted_at": self.acted_at.isoformat() + "+07:00",
+            "acted_by_user_id": self.acted_by_user_id,
+            "acted_by_name": self.actor.name if self.actor else None,
+            "medication_log_id": self.medication_log_id,
+        }
+
+
+class ChildMedicalProfile(db.Model):
+    """
+    Child Medical Profile & Emergency Card — Phase 1 (lihat
+    backend/docs/MEDICAL_PROFILE.md buat kontrak lengkapnya). SATU baris
+    per anak (`child_id` UNIQUE) — snapshot profil medis kritis (bukan
+    riwayat/log kejadian kayak 12 tipe record lain di app ini), jadi
+    modelnya PUT/snapshot penuh, bukan CRUD per-entri.
+
+    SEMUA field di sini diperlakukan sebagai data medis/kontak SANGAT
+    SENSITIF -- TIDAK PERNAH masuk audit trail apa adanya (lihat
+    utils/audit.py), TIDAK PERNAH di-cache di localStorage/IndexedDB
+    frontend (lihat "Kebijakan offline" di dokumen), dan TIDAK PERNAH
+    memuat nomor BPJS/asuransi/identitas resmi/alamat (SENGAJA
+    dikecualikan Phase 1 -- risiko privasi tidak sepadan buat ringkasan
+    darurat).
+
+    `allergies`/`conditions` JSON -- list of dict TERBATAS & TERVALIDASI
+    PENUH di layer server (utils/medical_profile_engine.py) SEBELUM
+    pernah disimpan di sini -- TIDAK PERNAH dipercaya sebagai JSON bebas
+    dari klien. Satu field `allergies` (bukan drug_allergies/
+    other_allergies terpisah) dengan `type: drug|food|other` per entri --
+    UI mengelompokkan tampilannya per tipe dari field yang SAMA, bukan 2
+    kolom yang isinya nyaris identik strukturnya (desain paling kecil
+    yang tetap gampang divalidasi/diaudit/di-migrasi, sesuai requirement
+    "smallest normalized design").
+
+    `regular_medication_summary` SENGAJA TIDAK punya kolom di sini SAMA
+    SEKALI -- "ringkasan obat rutin" di Emergency Card DIDERIVASI
+    langsung dari `MedicationSchedule` yang aktif milik anak ini saat
+    kartu dibuat (lihat utils/emergency_card_report.py), BUKAN disalin
+    ke tabel/kolom kedua -- requirement eksplisit "do not duplicate
+    current medication logs or medication schedules... do not copy
+    mutable medication history into another table".
+    """
+    __tablename__ = "child_medical_profiles"
+    __table_args__ = (
+        db.CheckConstraint(
+            "blood_type IN ('A+','A-','B+','B-','AB+','AB-','O+','O-','unknown')",
+            name="ck_child_medical_profiles_blood_type",
+        ),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, unique=True, index=True)
+
+    blood_type = db.Column(db.String(10), nullable=True)  # allowlist -- lihat CHECK constraint + utils/medical_profile_engine.py
+    # List of {"type": "drug"|"food"|"other", "allergen": str, "reaction": str|None,
+    #          "severity": "mild"|"moderate"|"severe"|"unknown"|None, "confirmed_by_professional": bool|None}
+    allergies = db.Column(db.JSON, nullable=False, default=list)
+    # List of {"condition_name": str, "diagnosed_year": int|None, "status": "active"|"resolved"|"unknown"|None, "note": str|None}
+    conditions = db.Column(db.JSON, nullable=False, default=list)
+
+    primary_doctor_name = db.Column(db.String(100), nullable=True)
+    primary_clinic_name = db.Column(db.String(150), nullable=True)
+    primary_clinic_phone = db.Column(db.String(30), nullable=True)
+
+    emergency_contact_name = db.Column(db.String(100), nullable=True)
+    emergency_contact_relationship = db.Column(db.String(50), nullable=True)
+    emergency_contact_phone = db.Column(db.String(30), nullable=True)
+
+    emergency_instructions = db.Column(db.Text, nullable=True)
+
+    last_reviewed_at = db.Column(db.DateTime, nullable=True)
+    last_reviewed_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    child = db.relationship(
+        "Child", backref=db.backref("medical_profile", uselist=False, cascade="all, delete-orphan")
+    )
+    last_reviewed_by = db.relationship("User", foreign_keys=[last_reviewed_by_user_id])
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "child_id": self.child_id,
+            "blood_type": self.blood_type,
+            "allergies": list(self.allergies or []),
+            "conditions": list(self.conditions or []),
+            "primary_doctor_name": self.primary_doctor_name,
+            "primary_clinic_name": self.primary_clinic_name,
+            "primary_clinic_phone": self.primary_clinic_phone,
+            "emergency_contact_name": self.emergency_contact_name,
+            "emergency_contact_relationship": self.emergency_contact_relationship,
+            "emergency_contact_phone": self.emergency_contact_phone,
+            "emergency_instructions": self.emergency_instructions,
+            "last_reviewed_at": (self.last_reviewed_at.isoformat() + "+07:00") if self.last_reviewed_at else None,
+            "last_reviewed_by_name": self.last_reviewed_by.name if self.last_reviewed_by else None,
+            "created_at": self.created_at.isoformat() + "Z",
+            "updated_at": self.updated_at.isoformat() + "Z",
+        }
+
+
+class CaregiverHandover(db.Model):
+    """
+    Caregiver Handover Summary — Phase 1 (lihat
+    backend/docs/CAREGIVER_HANDOVER.md buat kontrak lengkapnya). SATU
+    baris = SATU handover yang lagi/pernah "terbuka" buat 1 anak — beda
+    dari 12 tipe log (yang tiap baris = 1 kejadian perawatan), baris di
+    sini murni METADATA workflow serah-terima (kapan dibuat, catatan
+    opsional, siapa yang sudah mengonfirmasi baca) — RINGKASAN konten
+    (feeding/tidur/obat/dst) TIDAK PERNAH disalin/disimpan ke sini,
+    SELALU dihitung ULANG dari tabel sumber yang sudah ada tiap kali
+    handover ini dibaca (lihat utils/caregiver_handover_summary.py) —
+    PERSIS prinsip "no duplicate copy of every log" & arsitektur
+    "tanpa scheduler background" yang sudah ditegakkan Reminder/
+    MedicationSchedule di app ini.
+
+    `window_start`/`as_of_at` DIBEKUKAN SEKALI saat `POST .../caregiver-handover`
+    (SATU sampel `now_wib()`, lihat routes/caregiver_handover_routes.py)
+    — jendela 24 jam INI TIDAK PERNAH bergeser lagi walau handover-nya
+    dibaca berkali-kali di waktu yang berbeda-beda (requirement eksplisit:
+    "later wall-clock time must not move an existing handover's reporting
+    window").
+
+    SATU handover 'open' per anak — ditegakkan DUA LAPIS: (1) partial
+    unique index `child_id` KHUSUS baris `status='open'` (lihat
+    `__table_args__` di bawah — SQLite native, bukan cuma query
+    aplikasi SEBELUM insert, yang rentan race 2 request bersamaan), DAN
+    (2) `IntegrityError` dari lapis (1) ditangkap eksplisit di route
+    jadi `409` yang aman, BUKAN 500 mentah (lihat requirement "handle
+    the database uniqueness race deterministically").
+    """
+    __tablename__ = "caregiver_handovers"
+    __table_args__ = (
+        db.CheckConstraint("status IN ('open', 'closed')", name="ck_caregiver_handovers_status"),
+        # Partial unique index -- CUMA menegakkan uniqueness `child_id`
+        # buat baris `status='open'` (SQLite native "partial index",
+        # didukung lewat `sqlite_where` SQLAlchemy 1.4+/2.x). Baris
+        # `status='closed'` boleh sebanyak apa pun per anak (riwayat),
+        # TAPI CUMA SATU yang boleh 'open' di satu waktu -- SATU-SATUNYA
+        # penegak final (bukan sekadar cek query dulu baru INSERT, yang
+        # TETAP rentan race 2 request yang BENERAN bersamaan lolos
+        # cek-nya bareng, lihat docstring kelas).
+        db.Index(
+            "uq_caregiver_handovers_one_open_per_child", "child_id",
+            unique=True, sqlite_where=db.text("status = 'open'"),
+        ),
+        db.Index("ix_caregiver_handovers_child_status", "child_id", "status"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+
+    # Jendela 24 jam BEKU -- lihat docstring kelas. `as_of_at` = SATU
+    # sampel `now_wib()` saat handover dibuat; `window_start` =
+    # `as_of_at - timedelta(hours=24)`, dihitung DI ROUTE (bukan kolom
+    # computed DB) SEKALI saja lalu disimpan APA ADANYA.
+    window_start = db.Column(db.DateTime, nullable=False)
+    as_of_at = db.Column(db.DateTime, nullable=False)
+
+    # Catatan serah-terima OPSIONAL, sensitif (lihat kebijakan validasi
+    # utils/caregiver_handover_engine.py) -- TIDAK PERNAH masuk audit
+    # trail/log/exception apa adanya (lihat utils/audit.py).
+    note = db.Column(db.Text, nullable=True)
+
+    status = db.Column(db.String(10), nullable=False, default="open")
+
+    # Semua timestamp workflow handover disimpan sebagai WIB naive,
+    # konsisten dengan window_start/as_of_at/acknowledged_at dan route
+    # yang memakai satu sampel now_wib(). Serialisasi menempelkan
+    # offset +07:00 secara eksplisit; jangan pernah melabelinya `Z`.
+    created_at = db.Column(db.DateTime, default=now_wib)
+    updated_at = db.Column(db.DateTime, default=now_wib, onupdate=now_wib)
+    closed_at = db.Column(db.DateTime, nullable=True)
+    closed_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
+    closer = db.relationship("User", foreign_keys=[closed_by_user_id])
+    child = db.relationship(
+        "Child", backref=db.backref("handovers", lazy="dynamic", cascade="all, delete-orphan")
+    )
+    acknowledgements = db.relationship(
+        "CaregiverHandoverAcknowledgement", backref="handover", lazy="dynamic", cascade="all, delete-orphan"
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "child_id": self.child_id,
+            "created_by_user_id": self.created_by_user_id,
+            "created_by_name": self.creator.name if self.creator else None,
+            "window_start": self.window_start.isoformat() + "+07:00",
+            "as_of_at": self.as_of_at.isoformat() + "+07:00",
+            "note": self.note,
+            "status": self.status,
+            "created_at": self.created_at.isoformat() + "+07:00",
+            "updated_at": self.updated_at.isoformat() + "+07:00",
+            "closed_at": (self.closed_at.isoformat() + "+07:00") if self.closed_at else None,
+            "closed_by_name": self.closer.name if self.closer else None,
+        }
+
+
+class CaregiverHandoverAcknowledgement(db.Model):
+    """
+    SATU konfirmasi "caregiver ini sudah membuka/membaca handover ini"
+    -- lihat backend/docs/CAREGIVER_HANDOVER.md bagian "Makna
+    acknowledgement" buat batasan makna EKSPLISIT (BUKAN persetujuan
+    medis, BUKAN konfirmasi semua tugas selesai). SATU baris per
+    (handover_id, user_id) -- `UniqueConstraint` di bawah menegakkan
+    idempotensi di level DATABASE (bukan cuma query aplikasi dulu),
+    persis alasan yang sama seperti partial unique index di
+    `CaregiverHandover` -- 2 request acknowledge BERSAMAAN dari
+    caregiver yang SAMA TIDAK PERNAH menghasilkan 2 baris.
+    """
+    __tablename__ = "caregiver_handover_acknowledgements"
+    __table_args__ = (
+        db.UniqueConstraint("handover_id", "user_id", name="uq_caregiver_handover_ack"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    handover_id = db.Column(db.Integer, db.ForeignKey("caregiver_handovers.id"), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+
+    acknowledged_at = db.Column(db.DateTime, nullable=False)
+
+    user = db.relationship("User")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            # Nama tampilan doang -- TIDAK PERNAH email/telepon/token/ID
+            # internal di UI (requirement eksplisit), lihat docstring modul.
+            "display_name": self.user.name if self.user else None,
+            "acknowledged_at": self.acknowledged_at.isoformat() + "+07:00",
         }

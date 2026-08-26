@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { api } from "../api/client";
+import { describeRole, isOwner } from "../utils/roles";
 
 export default function UserProfileScreen({ user, onUserUpdated }) {
   const [name, setName] = useState(user.name);
@@ -25,19 +26,20 @@ export default function UserProfileScreen({ user, onUserUpdated }) {
   const load = useCallback(async () => {
     setLoadingRoles(true);
     try {
-      const children = await api.listChildren();
-      const withRoles = await Promise.all(
-        children.map(async (c) => {
-          const caregivers = await api.listCaregivers(c.id);
-          const me = caregivers.find((cg) => cg.user_id === user.id);
-          return { ...c, role: me?.role || "caregiver" };
-        })
-      );
-      setChildrenRoles(withRoles);
+      // Caregiver Roles & Permissions Phase 1 — api.listChildren() UDAH
+      // nyertain `role` (peran EFEKTIF user yang login) langsung di
+      // respons-nya (lihat backend/docs/ROLES_PERMISSIONS.md). SEBELUMNYA
+      // layar ini nge-derive peran sendiri lewat api.listCaregivers(c.id)
+      // per anak (N+1 request) + nyari user_id di daftar caregiver-nya —
+      // itu asumsi BASI dari sebelum owner selalu ada baris
+      // ChildCaregiver-nya sendiri; sekarang cukup pakai `role` yang
+      // udah dikembalikan langsung, nggak perlu request tambahan sama
+      // sekali.
+      setChildrenRoles(await api.listChildren());
     } finally {
       setLoadingRoles(false);
     }
-  }, [user.id]);
+  }, []);
 
   useEffect(() => {
     load();
@@ -110,48 +112,70 @@ export default function UserProfileScreen({ user, onUserUpdated }) {
   };
 
   return (
-    <div className="min-h-screen px-6 pt-8 pb-16">
-      <h1 className="mb-1 text-3xl font-display text-ink">Profil Saya</h1>
-      <p className="mb-6 text-sm text-ink-muted">{user.email}</p>
+    <div className="min-h-screen px-4 pb-28 pt-6 sm:px-6 sm:pt-8">
+      <header className="mb-5 overflow-hidden rounded-xl2 bg-gradient-to-br from-feed-soft via-white to-sleep-soft p-5 shadow-soft">
+        <div className="flex items-center gap-4">
+          <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-full bg-white text-2xl font-bold uppercase text-feed shadow-sm" aria-hidden="true">
+            {(user.name || user.email || "U").charAt(0)}
+          </div>
+          <div className="min-w-0">
+            <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-feed">Akun pengasuh</p>
+            <h1 className="truncate font-display text-2xl font-bold text-ink">{user.name}</h1>
+            <p className="truncate text-xs text-ink-muted">{user.email}</p>
+          </div>
+        </div>
+      </header>
 
-      <div className="p-4 mb-4 border bg-void-card border-void-hairline rounded-xl2 shadow-soft">
-        <p className="mb-3 font-mono text-xs tracking-wider uppercase text-ink-faint">Nama</p>
-        <form onSubmit={handleSaveName} className="flex gap-2">
+      <section className="mb-4 rounded-xl2 border border-void-hairline bg-void-card p-4 shadow-soft sm:p-5">
+        <div className="mb-3">
+          <h2 className="text-base font-bold text-ink">Informasi akun</h2>
+          <p className="text-xs text-ink-faint">Nama ini terlihat oleh pengasuh lain.</p>
+        </div>
+        <form onSubmit={handleSaveName} className="flex flex-col gap-2 min-[380px]:flex-row">
+          <label htmlFor="profile-name" className="sr-only">Nama</label>
           <input
+            id="profile-name"
             type="text"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            className="flex-1 bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink text-sm"
+            className="min-w-0 flex-1 rounded-xl border border-void-hairline bg-void px-3 py-3 text-sm text-ink"
             required
           />
           <button
             type="submit"
             disabled={savingName}
-            className="px-4 py-2.5 rounded-lg bg-feed text-white text-sm font-semibold disabled:opacity-50 whitespace-nowrap"
+            className="whitespace-nowrap rounded-xl bg-feed px-4 py-3 text-sm font-semibold text-white disabled:opacity-50"
           >
             {savingName ? "..." : nameSaved ? "Tersimpan ✓" : "Simpan"}
           </button>
         </form>
         {nameError && <p className="mt-2 text-xs text-warn">{nameError}</p>}
-      </div>
+      </section>
 
-      <div className="p-4 mb-4 border bg-void-card border-void-hairline rounded-xl2 shadow-soft">
-        <p className="mb-3 font-mono text-xs tracking-wider uppercase text-ink-faint">Ganti Password</p>
-        <form onSubmit={handleChangePassword} className="space-y-2">
+      <section className="mb-4 rounded-xl2 border border-void-hairline bg-void-card p-4 shadow-soft sm:p-5">
+        <div className="mb-3">
+          <h2 className="text-base font-bold text-ink">Keamanan</h2>
+          <p className="text-xs text-ink-faint">Gunakan password unik minimal 6 karakter.</p>
+        </div>
+        <form onSubmit={handleChangePassword} className="space-y-2.5">
+          <label htmlFor="current-password" className="sr-only">Password saat ini</label>
           <input
+            id="current-password"
             type="password"
             placeholder="Password saat ini"
             value={currentPassword}
             onChange={(e) => setCurrentPassword(e.target.value)}
-            className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink text-sm placeholder:text-ink-faint"
+            className="w-full rounded-xl border border-void-hairline bg-void px-3 py-3 text-sm text-ink placeholder:text-ink-faint"
             required
           />
+          <label htmlFor="new-password" className="sr-only">Password baru</label>
           <input
+            id="new-password"
             type="password"
             placeholder="Password baru (min. 6 karakter)"
             value={newPassword}
             onChange={(e) => setNewPassword(e.target.value)}
-            className="w-full bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink text-sm placeholder:text-ink-faint"
+            className="w-full rounded-xl border border-void-hairline bg-void px-3 py-3 text-sm text-ink placeholder:text-ink-faint"
             required
             minLength={6}
           />
@@ -159,15 +183,21 @@ export default function UserProfileScreen({ user, onUserUpdated }) {
           <button
             type="submit"
             disabled={savingPassword}
-            className="w-full py-2.5 rounded-lg bg-feed text-white text-sm font-semibold disabled:opacity-50"
+            className="w-full rounded-xl bg-feed py-3 text-sm font-semibold text-white disabled:opacity-50"
           >
             {savingPassword ? "Menyimpan..." : passwordSaved ? "Password Diperbarui ✓" : "Ganti Password"}
           </button>
         </form>
-      </div>
+      </section>
 
-      <div className="p-4 mb-4 border bg-void-card border-void-hairline rounded-xl2 shadow-soft">
-        <p className="mb-3 font-mono text-xs tracking-wider uppercase text-ink-faint">Notifikasi Telegram</p>
+      <section className="mb-4 rounded-xl2 border border-void-hairline bg-void-card p-4 shadow-soft sm:p-5">
+        <div className="mb-3 flex items-center gap-3">
+          <span className="flex h-10 w-10 items-center justify-center rounded-full bg-sky-soft text-lg" aria-hidden="true">✈️</span>
+          <div>
+            <h2 className="text-base font-bold text-ink">Notifikasi Telegram</h2>
+            <p className="text-xs text-ink-faint">Terima pengingat penting di Telegram.</p>
+          </div>
+        </div>
         <details className="mb-3">
           <summary className="text-xs cursor-pointer text-feed">Cara dapetin Chat ID</summary>
           <ol className="mt-2 space-y-1 text-xs list-decimal list-inside text-ink-muted">
@@ -184,18 +214,20 @@ export default function UserProfileScreen({ user, onUserUpdated }) {
             <li>Paste angka itu di bawah ini</li>
           </ol>
         </details>
-        <form onSubmit={handleSaveTelegram} className="flex gap-2">
+        <form onSubmit={handleSaveTelegram} className="flex flex-col gap-2 min-[380px]:flex-row">
+          <label htmlFor="telegram-chat-id" className="sr-only">Chat ID Telegram</label>
           <input
+            id="telegram-chat-id"
             type="text"
             placeholder="Chat ID Telegram"
             value={telegramChatId}
             onChange={(e) => setTelegramChatId(e.target.value)}
-            className="flex-1 bg-void border border-void-hairline rounded-lg px-3 py-2.5 text-ink text-sm placeholder:text-ink-faint"
+            className="min-w-0 flex-1 rounded-xl border border-void-hairline bg-void px-3 py-3 text-sm text-ink placeholder:text-ink-faint"
           />
           <button
             type="submit"
             disabled={savingTelegram}
-            className="px-4 py-2.5 rounded-lg bg-feed text-white text-sm font-semibold disabled:opacity-50 whitespace-nowrap"
+            className="whitespace-nowrap rounded-xl bg-feed px-4 py-3 text-sm font-semibold text-white disabled:opacity-50"
           >
             {savingTelegram ? "..." : telegramSaved ? "Tersimpan ✓" : "Simpan"}
           </button>
@@ -215,10 +247,13 @@ export default function UserProfileScreen({ user, onUserUpdated }) {
           Reminder harian bakal dikirim kalau: vaksin wajib jatuh tempo, kontrol dokter besok, atau
           belum ada catatan menyusui 6+ jam.
         </p>
-      </div>
+      </section>
 
-      <div className="p-4 border bg-void-card border-void-hairline rounded-xl2 shadow-soft">
-        <p className="mb-3 font-mono text-xs tracking-wider uppercase text-ink-faint">Anak yang Kamu Akses</p>
+      <section className="rounded-xl2 border border-void-hairline bg-void-card p-4 shadow-soft sm:p-5">
+        <div className="mb-3">
+          <h2 className="text-base font-bold text-ink">Anak yang Kamu Akses</h2>
+          <p className="text-xs text-ink-faint">Peran menentukan izin melihat dan mengubah catatan.</p>
+        </div>
         {loadingRoles ? (
           <p className="text-sm text-ink-faint">Memuat...</p>
         ) : childrenRoles.length === 0 ? (
@@ -226,20 +261,23 @@ export default function UserProfileScreen({ user, onUserUpdated }) {
         ) : (
           <div className="space-y-2">
             {childrenRoles.map((c) => (
-              <div key={c.id} className="flex items-center justify-between">
-                <p className="text-sm text-ink">{c.nickname || c.name}</p>
+              <div key={c.id} className="flex items-center justify-between gap-3 rounded-2xl bg-void px-3 py-2.5">
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-diaper-soft text-sm" aria-hidden="true">👶</span>
+                  <p className="truncate text-sm font-semibold text-ink">{c.nickname || c.name}</p>
+                </div>
                 <span
                   className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
-                    c.role === "owner" ? "bg-feed/15 text-feed" : "bg-sleep/15 text-sleep"
+                    isOwner(c.role) ? "bg-feed/15 text-feed" : "bg-sleep/15 text-sleep"
                   }`}
                 >
-                  {c.role === "owner" ? "Orang Tua / Pemilik" : "Pengasuh"}
+                  {describeRole(c.role)}
                 </span>
               </div>
             ))}
           </div>
         )}
-      </div>
+      </section>
     </div>
   );
 }

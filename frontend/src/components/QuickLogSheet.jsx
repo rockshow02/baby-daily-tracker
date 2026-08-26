@@ -97,6 +97,7 @@ export default function QuickLogSheet({ type, onClose, onSubmit, onDelete, editi
 
   const [submitting, setSubmitting] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
 
   const titles = {
     feeding: isEdit ? "Edit Menyusui" : "Catat Menyusui",
@@ -130,7 +131,9 @@ export default function QuickLogSheet({ type, onClose, onSubmit, onDelete, editi
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (submitting) return; // cegah submit dobel kalau kepencet berkali-kali sebelum tombolnya sempat ke-disable
     setSubmitting(true);
+    setErrorMessage(""); // buang error lama sebelum nyoba lagi
     try {
       if (type === "feeding") {
         await onSubmit({
@@ -173,6 +176,13 @@ export default function QuickLogSheet({ type, onClose, onSubmit, onDelete, editi
         });
       }
       onClose();
+    } catch (err) {
+      // Cuma pesan yang udah bersih (dari client.js: pesan error backend
+      // yang human-readable, atau "Nggak ada koneksi internet...") yang
+      // pernah dilempar sampai sini — nggak pernah stack trace/respons
+      // mentah/token. Modal SENGAJA nggak ditutup di sini (beda dari path
+      // sukses di atas), biar user bisa coba lagi tanpa isian ke-reset.
+      setErrorMessage(err?.message || "Gagal menyimpan catatan. Coba lagi.");
     } finally {
       setSubmitting(false);
     }
@@ -461,6 +471,8 @@ export default function QuickLogSheet({ type, onClose, onSubmit, onDelete, editi
           <p className="text-sm text-ink-muted -mt-2 mb-2">Catat pemberian Vitamin D hari ini.</p>
         )}
 
+        {errorMessage && <p className="text-warn text-sm mt-4 text-center">{errorMessage}</p>}
+
         <div className="flex gap-3 mt-6">
           <button
             type="button"
@@ -477,7 +489,7 @@ export default function QuickLogSheet({ type, onClose, onSubmit, onDelete, editi
             {submitting ? "Menyimpan..." : isEdit ? "Simpan Perubahan" : "Simpan"}
           </button>
         </div>
-        {isEdit && (
+        {isEdit && onDelete && (
           <button
             type="button"
             onClick={handleDelete}

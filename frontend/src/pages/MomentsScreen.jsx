@@ -4,10 +4,10 @@ import RelatedArticles from "../components/RelatedArticles";
 import { todayWIB } from "../utils/date";
 
 const MOODS = [
-  { key: "ceria", label: "Ceria", icon: "😄" },
-  { key: "baik", label: "Baik", icon: "🙂" },
-  { key: "sedih", label: "Sedih", icon: "😢" },
-  { key: "menangis", label: "Menangis", icon: "😭" },
+  { key: "ceria", label: "Ceria", icon: "😄", tone: "bg-feed-soft" },
+  { key: "baik", label: "Baik", icon: "🙂", tone: "bg-diaper-soft" },
+  { key: "sedih", label: "Sedih", icon: "😢", tone: "bg-sleep-soft" },
+  { key: "menangis", label: "Menangis", icon: "😭", tone: "bg-sky-soft" },
 ];
 
 const MILESTONE_TYPES = [
@@ -72,23 +72,26 @@ export default function MomentsScreen({ child }) {
   };
 
   return (
-    <div className="min-h-screen pb-32 px-6 pt-8">
-      <h1 className="font-display text-3xl text-ink mb-1">Momen</h1>
-      <p className="text-sm text-ink-muted mb-6">Suasana hati dan pencapaian penting</p>
+    <div className="min-h-screen px-4 pb-28 pt-6 sm:px-6 sm:pt-8">
+      <header className="mb-5">
+        <p className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-sleep">Cerita {child.nickname || child.name}</p>
+        <h1 className="font-display text-3xl font-bold leading-tight text-ink">Momen Berharga</h1>
+        <p className="mt-1 text-sm text-ink-muted">Simpan suasana hati dan pencapaian kecil setiap hari.</p>
+      </header>
 
-      <div className="flex gap-2 mb-5">
+      <div className="mb-5 flex rounded-2xl border border-void-hairline bg-void-card p-1 shadow-sm" aria-label="Jenis momen">
         <button
           onClick={() => setActiveTab("mood")}
-          className={`flex-1 py-3 rounded-xl2 border text-xs font-medium ${
-            activeTab === "mood" ? "bg-feed/15 border-feed text-feed" : "bg-void-card border-void-hairline text-ink-muted"
+          className={`flex-1 rounded-xl py-2.5 text-xs font-bold transition-colors ${
+            activeTab === "mood" ? "bg-sleep text-white shadow-sm" : "text-ink-muted"
           }`}
         >
           😄 Mood
         </button>
         <button
           onClick={() => setActiveTab("milestone")}
-          className={`flex-1 py-3 rounded-xl2 border text-xs font-medium ${
-            activeTab === "milestone" ? "bg-feed/15 border-feed text-feed" : "bg-void-card border-void-hairline text-ink-muted"
+          className={`flex-1 rounded-xl py-2.5 text-xs font-bold transition-colors ${
+            activeTab === "milestone" ? "bg-sleep text-white shadow-sm" : "text-ink-muted"
           }`}
         >
           👣 Momen Penting
@@ -99,21 +102,27 @@ export default function MomentsScreen({ child }) {
         <p className="text-ink-faint text-sm text-center py-10">Memuat...</p>
       ) : activeTab === "mood" ? (
         <>
-          {/* quick add mood buttons */}
-          <div className="grid grid-cols-4 gap-2 mb-6">
+          <section className="mb-6 rounded-xl2 bg-gradient-to-br from-sleep-soft via-white to-feed-soft p-4 shadow-soft sm:p-5">
+            <h2 className="text-base font-bold text-ink">Bagaimana mood hari ini?</h2>
+            <p className="mb-4 text-xs text-ink-faint">Ketuk satu pilihan untuk mencatat dengan cepat.</p>
+            <div className="grid grid-cols-2 gap-2.5 min-[380px]:grid-cols-4">
             {MOODS.map((m) => (
               <button
                 key={m.key}
                 onClick={() => quickAddMood(m.key)}
-                className="flex flex-col items-center gap-1.5 bg-void-card border border-void-hairline rounded-xl2 py-4"
+                className={`flex min-h-24 flex-col items-center justify-center gap-1.5 rounded-2xl border border-white/70 py-3 transition-transform active:scale-95 ${m.tone}`}
               >
-                <span className="text-2xl">{m.icon}</span>
-                <span className="text-[11px] text-ink-muted">{m.label}</span>
+                <span className="text-3xl" aria-hidden="true">{m.icon}</span>
+                <span className="text-xs font-bold text-ink-muted">{m.label}</span>
               </button>
             ))}
-          </div>
+            </div>
+          </section>
 
-          <h2 className="font-mono text-xs text-ink-faint tracking-[0.2em] uppercase mb-3">Riwayat</h2>
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-base font-bold text-ink">Riwayat mood</h2>
+            <span className="text-xs text-ink-faint">{moods.length} catatan</span>
+          </div>
           {moods.length === 0 ? (
             <p className="text-ink-faint text-sm">Belum ada catatan mood.</p>
           ) : (
@@ -124,10 +133,10 @@ export default function MomentsScreen({ child }) {
                   <div
                     key={m.id}
                     onClick={() => setEditingMood(m)}
-                    className="flex items-center justify-between bg-void-card border border-void-hairline rounded-xl2 px-4 py-3 cursor-pointer active:bg-void-raised"
+                    className="flex cursor-pointer items-center justify-between rounded-2xl border border-void-hairline bg-void-card px-4 py-3.5 active:bg-void-raised"
                   >
                     <div className="flex items-center gap-3">
-                      <span className="text-xl">{info?.icon}</span>
+                      <span className={`flex h-11 w-11 items-center justify-center rounded-full text-xl ${info?.tone || "bg-void-raised"}`}>{info?.icon}</span>
                       <div>
                         <p className="text-sm text-ink">{info?.label}</p>
                         <p className="text-xs text-ink-faint font-mono">{fmtDateTime(m.timestamp)}</p>
@@ -154,20 +163,33 @@ export default function MomentsScreen({ child }) {
         </>
       ) : (
         <>
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-base font-bold text-ink">Jejak pencapaian</h2>
+              <p className="text-xs text-ink-faint">Setiap langkah kecil layak dirayakan.</p>
+            </div>
+            <button onClick={openAddMilestone} className="shrink-0 rounded-full bg-feed px-3.5 py-2.5 text-xs font-bold text-white shadow-sm">
+              + Catat
+            </button>
+          </div>
           {milestones.length === 0 ? (
-            <p className="text-ink-faint text-sm">Belum ada momen penting tercatat.</p>
+            <div className="rounded-xl2 border border-dashed border-void-hairline bg-white/60 px-5 py-9 text-center">
+              <span className="text-4xl" aria-hidden="true">✨</span>
+              <p className="mt-3 text-sm font-bold text-ink">Belum ada momen penting</p>
+              <p className="mt-1 text-xs text-ink-faint">Catat pencapaian pertama {child.nickname || child.name}.</p>
+            </div>
           ) : (
-            <div className="space-y-2">
+            <div className="relative space-y-3 before:absolute before:bottom-5 before:left-[1.45rem] before:top-5 before:w-px before:bg-void-hairline">
               {milestones.map((ms) => {
                 const info = MILESTONE_TYPES.find((x) => x.key === ms.milestone_type);
                 return (
-                  <div key={ms.id} className="bg-void-card border border-void-hairline rounded-xl2 px-4 py-3">
+                  <div key={ms.id} className="relative rounded-xl2 border border-void-hairline bg-void-card px-4 py-4 pl-[4.25rem] shadow-sm">
+                    <span className="absolute left-3 top-4 z-10 flex h-11 w-11 items-center justify-center rounded-full bg-feed-soft text-xl ring-4 ring-void-card" aria-hidden="true">{info?.icon || "✨"}</span>
                     <div
                       onClick={() => openEditMilestone(ms)}
                       className="flex items-center justify-between cursor-pointer active:opacity-70"
                     >
                       <div className="flex items-center gap-2">
-                        <span className="text-lg">{info?.icon}</span>
                         <p className="text-sm text-ink font-medium">
                           {ms.milestone_type === "custom" ? ms.custom_label : info?.label}
                         </p>
@@ -214,16 +236,6 @@ export default function MomentsScreen({ child }) {
           title="🤸 Ide Aktivitas Sesuai Usia"
           ageMonths={(new Date() - new Date(child.birth_date)) / (1000 * 60 * 60 * 24 * 30.4375)}
         />
-      )}
-
-      {activeTab === "milestone" && (
-        <button
-          onClick={openAddMilestone}
-          className="fixed bottom-6 right-6 w-14 h-14 rounded-full bg-feed text-white text-2xl shadow-soft flex items-center justify-center"
-          aria-label="Tambah momen penting"
-        >
-          +
-        </button>
       )}
 
       {showMilestoneForm && (

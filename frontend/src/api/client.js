@@ -1,6 +1,38 @@
+import { toUserFacingErrorMessage } from "../utils/errorMessage";
+
 const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
 const TOKEN_KEY = "babytracker_token";
+const USER_ID_KEY = "babytracker_user_id";
+
+/**
+ * Error terstruktur buat semua kegagalan request lewat request() di bawah
+ * — biar caller (AuthContext, App.jsx, dst) bisa bedain SECARA ANDAL antara
+ * gagal jaringan (server nggak kesentuh sama sekali) vs. server BENERAN
+ * merespons dengan status error, dan status berapa persisnya. `.message`
+ * tetap dipertahankan sama persis kayak sebelumnya (termasuk semua pesan
+ * bahasa Indonesia yang dilempar berdasarkan data.error dari server) —
+ * ApiError extends Error, jadi kode lama yang cuma baca err.message tetap
+ * jalan tanpa perubahan. Cuma nyimpen status + kind + message manusiawi;
+ * TIDAK PERNAH nyimpen body respons mentah, stack trace server, cookie,
+ * atau token.
+ */
+export class ApiError extends Error {
+  constructor({ kind, status = null, message }) {
+    super(message);
+    this.name = "ApiError";
+    this.kind = kind; // "network" | "unauthorized" | "forbidden" | "validation" | "server_error" | "http_error"
+    this.status = status;
+  }
+}
+
+function classifyHttpError(status) {
+  if (status === 401) return "unauthorized";
+  if (status === 403) return "forbidden";
+  if (status === 400 || status === 422) return "validation";
+  if (status >= 500) return "server_error";
+  return "http_error";
+}
 
 export function getToken() {
   return localStorage.getItem(TOKEN_KEY);
@@ -14,6 +46,36 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
 }
 
+// Dipakai buat nge-tag tiap item antrian offline sama pemiliknya, TANPA
+// nyimpen token di item itu sendiri (lihat queueOfflineRequest di bawah).
+// syncQueue di useOfflineSync bandingin ini sama userId tersimpan pas
+// nyoba sinkron, biar antrian akun lain (atau akun yang udah logout)
+// nggak pernah ke-sync pakai token akun yang lagi aktif sekarang.
+export function getCurrentUserId() {
+  const raw = localStorage.getItem(USER_ID_KEY);
+  return raw ? Number(raw) : null;
+}
+
+export function setCurrentUser(userId) {
+  if (userId != null) localStorage.setItem(USER_ID_KEY, String(userId));
+}
+
+export function clearCurrentUser() {
+  localStorage.removeItem(USER_ID_KEY);
+}
+
+// Diekspor (bukan cuma dipakai internal) — dipakai juga buat ngasih
+// idempotency key baru ke item antrian legacy yang belum punya satu
+// (lihat claimLegacyItem di hooks/useOfflineSync.js).
+export function generateRequestId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  // fallback buat runtime tanpa crypto.randomUUID (browser lama, atau
+  // lingkungan test) — nggak perlu kriptografis, cuma perlu unik per klien
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 // endpoint "quick log" yang boleh diantrikan offline — sengaja dibatasi
 // ke aksi yang paling sering dicatat real-time (bukan semua endpoint),
 // biar nggak ribet nanganin kasus edge yang lebih kompleks (edit, hapus,
@@ -25,6 +87,20 @@ const OFFLINE_QUEUEABLE_PATHS = [
   /\/children\/\d+\/pumping-logs$/,
   /\/children\/\d+\/activity-logs$/,
   /\/children\/\d+\/medication-logs$/,
+  // Care Reminders & Schedules Phase 1 — CUMA aksi selesai/lewati
+  // occurrence yang boleh diantrikan offline (requirement eksplisit).
+  // Membuat/mengubah/menghapus DEFINISI reminder sengaja TIDAK masuk
+  // sini — nunggu online (tombolnya nonaktif offline, lihat
+  // ReminderScreen.jsx) biar nggak perlu nanganin kasus edge form
+  // penuh + validasi server offline buat versi pertama fitur ini.
+  /\/children\/\d+\/reminders\/\d+\/occurrences\/[^/]+\/complete$/,
+  /\/children\/\d+\/reminders\/\d+\/occurrences\/[^/]+\/skip$/,
+  // Medication Schedule & Adherence Phase 1 — pola SAMA PERSIS reminder
+  // di atas: CUMA aksi kasih/lewati dosis yang boleh diantrikan offline.
+  // Membuat/mengubah/menghapus DEFINISI jadwal obat sengaja TIDAK masuk
+  // sini (tetap online-only, lihat backend/docs/MEDICATION_SCHEDULE.md).
+  /\/children\/\d+\/medication-schedules\/\d+\/occurrences\/[^/]+\/administer$/,
+  /\/children\/\d+\/medication-schedules\/\d+\/occurrences\/[^/]+\/skip$/,
 ];
 
 function isOfflineQueueable(path, method) {
@@ -33,13 +109,18 @@ function isOfflineQueueable(path, method) {
   );
 }
 
-async function queueOfflineRequest(path, method, body, headers) {
+async function queueOfflineRequest(path, method, body, clientRequestId) {
   const { enqueueRequest } = await import("../utils/offlineQueue");
+  // SENGAJA nggak nyimpen header Authorization di sini — item antrian
+  // cuma nyimpen userId pemiliknya, token diambil FRESH dari localStorage
+  // pas beneran mau di-sync (lihat useOfflineSync), biar nggak ada token
+  // yang nongkrong di IndexedDB.
   const queueId = await enqueueRequest({
     method,
     url: path,
     body: body || null,
-    headers: { Authorization: headers["Authorization"] || null },
+    userId: getCurrentUserId(),
+    clientRequestId,
   });
 
   let optimisticData = {};
@@ -61,6 +142,18 @@ async function request(path, options = {}) {
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const method = options.method || "GET";
 
+  // Idempotency key: dibuat SEKALI di sini, sebelum fetch pertama kali
+  // dicoba, buat request yang bisa diantrikan offline. Kalau request ini
+  // sukses sampai server tapi responsnya ilang di tengah jalan (koneksi
+  // putus), retry berikutnya (baik langsung atau lewat antrian offline)
+  // ngirim ulang key yang SAMA — backend bakal balikin hasil yang lama,
+  // bukan bikin record dobel.
+  let idempotencyKey = null;
+  if (isOfflineQueueable(path, method)) {
+    idempotencyKey = generateRequestId();
+    headers["X-Idempotency-Key"] = idempotencyKey;
+  }
+
   let res;
   try {
     res = await fetch(`${BASE_URL}${path}`, {
@@ -74,9 +167,13 @@ async function request(path, options = {}) {
     // merespons dengan status error (itu diurus di bagian !res.ok bawah,
     // nggak masuk sini)
     if (isOfflineQueueable(path, method)) {
-      return await queueOfflineRequest(path, method, options.body, headers);
+      return await queueOfflineRequest(path, method, options.body, idempotencyKey);
     }
-    throw new Error("Nggak ada koneksi internet. Coba lagi nanti.");
+    throw new ApiError({
+      kind: "network",
+      status: null,
+      message: "Nggak ada koneksi internet. Coba lagi nanti.",
+    });
   }
 
   let data = null;
@@ -87,8 +184,8 @@ async function request(path, options = {}) {
   }
 
   if (!res.ok) {
-    const message = data?.error || `Request gagal (${res.status})`;
-    throw new Error(message);
+    const message = toUserFacingErrorMessage(data?.error, `Request gagal (${res.status})`);
+    throw new ApiError({ kind: classifyHttpError(res.status), status: res.status, message });
   }
   return data;
 }
@@ -115,6 +212,24 @@ export const api = {
       }),
     }),
   me: () => request("/auth/me"),
+
+  // Privacy & Data Management Center — semua aksi destruktif online-only.
+  privacyOverview: () => request("/privacy/overview"),
+  leaveChildAccess: (childId, payload) =>
+    request(`/privacy/children/${childId}/leave`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  deleteChildData: (childId, payload) =>
+    request(`/privacy/children/${childId}/delete`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  deleteAccount: (payload) =>
+    request("/privacy/account/delete", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
 
   // children
   listChildren: () => request("/children"),
@@ -233,6 +348,65 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  // Doctor Consultation Workflow — Phase 1. POST (bukan GET) SENGAJA
+  // dipakai buat preview juga (bukan cuma PDF) — payload-nya bisa
+  // memuat pilihan section + teks transien questions/additional_note
+  // yang nggak boleh nongol di query string/riwayat browser/log proxy.
+  previewDoctorConsultation: (childId, payload) =>
+    request(`/children/${childId}/doctor-consultation/preview`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  doctorConsultationPdfUrl: (childId) => `${BASE_URL}/children/${childId}/doctor-consultation/pdf`,
+
+  /**
+   * Sama seperti `downloadAuthenticated` di atas, TAPI POST + JSON body
+   * (endpoint PDF konsultasi butuh payload periode/section/teks
+   * transien, jadi nggak bisa GET biasa). PDF export SENGAJA online-only
+   * — nggak pernah masuk antrean offline (lihat utils/offlineQueue.js).
+   */
+  downloadAuthenticatedPost: async (url, body, filename) => {
+    const token = getToken();
+    const res = await fetch(url, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      let message = `Gagal download (${res.status})`;
+      try {
+        const data = await res.json();
+        if (data?.error) message = data.error;
+      } catch (_) {
+        // body bukan JSON, biarin pesan default
+      }
+      // `.status` ditempel di error (BUKAN cuma di pesan teks) biar
+      // caller (mis. MedicalProfileScreen.jsx:EmergencyCardModal) bisa
+      // membedakan SECARA ANDAL kode status tertentu (409 "snapshot
+      // Kartu Darurat basi", 400/403 token pratinjau tidak valid) dari
+      // error lain, tanpa perlu menebak dari isi pesan Indonesia yang
+      // bisa berubah kapan saja -- purely additive, caller lama yang
+      // cuma baca `.message` (mis. DoctorConsultationScreen.jsx) tetap
+      // jalan tanpa perubahan.
+      const err = new Error(message);
+      err.status = res.status;
+      throw err;
+    }
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objectUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(objectUrl);
+  },
+
   // health: suhu tubuh
   listTemperature: (childId) =>
     request(`/children/${childId}/temperature-logs`),
@@ -315,12 +489,109 @@ export const api = {
   getStats: (childId, days = 7) =>
     request(`/children/${childId}/stats?days=${days}`),
 
-  // multi-caregiver
+  // Smart Insights & Weekly Summary (Phase 1) — BACA SAJA, `period`
+  // cuma "7d" | "30d" (server menolak nilai lain dengan 400).
+  getInsights: (childId, period = "7d") =>
+    request(`/children/${childId}/insights?period=${period}`),
+
+  // Care Reminders & Schedules (Phase 1) — lihat backend/docs/REMINDERS.md.
+  listReminders: (childId) => request(`/children/${childId}/reminders`),
+  createReminder: (childId, payload) =>
+    request(`/children/${childId}/reminders`, { method: "POST", body: JSON.stringify(payload) }),
+  updateReminder: (childId, reminderId, payload) =>
+    request(`/children/${childId}/reminders/${reminderId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteReminder: (childId, reminderId) =>
+    request(`/children/${childId}/reminders/${reminderId}`, { method: "DELETE" }),
+  // `payload` opsional: { linked_log_type, linked_log_id } buat alur
+  // "Catat sekarang" — dua-duanya BOLEH diantrikan offline (lihat
+  // OFFLINE_QUEUEABLE_PATHS di atas).
+  completeReminderOccurrence: (childId, reminderId, occurrenceKey, payload) =>
+    request(`/children/${childId}/reminders/${reminderId}/occurrences/${occurrenceKey}/complete`, {
+      method: "POST", body: JSON.stringify(payload || {}),
+    }),
+  skipReminderOccurrence: (childId, reminderId, occurrenceKey, payload) =>
+    request(`/children/${childId}/reminders/${reminderId}/occurrences/${occurrenceKey}/skip`, {
+      method: "POST", body: JSON.stringify(payload || {}),
+    }),
+
+  // Medication Schedule & Adherence (Phase 1) — lihat
+  // backend/docs/MEDICATION_SCHEDULE.md. Create/update/delete jadwal
+  // SENGAJA online-only (TIDAK ada di OFFLINE_QUEUEABLE_PATHS) — cuma
+  // administer/skip occurrence yang boleh diantrikan offline.
+  listMedicationSchedules: (childId) => request(`/children/${childId}/medication-schedules`),
+  createMedicationSchedule: (childId, payload) =>
+    request(`/children/${childId}/medication-schedules`, { method: "POST", body: JSON.stringify(payload) }),
+  updateMedicationSchedule: (childId, scheduleId, payload) =>
+    request(`/children/${childId}/medication-schedules/${scheduleId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteMedicationSchedule: (childId, scheduleId) =>
+    request(`/children/${childId}/medication-schedules/${scheduleId}`, { method: "DELETE" }),
+  administerMedicationDose: (childId, scheduleId, occurrenceKey) =>
+    request(`/children/${childId}/medication-schedules/${scheduleId}/occurrences/${occurrenceKey}/administer`, {
+      method: "POST", body: JSON.stringify({}),
+    }),
+  skipMedicationDose: (childId, scheduleId, occurrenceKey) =>
+    request(`/children/${childId}/medication-schedules/${scheduleId}/occurrences/${occurrenceKey}/skip`, {
+      method: "POST", body: JSON.stringify({}),
+    }),
+  getMedicationAdherence: (childId, period = "7d") =>
+    request(`/children/${childId}/medication-schedules/adherence?period=${period}`),
+
+  // Child Medical Profile & Emergency Card (Phase 1) — lihat
+  // backend/docs/MEDICAL_PROFILE.md. ONLINE-ONLY SENGAJA: TIDAK SATU
+  // PUN path di bawah ini pernah masuk OFFLINE_QUEUEABLE_PATHS (lihat
+  // atas) — data medis+kontak darurat lengkap terlalu sensitif buat
+  // antrian offline yang didesain buat mutasi terbatas biasa.
+  getMedicalProfile: (childId) => request(`/children/${childId}/medical-profile`),
+  updateMedicalProfile: (childId, payload) =>
+    request(`/children/${childId}/medical-profile`, { method: "PUT", body: JSON.stringify(payload) }),
+  reviewMedicalProfile: (childId) =>
+    request(`/children/${childId}/medical-profile/review`, { method: "POST", body: JSON.stringify({}) }),
+  previewEmergencyCard: (childId) =>
+    request(`/children/${childId}/emergency-card/preview`, { method: "POST", body: JSON.stringify({}) }),
+  emergencyCardPdfUrl: (childId) => `${BASE_URL}/children/${childId}/emergency-card/pdf`,
+
+  // Caregiver Handover Summary (Phase 1) — lihat
+  // backend/docs/CAREGIVER_HANDOVER.md. ONLINE-ONLY SENGAJA: TIDAK SATU
+  // PUN path di bawah ini pernah masuk OFFLINE_QUEUEABLE_PATHS (lihat
+  // atas) — create/update/acknowledge/close TIDAK PERNAH diantrikan
+  // offline (requirement eksplisit Phase 1: online-only, tidak pernah
+  // disimpan ke localStorage/IndexedDB/antrean offline).
+  getCaregiverHandover: (childId) => request(`/children/${childId}/caregiver-handover`),
+  createCaregiverHandover: (childId, note) =>
+    request(`/children/${childId}/caregiver-handover`, {
+      method: "POST", body: JSON.stringify(note != null ? { note } : {}),
+    }),
+  updateCaregiverHandover: (handoverId, note) =>
+    request(`/caregiver-handovers/${handoverId}`, {
+      method: "PUT", body: JSON.stringify({ note }),
+    }),
+  acknowledgeCaregiverHandover: (handoverId) =>
+    request(`/caregiver-handovers/${handoverId}/acknowledge`, {
+      method: "POST", body: JSON.stringify({}),
+    }),
+  closeCaregiverHandover: (handoverId) =>
+    request(`/caregiver-handovers/${handoverId}/close`, {
+      method: "POST", body: JSON.stringify({}),
+    }),
+
+  // multi-caregiver (Caregiver Roles & Permissions Phase 1 — lihat
+  // backend/docs/ROLES_PERMISSIONS.md)
   listCaregivers: (childId) => request(`/children/${childId}/caregivers`),
   removeCaregiver: (childId, userId) =>
     request(`/children/${childId}/caregivers/${userId}`, { method: "DELETE" }),
-  createInvite: (childId) =>
-    request(`/children/${childId}/invite`, { method: "POST" }),
+  // `role` WAJIB — "editor" | "viewer", dipilih pemilik. Backend
+  // memvalidasi lewat allowlist ketat; frontend TIDAK PERNAH nawarin
+  // "owner" sebagai pilihan.
+  updateCaregiverRole: (childId, userId, role) =>
+    request(`/children/${childId}/caregivers/${userId}`, {
+      method: "PUT",
+      body: JSON.stringify({ role }),
+    }),
+  createInvite: (childId, role) =>
+    request(`/children/${childId}/invite`, {
+      method: "POST",
+      body: JSON.stringify({ role }),
+    }),
   joinChild: (code) =>
     request("/children/join", {
       method: "POST",
@@ -419,4 +690,19 @@ export const api = {
   // summary
   dailySummary: (childId, date) =>
     request(`/children/${childId}/daily-summary?date=${date}`),
+
+  // Caregiver Audit Trail (Phase 1) — BACA SAJA, endpoint nggak pernah
+  // nerima create/update/delete. `params` opsional: { cursor, limit,
+  // action, entity_type, actor_user_id } — dibuang kalau null/undefined
+  // biar nggak ngirim query string kosong (mis. "?cursor=undefined").
+  listAuditEvents: (childId, params = {}) => {
+    const search = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== null && value !== undefined && value !== "") {
+        search.set(key, String(value));
+      }
+    }
+    const qs = search.toString();
+    return request(`/children/${childId}/audit-events${qs ? `?${qs}` : ""}`);
+  },
 };

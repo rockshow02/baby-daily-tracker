@@ -3,7 +3,26 @@ Flask-SQLAlchemy==3.1.1
 Flask-CORS==4.0.1
 python-dotenv==1.0.1
 Werkzeug==3.0.3
+
+# reportlab (ekspor laporan PDF) — chardet di bawah ini TRANSITIF (bukan
+# dipakai app ini langsung), tapi di-pin eksplisit karena reportlab
+# nggak nge-pin versi chardet apa pun sendiri, dan versi chardet-nya
+# WAJIB tetap kompatibel sama requests di bawah. Detail lengkap +
+# strategi upgrade: backend/docs/DEPENDENCIES.md
 reportlab==4.2.5
+chardet==7.4.3
+
 feedparser==6.0.14
-requests==2.32.3
+
+# requests + dependency inti-nya (bukan cuma requests doang) di-pin
+# eksplisit biar `pip install -r requirements.txt` di venv baru SELALU
+# resolve kombinasi yang udah diverifikasi kompatibel (lihat
+# backend/docs/DEPENDENCIES.md) — bukan uncontrolled range yang bisa
+# diam-diam berubah dari waktu ke waktu.
+requests==2.34.2
+urllib3==2.7.0
+charset-normalizer==3.4.9
+idna==3.18
+certifi==2026.7.22
+
 qrcode==7.4.2

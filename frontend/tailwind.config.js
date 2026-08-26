@@ -5,19 +5,20 @@ export default {
     extend: {
       colors: {
         void: {
-          DEFAULT: "#FFF8F0",
+          DEFAULT: "#FFFAF6",
           card: "#FFFFFF",
-          raised: "#FFF1DE",
-          hairline: "#F0E2CC",
+          raised: "#FFF3EA",
+          hairline: "#EEE5DE",
         },
         ink: {
-          DEFAULT: "#4A3F35",
-          muted: "#9C8F82",
-          faint: "#C7BAA9",
+          DEFAULT: "#342F2B",
+          muted: "#756B64",
+          faint: "#A99D95",
         },
-        feed: { DEFAULT: "#FFA733", soft: "#FFF1D9" },
-        sleep: { DEFAULT: "#9B87E0", soft: "#EFEAFB" },
-        diaper: { DEFAULT: "#4FC9A8", soft: "#E1F8F1" },
+        feed: { DEFAULT: "#FF8068", soft: "#FFF0EB" },
+        sleep: { DEFAULT: "#8F79E8", soft: "#F1EDFF" },
+        diaper: { DEFAULT: "#4DBE9B", soft: "#EAF8F2" },
+        sky: { DEFAULT: "#5A9BEF", soft: "#EDF5FF" },
         warn: { DEFAULT: "#FF7A5C", soft: "#FFE6DF" },
       },
       fontFamily: {
@@ -29,7 +30,8 @@ export default {
         xl2: "1.5rem",
       },
       boxShadow: {
-        soft: "0 4px 20px -4px rgba(74, 63, 53, 0.08)",
+        soft: "0 10px 35px -14px rgba(74, 63, 53, 0.18)",
+        nav: "0 -8px 30px rgba(74, 63, 53, 0.08)",
       },
     },
   },

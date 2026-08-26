@@ -6,11 +6,20 @@ from flask import Blueprint, request, jsonify, session
 from extensions import db
 from models import Child, FeedingLog, SleepLog, DiaperLog, User, WakeWindowGuideline
 from utils.telegram import notify_other_caregivers
-from utils.access import get_accessible_child
+from utils.access import get_accessible_child, resolve_role, can_delete_record, WRITE_ROLES
 from utils.auth import get_current_user_id
+from utils.idempotency import idempotent_create, compute_fingerprint
 from utils.summary_engine import build_daily_summary, get_age_in_days
+from utils.audit import record_audit_event, snapshot_fields, diff_snapshots
 
 daily_log_bp = Blueprint("daily_log", __name__)
+
+# Caregiver Roles & Permissions Phase 1 (lihat backend/docs/ROLES_PERMISSIONS.md)
+# — pesan 403 dipakai SERAGAM di semua route create/update/delete di file
+# ini (dan file route log lainnya), biar perilakunya gampang diaudit dan
+# dites, bukan pesan ad-hoc beda-beda per route.
+NO_WRITE_ROLE_MESSAGE = "Peran Anda hanya bisa melihat data, tidak bisa menambah/mengubah catatan."
+NO_DELETE_PERMISSION_MESSAGE = "Anda tidak punya izin untuk menghapus catatan ini."
 
 
 def _get_owned_child_or_none(child_id):
@@ -53,24 +62,43 @@ def create_feeding_log(child_id):
     if not child:
         return jsonify({"error": "Anak tidak ditemukan"}), 404
 
+    user_id = get_current_user_id()
+    if resolve_role(child, user_id) not in WRITE_ROLES:
+        return jsonify({"error": NO_WRITE_ROLE_MESSAGE}), 403
+
     data = request.get_json() or {}
     if not data.get("feed_type"):
         return jsonify({"error": "feed_type wajib diisi"}), 400
 
-    log = FeedingLog(
-        created_by_user_id=get_current_user_id(),
-        child_id=child_id,
-        timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
-        feed_type=data["feed_type"],
-        duration_minutes=data.get("duration_minutes"),
-        volume_ml=data.get("volume_ml"),
-        breast_side=data.get("breast_side"),
-        notes=data.get("notes"),
+    client_request_id = request.headers.get("X-Idempotency-Key")
+    fingerprint = compute_fingerprint(data)
+
+    def build():
+        log = FeedingLog(
+            created_by_user_id=user_id,
+            child_id=child_id,
+            timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
+            feed_type=data["feed_type"],
+            duration_minutes=data.get("duration_minutes"),
+            volume_ml=data.get("volume_ml"),
+            breast_side=data.get("breast_side"),
+            notes=data.get("notes"),
+        )
+        db.session.add(log)
+        db.session.flush()
+        record_audit_event(
+            child_id=child_id, actor_user_id=user_id, action="create",
+            entity_type="feeding_log", entity_id=log.id, recorded_at=log.timestamp,
+        )
+        return log.to_dict()
+
+    def send_notification():
+        notify_other_caregivers(child, user_id, f"🍼 {User.query.get(user_id).name} mencatat menyusui untuk {child.nickname or child.name}.")
+
+    body, status, _ = idempotent_create(
+        user_id, child_id, "feeding-logs", client_request_id, fingerprint, build, after_commit=send_notification
     )
-    db.session.add(log)
-    db.session.commit()
-    notify_other_caregivers(child, get_current_user_id(), f"🍼 {User.query.get(get_current_user_id()).name} mencatat menyusui untuk {child.nickname or child.name}.")
-    return jsonify(log.to_dict()), 201
+    return jsonify(body), status
 
 
 @daily_log_bp.route("/feeding-logs/<int:log_id>", methods=["PUT", "DELETE"])
@@ -80,17 +108,36 @@ def update_or_delete_feeding_log(log_id):
     if not child:
         return jsonify({"error": "Tidak diizinkan"}), 403
 
+    user_id = get_current_user_id()
+    role = resolve_role(child, user_id)
+
     if request.method == "DELETE":
+        if not can_delete_record(role, log.created_by_user_id, user_id):
+            return jsonify({"error": NO_DELETE_PERMISSION_MESSAGE}), 403
+        record_audit_event(
+            child_id=log.child_id, actor_user_id=user_id, action="delete",
+            entity_type="feeding_log", entity_id=log.id, recorded_at=log.timestamp,
+        )
         db.session.delete(log)
         db.session.commit()
         return jsonify({"success": True})
 
+    if role not in WRITE_ROLES:
+        return jsonify({"error": NO_WRITE_ROLE_MESSAGE}), 403
+
     data = request.get_json() or {}
+    before = snapshot_fields(log, "feeding_log")
     for field in ["feed_type", "duration_minutes", "volume_ml", "breast_side", "notes"]:
         if field in data:
             setattr(log, field, data[field])
     if "timestamp" in data:
         log.timestamp = to_wib_naive(data["timestamp"])
+    changed = diff_snapshots(before, snapshot_fields(log, "feeding_log"), "feeding_log")
+    if changed:
+        record_audit_event(
+            child_id=log.child_id, actor_user_id=user_id, action="update",
+            entity_type="feeding_log", entity_id=log.id, changed_fields=changed, recorded_at=log.timestamp,
+        )
     db.session.commit()
     return jsonify(log.to_dict())
 
@@ -130,22 +177,41 @@ def create_sleep_log(child_id):
     if not child:
         return jsonify({"error": "Anak tidak ditemukan"}), 404
 
+    user_id = get_current_user_id()
+    if resolve_role(child, user_id) not in WRITE_ROLES:
+        return jsonify({"error": NO_WRITE_ROLE_MESSAGE}), 403
+
     data = request.get_json() or {}
     if not data.get("start_time"):
         return jsonify({"error": "start_time wajib diisi"}), 400
 
-    log = SleepLog(
-        created_by_user_id=get_current_user_id(),
-        child_id=child_id,
-        start_time=to_wib_naive(data["start_time"]),
-        end_time=to_wib_naive(data["end_time"]) if data.get("end_time") else None,
-        sleep_type=data.get("sleep_type", "siang"),
-        notes=data.get("notes"),
+    client_request_id = request.headers.get("X-Idempotency-Key")
+    fingerprint = compute_fingerprint(data)
+
+    def build():
+        log = SleepLog(
+            created_by_user_id=user_id,
+            child_id=child_id,
+            start_time=to_wib_naive(data["start_time"]),
+            end_time=to_wib_naive(data["end_time"]) if data.get("end_time") else None,
+            sleep_type=data.get("sleep_type", "siang"),
+            notes=data.get("notes"),
+        )
+        db.session.add(log)
+        db.session.flush()
+        record_audit_event(
+            child_id=child_id, actor_user_id=user_id, action="create",
+            entity_type="sleep_log", entity_id=log.id, recorded_at=log.start_time,
+        )
+        return log.to_dict()
+
+    def send_notification():
+        notify_other_caregivers(child, user_id, f"😴 {User.query.get(user_id).name} mencatat tidur untuk {child.nickname or child.name}.")
+
+    body, status, _ = idempotent_create(
+        user_id, child_id, "sleep-logs", client_request_id, fingerprint, build, after_commit=send_notification
     )
-    db.session.add(log)
-    db.session.commit()
-    notify_other_caregivers(child, get_current_user_id(), f"😴 {User.query.get(get_current_user_id()).name} mencatat tidur untuk {child.nickname or child.name}.")
-    return jsonify(log.to_dict()), 201
+    return jsonify(body), status
 
 
 @daily_log_bp.route("/sleep-logs/<int:log_id>", methods=["PUT", "DELETE"])
@@ -155,18 +221,37 @@ def update_or_delete_sleep_log(log_id):
     if not child:
         return jsonify({"error": "Tidak diizinkan"}), 403
 
+    user_id = get_current_user_id()
+    role = resolve_role(child, user_id)
+
     if request.method == "DELETE":
+        if not can_delete_record(role, log.created_by_user_id, user_id):
+            return jsonify({"error": NO_DELETE_PERMISSION_MESSAGE}), 403
+        record_audit_event(
+            child_id=log.child_id, actor_user_id=user_id, action="delete",
+            entity_type="sleep_log", entity_id=log.id, recorded_at=log.start_time,
+        )
         db.session.delete(log)
         db.session.commit()
         return jsonify({"success": True})
 
+    if role not in WRITE_ROLES:
+        return jsonify({"error": NO_WRITE_ROLE_MESSAGE}), 403
+
     data = request.get_json() or {}
+    before = snapshot_fields(log, "sleep_log")
     if "end_time" in data:
         log.end_time = to_wib_naive(data["end_time"]) if data["end_time"] else None
     if "sleep_type" in data:
         log.sleep_type = data["sleep_type"]
     if "notes" in data:
         log.notes = data["notes"]
+    changed = diff_snapshots(before, snapshot_fields(log, "sleep_log"), "sleep_log")
+    if changed:
+        record_audit_event(
+            child_id=log.child_id, actor_user_id=user_id, action="update",
+            entity_type="sleep_log", entity_id=log.id, changed_fields=changed, recorded_at=log.start_time,
+        )
     db.session.commit()
     return jsonify(log.to_dict())
 
@@ -197,23 +282,42 @@ def create_diaper_log(child_id):
     if not child:
         return jsonify({"error": "Anak tidak ditemukan"}), 404
 
+    user_id = get_current_user_id()
+    if resolve_role(child, user_id) not in WRITE_ROLES:
+        return jsonify({"error": NO_WRITE_ROLE_MESSAGE}), 403
+
     data = request.get_json() or {}
     if not data.get("diaper_type"):
         return jsonify({"error": "diaper_type wajib diisi"}), 400
 
-    log = DiaperLog(
-        created_by_user_id=get_current_user_id(),
-        child_id=child_id,
-        timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
-        diaper_type=data["diaper_type"],
-        consistency=data.get("consistency"),
-        color=data.get("color"),
-        notes=data.get("notes"),
+    client_request_id = request.headers.get("X-Idempotency-Key")
+    fingerprint = compute_fingerprint(data)
+
+    def build():
+        log = DiaperLog(
+            created_by_user_id=user_id,
+            child_id=child_id,
+            timestamp=to_wib_naive(data["timestamp"]) if data.get("timestamp") else now_wib(),
+            diaper_type=data["diaper_type"],
+            consistency=data.get("consistency"),
+            color=data.get("color"),
+            notes=data.get("notes"),
+        )
+        db.session.add(log)
+        db.session.flush()
+        record_audit_event(
+            child_id=child_id, actor_user_id=user_id, action="create",
+            entity_type="diaper_log", entity_id=log.id, recorded_at=log.timestamp,
+        )
+        return log.to_dict()
+
+    def send_notification():
+        notify_other_caregivers(child, user_id, f"👶 {User.query.get(user_id).name} mencatat ganti popok untuk {child.nickname or child.name}.")
+
+    body, status, _ = idempotent_create(
+        user_id, child_id, "diaper-logs", client_request_id, fingerprint, build, after_commit=send_notification
     )
-    db.session.add(log)
-    db.session.commit()
-    notify_other_caregivers(child, get_current_user_id(), f"👶 {User.query.get(get_current_user_id()).name} mencatat ganti popok untuk {child.nickname or child.name}.")
-    return jsonify(log.to_dict()), 201
+    return jsonify(body), status
 
 
 @daily_log_bp.route("/diaper-logs/<int:log_id>", methods=["PUT", "DELETE"])
@@ -223,12 +327,25 @@ def update_or_delete_diaper_log(log_id):
     if not child:
         return jsonify({"error": "Tidak diizinkan"}), 403
 
+    user_id = get_current_user_id()
+    role = resolve_role(child, user_id)
+
     if request.method == "DELETE":
+        if not can_delete_record(role, log.created_by_user_id, user_id):
+            return jsonify({"error": NO_DELETE_PERMISSION_MESSAGE}), 403
+        record_audit_event(
+            child_id=log.child_id, actor_user_id=user_id, action="delete",
+            entity_type="diaper_log", entity_id=log.id, recorded_at=log.timestamp,
+        )
         db.session.delete(log)
         db.session.commit()
         return jsonify({"success": True})
 
+    if role not in WRITE_ROLES:
+        return jsonify({"error": NO_WRITE_ROLE_MESSAGE}), 403
+
     data = request.get_json() or {}
+    before = snapshot_fields(log, "diaper_log")
     if "timestamp" in data:
         log.timestamp = to_wib_naive(data["timestamp"])
     if "diaper_type" in data:
@@ -239,6 +356,12 @@ def update_or_delete_diaper_log(log_id):
         log.color = data["color"]
     if "notes" in data:
         log.notes = data["notes"]
+    changed = diff_snapshots(before, snapshot_fields(log, "diaper_log"), "diaper_log")
+    if changed:
+        record_audit_event(
+            child_id=log.child_id, actor_user_id=user_id, action="update",
+            entity_type="diaper_log", entity_id=log.id, changed_fields=changed, recorded_at=log.timestamp,
+        )
     db.session.commit()
     return jsonify(log.to_dict())
 

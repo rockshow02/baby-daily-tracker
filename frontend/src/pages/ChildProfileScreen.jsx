@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { api } from "../api/client";
 import CaregiverModal from "../components/CaregiverModal";
 import { todayWIB } from "../utils/date";
+import { isOwner } from "../utils/roles";
 
 function fmtDate(iso) {
   return new Date(iso).toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
@@ -104,18 +105,28 @@ export default function ChildProfileScreen({ child, currentUserId, onUpdated }) 
     }
   };
 
+  // Caregiver Roles & Permissions Phase 1 — ubah profil anak (nama,
+  // foto, dst) DAN kelola caregiver SAMA-SAMA owner-only (lihat
+  // backend/docs/ROLES_PERMISSIONS.md). Backend TETAP menegakkan ulang
+  // ini di endpoint-nya sendiri — flag ini CUMA buat nyembunyiin kontrol
+  // yang bakal ditolak backend.
+  const canEditChild = isOwner(child.role);
+
   const wajib = vaccinations?.vaccinations.filter((v) => v.category === "wajib") || [];
   const wajibGiven = wajib.filter((v) => v.given).length;
   const tambahan = vaccinations?.vaccinations.filter((v) => v.category === "tambahan") || [];
   const tambahanGiven = tambahan.filter((v) => v.given).length;
 
   return (
-    <div className="min-h-screen pb-16 px-6 pt-8">
-      <h1 className="font-display text-3xl text-ink mb-6">Profil Anak</h1>
+    <div className="min-h-screen px-4 pb-28 pt-6 sm:px-6 sm:pt-8">
+      <header className="mb-5">
+        <p className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-diaper">Data si kecil</p>
+        <h1 className="font-display text-3xl font-bold leading-tight text-ink">Profil Anak</h1>
+      </header>
 
-      <div className="flex flex-col items-center mb-6">
-        <label className="cursor-pointer">
-          <div className="w-28 h-28 rounded-full border-2 border-dashed border-void-hairline overflow-hidden bg-void-card flex items-center justify-center">
+      <div className="mb-6 flex flex-col items-center rounded-xl2 bg-gradient-to-br from-diaper-soft via-white to-sky-soft p-5 shadow-soft">
+        <label className={canEditChild ? "cursor-pointer" : undefined}>
+          <div className="flex h-28 w-28 items-center justify-center overflow-hidden rounded-full border-4 border-white bg-void-card shadow-sm">
             {photoPreview || child.photo_filename ? (
               <img
                 src={photoPreview || api.photoUrl(child.photo_filename)}
@@ -126,9 +137,11 @@ export default function ChildProfileScreen({ child, currentUserId, onUpdated }) 
               <span className="text-3xl">📷</span>
             )}
           </div>
-          <input type="file" accept="image/png,image/jpeg,image/webp" onChange={handlePhotoChange} className="hidden" />
+          {canEditChild && (
+            <input type="file" accept="image/png,image/jpeg,image/webp" onChange={handlePhotoChange} className="hidden" />
+          )}
         </label>
-        {photoFile && (
+        {canEditChild && photoFile && (
           <button
             onClick={handlePhotoUpload}
             disabled={uploadingPhoto}
@@ -147,12 +160,14 @@ export default function ChildProfileScreen({ child, currentUserId, onUpdated }) 
       <div className="bg-void-card border border-void-hairline rounded-xl2 p-4 mb-4 shadow-soft">
         <div className="flex items-center justify-between mb-3">
           <p className="text-xs text-ink-faint font-mono uppercase tracking-wider">Data Anak</p>
-          <button onClick={() => setEditing(!editing)} className="text-xs text-feed font-medium">
-            {editing ? "Batal" : "Edit"}
-          </button>
+          {canEditChild && (
+            <button onClick={() => setEditing(!editing)} className="text-xs text-feed font-medium">
+              {editing ? "Batal" : "Edit"}
+            </button>
+          )}
         </div>
 
-        {!editing ? (
+        {!editing || !canEditChild ? (
           <div className="space-y-2 text-sm">
             <div className="flex justify-between">
               <span className="text-ink-faint">Nama lengkap</span>
@@ -295,13 +310,20 @@ export default function ChildProfileScreen({ child, currentUserId, onUpdated }) 
             <p className="text-sm text-ink font-medium">{milestoneCount} tercatat</p>
           </div>
 
-          <button
-            onClick={() => setShowCaregivers(true)}
-            className="bg-void-card border border-void-hairline rounded-xl2 p-4 text-left"
-          >
-            <p className="text-xs text-ink-faint mb-1">Pengasuh</p>
-            <p className="text-sm text-feed font-medium">{caregiverCount} orang →</p>
-          </button>
+          {canEditChild ? (
+            <button
+              onClick={() => setShowCaregivers(true)}
+              className="bg-void-card border border-void-hairline rounded-xl2 p-4 text-left"
+            >
+              <p className="text-xs text-ink-faint mb-1">Pengasuh</p>
+              <p className="text-sm text-feed font-medium">{caregiverCount} orang →</p>
+            </button>
+          ) : (
+            <div className="bg-void-card border border-void-hairline rounded-xl2 p-4">
+              <p className="text-xs text-ink-faint mb-1">Pengasuh</p>
+              <p className="text-sm text-ink font-medium">{caregiverCount} orang</p>
+            </div>
+          )}
         </div>
       )}
 

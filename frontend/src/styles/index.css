@@ -8,9 +8,37 @@
 
 body {
   @apply antialiased bg-void text-ink font-body;
-  background-image: radial-gradient(circle at 50% 0%, rgba(255, 167, 51, 0.08), transparent 60%);
+  background-image:
+    radial-gradient(circle at 10% 0%, rgba(255, 128, 104, 0.08), transparent 32rem),
+    radial-gradient(circle at 90% 8%, rgba(143, 121, 232, 0.08), transparent 28rem);
   min-height: 100vh;
   overflow-x: hidden;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.app-page {
+  width: 100%;
+  max-width: 42rem;
+  margin-inline: auto;
+}
+
+.safe-bottom {
+  padding-bottom: max(1rem, env(safe-area-inset-bottom));
+}
+
+.soft-card {
+  @apply rounded-xl2 border border-void-hairline bg-void-card shadow-soft;
+}
+
+.scrollbar-hidden {
+  scrollbar-width: none;
+}
+
+.scrollbar-hidden::-webkit-scrollbar {
+  display: none;
 }
 
 ::selection {
@@ -18,7 +46,7 @@ body {
 }
 
 :focus-visible {
-  outline: 2px solid #ffa733;
+  outline: 2px solid #ff8068;
   outline-offset: 2px;
 }
 

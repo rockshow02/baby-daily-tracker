@@ -17,11 +17,34 @@ function fmtDay(iso) {
   return new Date(iso).toLocaleDateString("id-ID", { day: "2-digit", month: "short" });
 }
 
-function ChartCard({ title, children }) {
+function ChartCard({ title, subtitle, accent = "feed", children }) {
+  const accentClass = {
+    feed: "bg-feed",
+    sleep: "bg-sleep",
+    diaper: "bg-diaper",
+    sky: "bg-sky",
+  }[accent];
+
   return (
-    <div className="bg-void-card border border-void-hairline rounded-xl2 p-4 mb-4 shadow-soft">
-      <p className="text-xs text-ink-faint font-mono uppercase tracking-wider mb-3">{title}</p>
+    <section className="mb-4 rounded-xl2 border border-void-hairline bg-void-card p-4 shadow-soft sm:p-5">
+      <div className="mb-4 flex items-start gap-3">
+        <span className={`mt-1 h-8 w-1 rounded-full ${accentClass}`} aria-hidden="true" />
+        <div>
+          <h2 className="text-base font-bold text-ink">{title}</h2>
+          {subtitle && <p className="text-xs text-ink-faint">{subtitle}</p>}
+        </div>
+      </div>
       {children}
+    </section>
+  );
+}
+
+function MetricCard({ icon, value, label, tone }) {
+  return (
+    <div className={`min-w-0 rounded-[1.35rem] p-3.5 ${tone}`}>
+      <span className="text-xl" aria-hidden="true">{icon}</span>
+      <p className="mt-2 truncate text-2xl font-bold text-ink">{value}</p>
+      <p className="mt-0.5 text-[11px] leading-snug text-ink-muted">{label}</p>
     </div>
   );
 }
@@ -68,17 +91,20 @@ export default function StatsScreen({ child }) {
     : [];
 
   return (
-    <div className="min-h-screen pb-16 px-6 pt-8">
-      <h1 className="font-display text-3xl text-ink mb-1">Statistik</h1>
-      <p className="text-sm text-ink-muted mb-6">Pola dan tren aktivitas {child.name}</p>
+    <div className="min-h-screen px-4 pb-28 pt-6 sm:px-6 sm:pt-8">
+      <header className="mb-5">
+        <p className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-feed">Pola harian</p>
+        <h1 className="font-display text-3xl font-bold leading-tight text-ink">Statistik {child.name}</h1>
+        <p className="mt-1 text-sm text-ink-muted">Kenali perubahan rutinitas dari waktu ke waktu.</p>
+      </header>
 
-      <div className="flex gap-2 mb-5">
+      <div className="mb-5 flex rounded-2xl border border-void-hairline bg-void-card p-1 shadow-sm" aria-label="Rentang statistik">
         {RANGE_OPTIONS.map((r) => (
           <button
             key={r.key}
             onClick={() => setDays(r.key)}
-            className={`flex-1 py-2.5 rounded-xl2 border text-xs font-medium ${
-              days === r.key ? "bg-feed/15 border-feed text-feed" : "bg-void-card border-void-hairline text-ink-muted"
+            className={`flex-1 rounded-xl py-2.5 text-xs font-bold transition-colors ${
+              days === r.key ? "bg-feed text-white shadow-sm" : "text-ink-muted"
             }`}
           >
             {r.label}
@@ -90,27 +116,18 @@ export default function StatsScreen({ child }) {
         <p className="text-ink-faint text-sm text-center py-10">Memuat...</p>
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-3 mb-4">
-            <div className="bg-void-card border border-void-hairline rounded-xl2 p-4">
-              <p className="text-2xl font-display text-ink">{data.averages.feeding_per_day}</p>
-              <p className="text-xs text-ink-faint">rata-rata menyusui/hari</p>
+          <section className="mb-5">
+            <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.16em] text-ink-faint">Rata-rata per hari</p>
+            <div className="grid grid-cols-2 gap-2.5">
+              <MetricCard icon="🍼" value={`${data.averages.feeding_per_day}x`} label="Susu" tone="bg-feed-soft" />
+              <MetricCard icon="🌙" value={`${data.averages.sleep_hours_per_day}j`} label="Tidur" tone="bg-sleep-soft" />
+              <MetricCard icon="💧" value={`${data.averages.wet_diaper_per_day}x`} label="Popok basah" tone="bg-diaper-soft" />
+              <MetricCard icon="💩" value={`${data.averages.dirty_diaper_per_day}x`} label="Buang air besar" tone="bg-sky-soft" />
             </div>
-            <div className="bg-void-card border border-void-hairline rounded-xl2 p-4">
-              <p className="text-2xl font-display text-ink">{data.averages.sleep_hours_per_day}</p>
-              <p className="text-xs text-ink-faint">rata-rata tidur (jam)/hari</p>
-            </div>
-            <div className="bg-void-card border border-void-hairline rounded-xl2 p-4">
-              <p className="text-2xl font-display text-ink">{data.averages.wet_diaper_per_day}</p>
-              <p className="text-xs text-ink-faint">rata-rata pipis/hari</p>
-            </div>
-            <div className="bg-void-card border border-void-hairline rounded-xl2 p-4">
-              <p className="text-2xl font-display text-ink">{data.averages.dirty_diaper_per_day}</p>
-              <p className="text-xs text-ink-faint">rata-rata pup/hari</p>
-            </div>
-          </div>
+          </section>
 
-          <ChartCard title="Tren Menyusui">
-            <div className="h-48">
+          <ChartCard title="Pola menyusu" subtitle={`Jumlah sesi dalam ${days} hari terakhir`} accent="feed">
+            <div className="h-52">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={data.days} margin={{ top: 5, right: 5, left: -25, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#F0E2CC" vertical={false} />
@@ -123,8 +140,8 @@ export default function StatsScreen({ child }) {
             </div>
           </ChartCard>
 
-          <ChartCard title="Tren Tidur (jam)">
-            <div className="h-48">
+          <ChartCard title="Durasi tidur" subtitle="Total jam tidur setiap hari" accent="sleep">
+            <div className="h-52">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={data.days} margin={{ top: 5, right: 5, left: -25, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#F0E2CC" vertical={false} />
@@ -137,8 +154,8 @@ export default function StatsScreen({ child }) {
             </div>
           </ChartCard>
 
-          <ChartCard title="Tren Popok (pipis vs pup)">
-            <div className="h-48">
+          <ChartCard title="Kebiasaan popok" subtitle="Perbandingan popok basah dan BAB" accent="diaper">
+            <div className="h-52">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={data.days} margin={{ top: 5, right: 5, left: -25, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#F0E2CC" vertical={false} />
@@ -161,7 +178,7 @@ export default function StatsScreen({ child }) {
           </ChartCard>
 
           {moodData.length > 0 && (
-            <ChartCard title="Distribusi Mood">
+            <ChartCard title="Suasana hati" subtitle="Catatan mood selama periode ini" accent="sky">
               <div className="h-48 flex items-center justify-center">
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
