@@ -37,7 +37,7 @@ export default function BottomNavigation({ activeView, onNavigate }) {
   return (
     <nav
       aria-label="Navigasi utama"
-      className="fixed inset-x-0 bottom-0 z-40 mx-auto w-full max-w-[42rem] border-t border-void-hairline bg-white/95 px-5 pt-2 shadow-nav backdrop-blur safe-bottom"
+      className="fixed inset-x-0 bottom-0 z-40 mx-auto w-full max-w-[42rem] border-t border-void-hairline bg-white/95 px-2 pt-1.5 shadow-nav backdrop-blur safe-bottom sm:px-5"
     >
       <div className="grid grid-cols-4 gap-1">
         {ITEMS.map((item) => {
@@ -48,8 +48,8 @@ export default function BottomNavigation({ activeView, onNavigate }) {
               type="button"
               aria-current={active ? "page" : undefined}
               onClick={() => onNavigate(item.key)}
-              className={`flex min-h-14 flex-col items-center justify-center gap-1 rounded-2xl text-[11px] font-semibold transition-colors ${
-                active ? "text-feed" : "text-ink-muted hover:text-ink"
+              className={`relative flex min-h-14 flex-col items-center justify-center gap-1 rounded-2xl text-[10px] font-semibold transition-colors sm:text-[11px] ${
+                active ? "bg-feed-soft text-feed" : "text-ink-muted hover:text-ink"
               }`}
             >
               <svg

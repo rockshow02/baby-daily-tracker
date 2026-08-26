@@ -290,7 +290,7 @@ function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, s
     <div className="min-h-screen pb-20">
       <OfflineStatusBanner sync={sync} onOpenDetail={() => setShowSyncCenter(true)} />
       {(activeView !== "daily" || childrenList.length > 1) && (
-      <div className="app-page px-5 pt-4 flex items-center justify-between gap-2">
+      <div className="app-page flex items-center justify-between gap-2 px-4 pt-3 sm:px-6">
         {childrenList.length > 1 ? (
           <div className="flex gap-2 overflow-x-auto">
             {childrenList.map((c) => (
@@ -311,15 +311,18 @@ function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, s
             ))}
           </div>
         ) : (
-          <p className="text-sm text-ink font-medium truncate">{activeChild.nickname || activeChild.name}</p>
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-diaper-soft text-sm" aria-hidden="true">👶</span>
+            <p className="truncate text-sm font-bold text-ink">{activeChild.nickname || activeChild.name}</p>
+          </div>
         )}
 
         {activeView !== "daily" && <button
           onClick={() => setShowMenu(true)}
-          className="flex items-center gap-1.5 bg-void-card border border-void-hairline rounded-full pl-3 pr-2 py-1.5 flex-shrink-0"
+          aria-label={`Buka menu lainnya, halaman ${activeLabel}`}
+          className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full border border-void-hairline bg-void-card text-ink-muted shadow-sm"
         >
-          <span className="text-xs text-ink-muted whitespace-nowrap">{activeLabel}</span>
-          <span className="text-ink-muted text-sm">☰</span>
+          <span className="text-sm" aria-hidden="true">☰</span>
         </button>
         }
       </div>
@@ -364,12 +367,18 @@ function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, s
       <BottomNavigation activeView={activeView} onNavigate={setActiveView} />
 
       {showMenu && (
-        <div className="fixed inset-0 z-50 flex items-start justify-end sm:items-center sm:justify-center">
-          <div className="absolute inset-0 bg-black/50" onClick={() => setShowMenu(false)} />
-          <div className="relative w-full sm:max-w-xs bg-void-card border-b sm:border border-void-hairline rounded-b-xl2 sm:rounded-xl2 p-4 pb-6">
-            <p className="text-[11px] text-ink-faint uppercase tracking-wider font-mono px-2 pt-1 pb-2">
-              Menu
-            </p>
+        <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
+          <div className="absolute inset-0 bg-black/45 backdrop-blur-[2px]" onClick={() => setShowMenu(false)} />
+          <div role="dialog" aria-modal="true" aria-labelledby="app-menu-title" className="relative max-h-[88vh] w-full overflow-y-auto rounded-t-[2rem] border-t border-void-hairline bg-void-card p-4 pb-7 shadow-soft sm:max-w-sm sm:rounded-xl2 sm:border">
+            <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-void-hairline sm:hidden" />
+            <div className="mb-3 flex items-center justify-between px-2">
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-feed">Baby Daily Tracker</p>
+                <h2 id="app-menu-title" className="text-lg font-bold text-ink">Menu lainnya</h2>
+              </div>
+              <button onClick={() => setShowMenu(false)} aria-label="Tutup menu" className="flex h-9 w-9 items-center justify-center rounded-full bg-void text-lg text-ink-muted">×</button>
+            </div>
+            <p className="mb-2 px-2 text-[11px] font-bold uppercase tracking-[0.14em] text-ink-faint">Fitur anak</p>
             <div className="space-y-1 mb-3">
               {NAV_ITEMS.map((item) => (
                 <button
@@ -378,8 +387,8 @@ function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, s
                     setActiveView(item.key);
                     setShowMenu(false);
                   }}
-                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl2 text-sm text-left ${
-                    activeView === item.key ? "bg-feed/15 text-feed font-medium" : "text-ink"
+                  className={`flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left text-sm ${
+                    activeView === item.key ? "bg-feed-soft font-bold text-feed" : "text-ink active:bg-void"
                   }`}
                 >
                   <span className="text-base">{item.icon}</span>
@@ -387,7 +396,8 @@ function AuthenticatedAppShell({ user, childrenList, setChildren, activeChild, s
                 </button>
               ))}
             </div>
-            <div className="border-t border-void-hairline pt-3 space-y-1">
+            <div className="space-y-1 border-t border-void-hairline pt-3">
+              <p className="px-2 pb-1 text-[11px] font-bold uppercase tracking-[0.14em] text-ink-faint">Akun & keluarga</p>
               <button
                 onClick={() => {
                   setActiveView("childProfile");

@@ -118,12 +118,15 @@ export default function ChildProfileScreen({ child, currentUserId, onUpdated }) 
   const tambahanGiven = tambahan.filter((v) => v.given).length;
 
   return (
-    <div className="min-h-screen pb-16 px-6 pt-8">
-      <h1 className="font-display text-3xl text-ink mb-6">Profil Anak</h1>
+    <div className="min-h-screen px-4 pb-28 pt-6 sm:px-6 sm:pt-8">
+      <header className="mb-5">
+        <p className="mb-1 text-[11px] font-bold uppercase tracking-[0.18em] text-diaper">Data si kecil</p>
+        <h1 className="font-display text-3xl font-bold leading-tight text-ink">Profil Anak</h1>
+      </header>
 
-      <div className="flex flex-col items-center mb-6">
+      <div className="mb-6 flex flex-col items-center rounded-xl2 bg-gradient-to-br from-diaper-soft via-white to-sky-soft p-5 shadow-soft">
         <label className={canEditChild ? "cursor-pointer" : undefined}>
-          <div className="w-28 h-28 rounded-full border-2 border-dashed border-void-hairline overflow-hidden bg-void-card flex items-center justify-center">
+          <div className="flex h-28 w-28 items-center justify-center overflow-hidden rounded-full border-4 border-white bg-void-card shadow-sm">
             {photoPreview || child.photo_filename ? (
               <img
                 src={photoPreview || api.photoUrl(child.photo_filename)}
