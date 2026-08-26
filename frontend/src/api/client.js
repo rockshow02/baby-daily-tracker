@@ -259,6 +259,15 @@ export const api = {
   },
   photoUrl: (filename) => `${BASE_URL}/uploads/${filename}`,
   listMemoryJournal: (childId) => request(`/children/${childId}/memory-journal`),
+  developmentTimeline: (childId, params = {}) => {
+    const search = new URLSearchParams();
+    if (params.categories?.length) search.set("categories", params.categories.join(","));
+    if (params.from) search.set("from", params.from);
+    if (params.to) search.set("to", params.to);
+    if (params.limit) search.set("limit", String(params.limit));
+    const suffix = search.toString() ? `?${search}` : "";
+    return request(`/children/${childId}/development-timeline${suffix}`);
+  },
   createMemoryJournal: async (childId, { photo, caption, occurredDate }) => {
     const formData = new FormData();
     formData.append("photo", photo);

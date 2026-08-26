@@ -106,6 +106,7 @@ def create_app(config_overrides=None):
     from routes.caregiver_handover_routes import caregiver_handover_bp
     from routes.privacy_routes import privacy_bp
     from routes.memory_journal_routes import memory_journal_bp
+    from routes.development_timeline_routes import development_timeline_bp
 
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(children_bp, url_prefix="/api")
@@ -128,6 +129,7 @@ def create_app(config_overrides=None):
     app.register_blueprint(caregiver_handover_bp, url_prefix="/api")
     app.register_blueprint(privacy_bp, url_prefix="/api")
     app.register_blueprint(memory_journal_bp, url_prefix="/api")
+    app.register_blueprint(development_timeline_bp, url_prefix="/api")
 
     with app.app_context():
         db.create_all()

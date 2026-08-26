@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import RelatedArticles from "../components/RelatedArticles";
 import { todayWIB } from "../utils/date";
 import MemoryJournal from "../components/MemoryJournal";
+import DevelopmentTimeline from "../components/DevelopmentTimeline";
 
 const MOODS = [
   { key: "ceria", label: "Ceria", icon: "😄", tone: "bg-feed-soft" },
@@ -80,7 +81,7 @@ export default function MomentsScreen({ child }) {
         <p className="mt-1 text-sm text-ink-muted">Simpan suasana hati dan pencapaian kecil setiap hari.</p>
       </header>
 
-      <div className="mb-5 flex rounded-2xl border border-void-hairline bg-void-card p-1 shadow-sm" aria-label="Jenis momen">
+      <div className="mb-5 grid grid-cols-2 gap-1 rounded-2xl border border-void-hairline bg-void-card p-1 shadow-sm" aria-label="Jenis momen">
         <button
           onClick={() => setActiveTab("mood")}
           className={`flex-1 rounded-xl py-2.5 text-xs font-bold transition-colors ${
@@ -104,6 +105,14 @@ export default function MomentsScreen({ child }) {
           }`}
         >
           📷 Galeri
+        </button>
+        <button
+          onClick={() => setActiveTab("timeline")}
+          className={`flex-1 rounded-xl py-2.5 text-xs font-bold transition-colors ${
+            activeTab === "timeline" ? "bg-sleep text-white shadow-sm" : "text-ink-muted"
+          }`}
+        >
+          🌱 Linimasa
         </button>
       </div>
 
@@ -232,11 +241,13 @@ export default function MomentsScreen({ child }) {
             </div>
           )}
         </>
-      ) : (
+      ) : activeTab === "memory" ? (
         <MemoryJournal child={child} />
+      ) : (
+        <DevelopmentTimeline child={child} />
       )}
 
-      {activeTab !== "memory" && <RelatedArticles
+      {activeTab !== "memory" && activeTab !== "timeline" && <RelatedArticles
         category={activeTab === "milestone" ? "milestone" : "mood"}
         ageMonths={(new Date() - new Date(child.birth_date)) / (1000 * 60 * 60 * 24 * 30.4375)}
       />}
