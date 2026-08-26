@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import MonthlyStory from "./MonthlyStory";
 import DevelopmentGoals from "./DevelopmentGoals";
+import DevelopmentCalendar from "./DevelopmentCalendar";
 
 const FILTERS = [
   ["all", "Semua"], ["memory", "Foto"], ["milestone", "Pencapaian"],
@@ -26,6 +27,7 @@ export default function DevelopmentTimeline({ child }) {
   const [error, setError] = useState("");
   const [showStory, setShowStory] = useState(false);
   const [showGoals, setShowGoals] = useState(false);
+  const [showCalendar, setShowCalendar] = useState(false);
   const params = useMemo(() => {
     const result = { limit: 100 };
     if (filter !== "all") result.categories = [filter];
@@ -46,7 +48,7 @@ export default function DevelopmentTimeline({ child }) {
   return <section>
     <div className="mb-4 flex items-start justify-between gap-3"><div><h2 className="text-base font-bold text-ink">Linimasa perkembangan</h2>
       <p className="text-xs text-ink-faint">Cerita pertumbuhan {child.nickname || child.name} dalam satu tempat.</p></div>
-      <div className="flex shrink-0 flex-col gap-2"><button onClick={()=>setShowStory(true)} className="rounded-full bg-feed px-3 py-2 text-xs font-bold text-white">Cerita Bulanan</button><button onClick={()=>setShowGoals(true)} className="rounded-full border border-sleep px-3 py-2 text-xs font-bold text-sleep">Tujuan</button></div></div>
+      <div className="flex shrink-0 flex-col gap-2"><button onClick={()=>setShowCalendar(true)} className="rounded-full bg-sleep px-3 py-2 text-xs font-bold text-white">Kalender</button><button onClick={()=>setShowStory(true)} className="rounded-full bg-feed px-3 py-2 text-xs font-bold text-white">Cerita Bulanan</button><button onClick={()=>setShowGoals(true)} className="rounded-full border border-sleep px-3 py-2 text-xs font-bold text-sleep">Tujuan</button></div></div>
     <div className="-mx-4 mb-3 flex gap-2 overflow-x-auto px-4 pb-1">
       {FILTERS.map(([key, label]) => <button key={key} onClick={() => setFilter(key)}
         className={`shrink-0 rounded-full px-3 py-2 text-xs font-semibold ${filter === key ? "bg-sleep text-white" : "border border-void-hairline bg-void-card text-ink-muted"}`}>{label}</button>)}
@@ -72,5 +74,6 @@ export default function DevelopmentTimeline({ child }) {
     {data.has_more && <p className="mt-4 text-center text-xs text-ink-faint">Menampilkan 100 momen terbaru. Gunakan filter untuk mempersempit.</p>}
     {showStory && <MonthlyStory child={child} onClose={()=>setShowStory(false)} />}
     {showGoals && <DevelopmentGoals child={child} onClose={()=>setShowGoals(false)} />}
+    {showCalendar && <DevelopmentCalendar child={child} onClose={()=>setShowCalendar(false)} />}
   </section>;
 }

@@ -272,6 +272,11 @@ export const api = {
     const suffix = search.toString() ? `?${search}` : "";
     return request(`/children/${childId}/development-timeline${suffix}`);
   },
+  developmentCalendar: (childId, params = {}) => {
+    const search = new URLSearchParams({ month: params.month });
+    if (params.categories?.length) search.set("categories", params.categories.join(","));
+    return request(`/children/${childId}/development-calendar?${search}`);
+  },
   previewMonthlyStory: (childId, payload) => request(`/children/${childId}/monthly-story/preview`, {
     method: "POST", body: JSON.stringify(payload),
   }),
