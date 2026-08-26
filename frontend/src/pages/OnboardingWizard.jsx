@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { todayWIB } from "../utils/date";
+import { toUserFacingErrorMessage } from "../utils/errorMessage";
 
 const STEPS = ["Data Anak", "Berat & Tinggi", "Vaksinasi", "Foto"];
 
@@ -53,7 +54,7 @@ export default function OnboardingWizard({ onComplete, onOpenPrivacy }) {
       if (err instanceof SyntaxError) {
         setImportError("File bukan format JSON backup yang valid.");
       } else {
-        setImportError(err.message);
+        setImportError(toUserFacingErrorMessage(err, "Import belum berhasil. Coba lagi."));
       }
     } finally {
       setImporting(false);
@@ -71,7 +72,7 @@ export default function OnboardingWizard({ onComplete, onOpenPrivacy }) {
       const result = await api.joinChild(joinCode.trim());
       onComplete(result.child);
     } catch (err) {
-      setJoinError(err.message);
+      setJoinError(toUserFacingErrorMessage(err, "Kode undangan belum bisa diproses."));
     } finally {
       setJoining(false);
     }
@@ -87,7 +88,7 @@ export default function OnboardingWizard({ onComplete, onOpenPrivacy }) {
       setChild(created);
       setStep(1);
     } catch (err) {
-      setError(err.message);
+      setError(toUserFacingErrorMessage(err));
     } finally {
       setSubmitting(false);
     }
@@ -108,7 +109,7 @@ export default function OnboardingWizard({ onComplete, onOpenPrivacy }) {
       }
       setStep(2);
     } catch (err) {
-      setError(err.message);
+      setError(toUserFacingErrorMessage(err));
     } finally {
       setSubmitting(false);
     }
@@ -145,7 +146,7 @@ export default function OnboardingWizard({ onComplete, onOpenPrivacy }) {
       }
       setStep(3);
     } catch (err) {
-      setError(err.message);
+      setError(toUserFacingErrorMessage(err));
     } finally {
       setSubmitting(false);
     }
@@ -169,7 +170,7 @@ export default function OnboardingWizard({ onComplete, onOpenPrivacy }) {
       }
       onComplete(finalChild);
     } catch (err) {
-      setError(err.message);
+      setError(toUserFacingErrorMessage(err));
     } finally {
       setSubmitting(false);
     }
@@ -179,10 +180,10 @@ export default function OnboardingWizard({ onComplete, onOpenPrivacy }) {
   const notYetDueVaccines = vaccines.filter((v) => !v.due);
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen px-6 py-10">
-      <div className="w-full max-w-sm">
+    <main className="app-page flex min-h-screen flex-col items-center justify-center px-5 py-8">
+      <div className="w-full max-w-sm rounded-[2rem] border border-void-hairline bg-white/90 p-5 shadow-soft sm:p-7">
         {/* progress dots */}
-        <div className="flex items-center justify-center gap-2 mb-8">
+        <div className="mb-6 flex items-center justify-center gap-2">
           {STEPS.map((label, i) => (
             <div key={label} className="flex items-center gap-2">
               <div
@@ -194,10 +195,13 @@ export default function OnboardingWizard({ onComplete, onOpenPrivacy }) {
           ))}
         </div>
 
-        <p className="text-center font-mono text-xs text-ink-faint tracking-[0.2em] uppercase mb-2">
+        <p className="mb-2 text-center text-xs font-bold uppercase tracking-[0.18em] text-feed">
           Langkah {step + 1} dari {STEPS.length}
         </p>
-        <h1 className="mb-8 text-3xl text-center font-display text-ink">{STEPS[step]}</h1>
+        <h1 className="mb-2 text-center font-display text-3xl text-ink">{STEPS[step]}</h1>
+        <p className="mb-7 text-center text-xs leading-relaxed text-ink-muted">
+          {step === 0 ? "Kenalkan si kecil agar pengalaman aplikasi bisa disesuaikan." : "Lengkapi seperlunya—data opsional bisa ditambahkan nanti."}
+        </p>
 
         {error && <p className="mb-4 text-sm text-center text-warn">{error}</p>}
 
@@ -459,7 +463,7 @@ export default function OnboardingWizard({ onComplete, onOpenPrivacy }) {
           </div>
         )}
       </div>
-    </div>
+    </main>
   );
 }
 

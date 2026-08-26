@@ -1,3 +1,5 @@
+import { toUserFacingErrorMessage } from "../utils/errorMessage";
+
 const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
 const TOKEN_KEY = "babytracker_token";
@@ -182,7 +184,7 @@ async function request(path, options = {}) {
   }
 
   if (!res.ok) {
-    const message = data?.error || `Request gagal (${res.status})`;
+    const message = toUserFacingErrorMessage(data?.error, `Request gagal (${res.status})`);
     throw new ApiError({ kind: classifyHttpError(res.status), status: res.status, message });
   }
   return data;
