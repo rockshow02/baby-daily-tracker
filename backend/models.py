@@ -627,6 +627,159 @@ class MilestoneLog(db.Model):
 
 
 
+class MemoryJournalEntry(db.Model):
+    """Foto momen anak yang privat dan hanya dapat dibaca caregiver."""
+    __tablename__ = "memory_journal_entries"
+
+    id = db.Column(db.Integer, primary_key=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    occurred_date = db.Column(db.Date, nullable=False, index=True)
+    caption = db.Column(db.String(500), nullable=True)
+    photo_filename = db.Column(db.String(255), nullable=False, unique=True)
+    photo_size_bytes = db.Column(db.Integer, nullable=False)
+    photo_width = db.Column(db.Integer, nullable=False)
+    photo_height = db.Column(db.Integer, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=now_wib)
+    updated_at = db.Column(db.DateTime, nullable=False, default=now_wib, onupdate=now_wib)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
+    child = db.relationship("Child", backref=db.backref(
+        "memory_journal_entries", lazy="dynamic", cascade="all, delete-orphan"))
+
+    def to_dict(self):
+        return {
+            "id": self.id, "child_id": self.child_id,
+            "occurred_date": self.occurred_date.isoformat(), "caption": self.caption,
+            "photo_size_bytes": self.photo_size_bytes, "photo_width": self.photo_width,
+            "photo_height": self.photo_height, "created_by_user_id": self.created_by_user_id,
+            "created_by_name": self.creator.name if self.creator else None,
+            "created_at": self.created_at.isoformat() + "+07:00",
+            "updated_at": self.updated_at.isoformat() + "+07:00",
+        }
+
+
+class MemoryJournalMetadata(db.Model):
+    __tablename__ = "memory_journal_metadata"
+    id = db.Column(db.Integer, primary_key=True)
+    entry_id = db.Column(db.Integer, db.ForeignKey("memory_journal_entries.id"), nullable=False, unique=True, index=True)
+    is_favorite = db.Column(db.Boolean, nullable=False, default=False)
+    entry = db.relationship("MemoryJournalEntry", backref=db.backref(
+        "metadata_record", uselist=False, cascade="all, delete-orphan"))
+
+
+class MemoryJournalTag(db.Model):
+    __tablename__ = "memory_journal_tags"
+    __table_args__ = (db.UniqueConstraint("entry_id", "tag", name="uq_memory_journal_tag"),)
+    id = db.Column(db.Integer, primary_key=True)
+    entry_id = db.Column(db.Integer, db.ForeignKey("memory_journal_entries.id"), nullable=False, index=True)
+    tag = db.Column(db.String(30), nullable=False, index=True)
+    entry = db.relationship("MemoryJournalEntry", backref=db.backref(
+        "tag_records", lazy="select", cascade="all, delete-orphan"))
+
+
+class DevelopmentGoal(db.Model):
+    """Tujuan perkembangan keluarga; bukan target/diagnosis medis."""
+    __tablename__ = "development_goals"
+
+    id = db.Column(db.Integer, primary_key=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    category = db.Column(db.String(30), nullable=False)
+    title = db.Column(db.String(150), nullable=False)
+    target_date = db.Column(db.Date, nullable=False, index=True)
+    note = db.Column(db.String(500), nullable=True)
+    completed_at = db.Column(db.DateTime, nullable=True)
+    completed_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=now_wib)
+    updated_at = db.Column(db.DateTime, nullable=False, default=now_wib, onupdate=now_wib)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
+    completer = db.relationship("User", foreign_keys=[completed_by_user_id])
+    child = db.relationship("Child", backref=db.backref(
+        "development_goals", lazy="dynamic", cascade="all, delete-orphan"))
+
+    def to_dict(self):
+        return {"id": self.id, "child_id": self.child_id, "category": self.category,
+                "title": self.title, "target_date": self.target_date.isoformat(), "note": self.note,
+                "completed_at": self.completed_at.isoformat()+"+07:00" if self.completed_at else None,
+                "created_by_user_id": self.created_by_user_id,
+                "created_by_name": self.creator.name if self.creator else None,
+                "completed_by_name": self.completer.name if self.completer else None}
+
+
+class FamilyDevelopmentCheckIn(db.Model):
+    """Refleksi bulanan caregiver; bukan hasil skrining atau diagnosis."""
+    __tablename__ = "family_development_check_ins"
+    __table_args__ = (
+        db.UniqueConstraint("child_id", "created_by_user_id", "period_month",
+                            name="uq_family_check_in_caregiver_month"),
+        db.Index("ix_family_check_ins_child_month", "child_id", "period_month"),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    period_month = db.Column(db.Date, nullable=False)
+    areas = db.Column(db.JSON, nullable=False)
+    reflection_note = db.Column(db.String(1000), nullable=True)
+    discuss_with_professional = db.Column(db.Boolean, nullable=False, default=False)
+    linked_goal_id = db.Column(db.Integer, db.ForeignKey("development_goals.id", ondelete="SET NULL"), nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=now_wib)
+    updated_at = db.Column(db.DateTime, nullable=False, default=now_wib, onupdate=now_wib)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
+    linked_goal = db.relationship("DevelopmentGoal", foreign_keys=[linked_goal_id])
+    child = db.relationship("Child", backref=db.backref(
+        "family_development_check_ins", lazy="dynamic", cascade="all, delete-orphan"))
+
+    def to_dict(self):
+        return {"id": self.id, "child_id": self.child_id,
+                "period_month": self.period_month.strftime("%Y-%m"), "areas": self.areas,
+                "reflection_note": self.reflection_note,
+                "discuss_with_professional": self.discuss_with_professional,
+                "linked_goal_id": self.linked_goal_id,
+                "linked_goal_title": self.linked_goal.title if self.linked_goal else None,
+                "created_by_user_id": self.created_by_user_id,
+                "created_by_name": self.creator.name if self.creator else None,
+                "created_at": self.created_at.isoformat()+"+07:00",
+                "updated_at": self.updated_at.isoformat()+"+07:00"}
+
+
+class AppointmentPreparation(db.Model):
+    """Checklist privat persiapan konsultasi dokter."""
+    __tablename__ = "appointment_preparations"
+    __table_args__ = (
+        db.UniqueConstraint("child_id", "created_by_user_id", "appointment_date",
+                            name="uq_appointment_preparation_caregiver_date"),
+        db.Index("ix_appointment_preparations_child_date", "child_id", "appointment_date"),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    appointment_date = db.Column(db.Date, nullable=False)
+    doctor_visit_id = db.Column(db.Integer, db.ForeignKey("doctor_visit_logs.id", ondelete="SET NULL"), nullable=True)
+    checklist = db.Column(db.JSON, nullable=False)
+    questions = db.Column(db.JSON, nullable=False, default=list)
+    source_check_in_ids = db.Column(db.JSON, nullable=False, default=list)
+    created_at = db.Column(db.DateTime, nullable=False, default=now_wib)
+    updated_at = db.Column(db.DateTime, nullable=False, default=now_wib, onupdate=now_wib)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
+    doctor_visit = db.relationship("DoctorVisitLog", foreign_keys=[doctor_visit_id])
+    child = db.relationship("Child", backref=db.backref(
+        "appointment_preparations", lazy="dynamic", cascade="all, delete-orphan"))
+
+    def to_dict(self):
+        done = sum(bool(value) for value in (self.checklist or {}).values())
+        total = len(self.checklist or {})
+        status = "ready" if total and done == total else ("in_progress" if done else "not_started")
+        return {"id": self.id, "child_id": self.child_id,
+                "appointment_date": self.appointment_date.isoformat(),
+                "doctor_visit_id": self.doctor_visit_id, "checklist": self.checklist,
+                "questions": self.questions or [], "source_check_in_ids": self.source_check_in_ids or [],
+                "status": status, "completed_items": done, "total_items": total,
+                "created_by_user_id": self.created_by_user_id,
+                "created_by_name": self.creator.name if self.creator else None,
+                "created_at": self.created_at.isoformat()+"+07:00",
+                "updated_at": self.updated_at.isoformat()+"+07:00"}
+
+
 class ChildCaregiver(db.Model):
     """
     Relasi banyak-ke-banyak antara User dan Child — satu anak bisa punya

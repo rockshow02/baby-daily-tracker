@@ -258,6 +258,84 @@ export const api = {
     return data;
   },
   photoUrl: (filename) => `${BASE_URL}/uploads/${filename}`,
+  listMemoryJournal: (childId, params = {}) => {
+    const search = new URLSearchParams();
+    Object.entries(params).forEach(([key,value]) => { if (value !== "" && value != null && value !== false) search.set(key,String(value)); });
+    return request(`/children/${childId}/memory-journal${search.toString()?`?${search}`:""}`);
+  },
+  developmentTimeline: (childId, params = {}) => {
+    const search = new URLSearchParams();
+    if (params.categories?.length) search.set("categories", params.categories.join(","));
+    if (params.from) search.set("from", params.from);
+    if (params.to) search.set("to", params.to);
+    if (params.limit) search.set("limit", String(params.limit));
+    const suffix = search.toString() ? `?${search}` : "";
+    return request(`/children/${childId}/development-timeline${suffix}`);
+  },
+  developmentCalendar: (childId, params = {}) => {
+    const search = new URLSearchParams({ month: params.month });
+    if (params.categories?.length) search.set("categories", params.categories.join(","));
+    return request(`/children/${childId}/development-calendar?${search}`);
+  },
+  previewMonthlyStory: (childId, payload) => request(`/children/${childId}/monthly-story/preview`, {
+    method: "POST", body: JSON.stringify(payload),
+  }),
+  monthlyStoryPdfUrl: (childId) => `${BASE_URL}/children/${childId}/monthly-story/pdf`,
+  memoryStorage: (childId) => request(`/children/${childId}/memory-storage`),
+  cleanupMemoryStorage: (childId, payload) => request(`/children/${childId}/memory-storage/cleanup`, {
+    method: "POST", body: JSON.stringify(payload),
+  }),
+  optimizeMemoryPhoto: (childId, entryId) => request(`/children/${childId}/memory-storage/${entryId}/optimize`, {
+    method: "POST",
+  }),
+  listDevelopmentGoals: (childId) => request(`/children/${childId}/development-goals`),
+  createDevelopmentGoal: (childId,payload) => request(`/children/${childId}/development-goals`,{method:"POST",body:JSON.stringify(payload)}),
+  updateDevelopmentGoal: (id,payload) => request(`/development-goals/${id}`,{method:"PUT",body:JSON.stringify(payload)}),
+  deleteDevelopmentGoal: (id) => request(`/development-goals/${id}`,{method:"DELETE"}),
+  completeDevelopmentGoal: (id) => request(`/development-goals/${id}/complete`,{method:"POST"}),
+  reopenDevelopmentGoal: (id) => request(`/development-goals/${id}/reopen`,{method:"POST"}),
+  listFamilyCheckIns: (childId) => request(`/children/${childId}/family-development-check-ins`),
+  createFamilyCheckIn: (childId,payload) => request(`/children/${childId}/family-development-check-ins`,{method:"POST",body:JSON.stringify(payload)}),
+  updateFamilyCheckIn: (id,payload) => request(`/family-development-check-ins/${id}`,{method:"PUT",body:JSON.stringify(payload)}),
+  deleteFamilyCheckIn: (id) => request(`/family-development-check-ins/${id}`,{method:"DELETE"}),
+  listAppointmentPreparations:(childId)=>request(`/children/${childId}/appointment-preparations`),
+  createAppointmentPreparation:(childId,payload)=>request(`/children/${childId}/appointment-preparations`,{method:"POST",body:JSON.stringify(payload)}),
+  updateAppointmentPreparation:(id,payload)=>request(`/appointment-preparations/${id}`,{method:"PUT",body:JSON.stringify(payload)}),
+  deleteAppointmentPreparation:(id)=>request(`/appointment-preparations/${id}`,{method:"DELETE"}),
+  dataQuality:(childId,params={})=>{const search=new URLSearchParams({days:String(params.days||30)});if(params.categories?.length)search.set("categories",params.categories.join(","));return request(`/children/${childId}/data-quality?${search}`);},
+  familyMonthlyReview:(childId,month)=>request(`/children/${childId}/family-monthly-review?${new URLSearchParams({month})}`),
+  createMemoryJournal: async (childId, { photo, caption, occurredDate }) => {
+    const formData = new FormData();
+    formData.append("photo", photo);
+    formData.append("caption", caption || "");
+    formData.append("occurred_date", occurredDate);
+    const token = getToken();
+    let res;
+    try {
+      res = await fetch(`${BASE_URL}/children/${childId}/memory-journal`, {
+        method: "POST", credentials: "include",
+        headers: token ? { Authorization: `Bearer ${token}` } : {}, body: formData,
+      });
+    } catch (_) {
+      throw new ApiError({ kind: "network", message: "Foto hanya bisa diunggah saat online." });
+    }
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new ApiError({ kind: classifyHttpError(res.status), status: res.status,
+      message: toUserFacingErrorMessage(data?.error, "Upload foto gagal") });
+    return data;
+  },
+  updateMemoryJournal: (entryId, payload) => request(`/memory-journal/${entryId}`, {
+    method: "PUT", body: JSON.stringify(payload),
+  }),
+  deleteMemoryJournal: (entryId) => request(`/memory-journal/${entryId}`, { method: "DELETE" }),
+  loadMemoryJournalPhoto: async (entryId) => {
+    const token = getToken();
+    const res = await fetch(`${BASE_URL}/memory-journal/${entryId}/photo`, {
+      credentials: "include", headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) throw new Error("Foto tidak dapat dimuat");
+    return URL.createObjectURL(await res.blob());
+  },
   exportPdfUrl: (childId) => `${BASE_URL}/children/${childId}/export-pdf`,
   exportJsonUrl: (childId) => `${BASE_URL}/children/${childId}/export-json`,
 

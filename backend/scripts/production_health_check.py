@@ -63,6 +63,13 @@ DEFAULT_BACKUP_STALE_DAYS = 7
 DEFAULT_MIN_DISK_FREE_MB = 500
 DEFAULT_DB_TIMEOUT_SECONDS = 2.0
 
+# Tabel yang wajib tersedia sesudah migrasi V3. Nama saja, tidak pernah
+# membaca isi/row count sehingga pemeriksaan tetap privacy-safe dan read-only.
+V3_REQUIRED_TABLES = (
+    "memory_journal_entries", "memory_journal_metadata", "memory_journal_tags",
+    "development_goals", "family_development_check_ins", "appointment_preparations",
+)
+
 
 @dataclass
 class CheckResult:
@@ -194,6 +201,29 @@ def check_database_config_and_file(report: Report, app):
         report.add("database_file_size", STATUS_FAILED, f"Gagal baca ukuran file ({exc.__class__.__name__})")
 
     return db_path
+
+
+def check_v3_schema(report: Report, db_path):
+    """Pastikan migrasi tabel V3 sudah dijalankan tanpa membaca data user."""
+    if db_path is None or not db_path.is_file():
+        report.add("v3_schema", STATUS_FAILED, "dilewati — file database nggak tersedia")
+        return
+    try:
+        uri = f"file:{db_path.as_posix()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=DEFAULT_DB_TIMEOUT_SECONDS)
+        try:
+            rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()
+        finally:
+            conn.close()
+        existing = {str(row[0]) for row in rows}
+        missing = sorted(set(V3_REQUIRED_TABLES) - existing)
+        if missing:
+            report.add("v3_schema", STATUS_FAILED,
+                       f"{len(missing)} tabel V3 belum ada — jalankan scripts/migrate_production.py")
+        else:
+            report.add("v3_schema", STATUS_OK, f"Semua {len(V3_REQUIRED_TABLES)} tabel V3 tersedia")
+    except Exception as exc:
+        report.add("v3_schema", STATUS_FAILED, f"Schema V3 nggak bisa diperiksa ({exc.__class__.__name__})")
 
 
 def check_backups(report: Report, app, db_path, stale_days: int):
@@ -363,6 +393,7 @@ def run(environment: str, stale_days: int, min_disk_free_mb: int) -> Report:
 
     app = check_flask_app_creation(report)
     db_path = check_database_config_and_file(report, app)
+    check_v3_schema(report, db_path)
     check_backups(report, app, db_path, stale_days)
     check_required_packages(report)
     check_requests_dependency_warning(report)

@@ -104,6 +104,10 @@ SAFE_CHANGED_FIELDS = {
     # berubah", field-nya TETAP ada, cuma tidak pernah "aman" disebut
     # namanya).
     "caregiver_handover": set(),
+    "memory_journal": {"occurred_date", "is_favorite"},
+    "development_goal": {"category", "target_date", "completed_at"},
+    "family_development_check_in": {"period_month", "areas", "linked_goal_id"},
+    "appointment_preparation": {"appointment_date", "doctor_visit_id", "checklist"},
 }
 
 PRIVATE_CHANGED_FIELDS = {
@@ -151,6 +155,10 @@ PRIVATE_CHANGED_FIELDS = {
     # berisi rincian perawatan/medis spesifik yang caregiver ketik
     # sendiri, sama sensitifnya kayak `notes` di 12 tipe log lain).
     "caregiver_handover": {"note"},
+    "memory_journal": {"caption", "tags"},
+    "development_goal": {"title", "note"},
+    "family_development_check_in": {"reflection_note", "discuss_with_professional"},
+    "appointment_preparation": {"questions", "source_check_in_ids"},
 }
 
 # Urutan TETAP (bukan set) — dipakai buat pesan error yang deterministik
@@ -280,6 +288,8 @@ EMERGENCY_CARD_PDF_EXPORT_ENTITY_TYPE = "emergency_card_pdf_export"
 # isi `note` di baris audit manapun di sini.
 CAREGIVER_HANDOVER_CLOSED_ENTITY_TYPE = "caregiver_handover_closed"
 CAREGIVER_HANDOVER_ACKNOWLEDGED_ENTITY_TYPE = "caregiver_handover_acknowledged"
+MONTHLY_STORY_PDF_EXPORT_ENTITY_TYPE = "monthly_story_pdf_export"
+MEMORY_JOURNAL_PHOTO_OPTIMIZED_ENTITY_TYPE = "memory_journal_photo_optimized"
 
 # Entity_type yang SENGAJA nggak punya entry SAFE_CHANGED_FIELDS sama
 # sekali — `changed_fields` buat SEMUANYA SELALU dipaksa None (lihat
@@ -296,6 +306,8 @@ NO_FIELD_DIFF_ENTITY_TYPES = (
     EMERGENCY_CARD_PDF_EXPORT_ENTITY_TYPE,
     CAREGIVER_HANDOVER_CLOSED_ENTITY_TYPE,
     CAREGIVER_HANDOVER_ACKNOWLEDGED_ENTITY_TYPE,
+    MONTHLY_STORY_PDF_EXPORT_ENTITY_TYPE,
+    MEMORY_JOURNAL_PHOTO_OPTIMIZED_ENTITY_TYPE,
 )
 
 # Dipakai endpoint baca (routes/audit_routes.py) buat validasi query

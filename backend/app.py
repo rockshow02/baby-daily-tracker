@@ -105,6 +105,16 @@ def create_app(config_overrides=None):
     from routes.doctor_consultation_routes import doctor_consultation_bp
     from routes.caregiver_handover_routes import caregiver_handover_bp
     from routes.privacy_routes import privacy_bp
+    from routes.memory_journal_routes import memory_journal_bp
+    from routes.development_timeline_routes import development_timeline_bp
+    from routes.monthly_story_routes import monthly_story_bp
+    from routes.memory_storage_routes import memory_storage_bp
+    from routes.development_goal_routes import development_goal_bp
+    from routes.development_calendar_routes import development_calendar_bp
+    from routes.family_check_in_routes import family_check_in_bp
+    from routes.appointment_preparation_routes import appointment_preparation_bp
+    from routes.data_quality_routes import data_quality_bp
+    from routes.family_monthly_review_routes import family_monthly_review_bp
 
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(children_bp, url_prefix="/api")
@@ -126,6 +136,16 @@ def create_app(config_overrides=None):
     app.register_blueprint(doctor_consultation_bp, url_prefix="/api")
     app.register_blueprint(caregiver_handover_bp, url_prefix="/api")
     app.register_blueprint(privacy_bp, url_prefix="/api")
+    app.register_blueprint(memory_journal_bp, url_prefix="/api")
+    app.register_blueprint(development_timeline_bp, url_prefix="/api")
+    app.register_blueprint(monthly_story_bp, url_prefix="/api")
+    app.register_blueprint(memory_storage_bp, url_prefix="/api")
+    app.register_blueprint(development_goal_bp, url_prefix="/api")
+    app.register_blueprint(development_calendar_bp, url_prefix="/api")
+    app.register_blueprint(family_check_in_bp, url_prefix="/api")
+    app.register_blueprint(appointment_preparation_bp, url_prefix="/api")
+    app.register_blueprint(data_quality_bp, url_prefix="/api")
+    app.register_blueprint(family_monthly_review_bp, url_prefix="/api")
 
     with app.app_context():
         db.create_all()

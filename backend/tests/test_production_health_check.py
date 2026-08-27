@@ -93,6 +93,32 @@ def test_35_healthy_temporary_database_passes_all_checks(workdir):
         assert by_name[name].status == phc.STATUS_OK, (name, by_name[name].detail)
 
 
+def test_35b_v3_schema_passes_after_create_all(workdir):
+    db_path = workdir / "tracker.db"
+    app = make_app(db_path)
+    report = phc.Report(environment="test")
+    phc.check_v3_schema(report, db_path)
+    result = {row.name: row for row in report.results}["v3_schema"]
+    assert result.status == phc.STATUS_OK
+    assert str(len(phc.V3_REQUIRED_TABLES)) in result.detail
+
+
+def test_35c_v3_schema_fails_safely_when_migration_was_skipped(workdir):
+    db_path = workdir / "tracker.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY)")
+        conn.commit()
+    finally:
+        conn.close()
+    report = phc.Report(environment="test")
+    phc.check_v3_schema(report, db_path)
+    result = {row.name: row for row in report.results}["v3_schema"]
+    assert result.status == phc.STATUS_FAILED
+    assert "migrate_production.py" in result.detail
+    assert report.exit_code() == 1
+
+
 # --------------------------------------------------------------------------
 # 36: database hilang -> gagal dengan aman (bukan crash), semua sub-check
 # ikut FAILED "dilewati" tanpa nyoba baca file yang emang udah nggak ada

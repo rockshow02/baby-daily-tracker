@@ -6,6 +6,7 @@ import RelatedArticles from "../components/RelatedArticles";
 import DoctorConsultationScreen from "../components/DoctorConsultationScreen";
 import MedicationScheduleScreen from "./MedicationScheduleScreen";
 import MedicalProfileScreen from "./MedicalProfileScreen";
+import AppointmentPreparation from "../components/AppointmentPreparation";
 import { todayWIB } from "../utils/date";
 
 const SUB_TABS = [
@@ -44,6 +45,7 @@ export default function HealthScreen({ child, currentUserId }) {
   const [showConsultation, setShowConsultation] = useState(false);
   const [showMedicationSchedule, setShowMedicationSchedule] = useState(false);
   const [showMedicalProfile, setShowMedicalProfile] = useState(false);
+  const [showAppointmentPreparation, setShowAppointmentPreparation] = useState(false);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -127,6 +129,13 @@ export default function HealthScreen({ child, currentUserId }) {
         <>
           {activeTab === "doctor" && (
             <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => setShowAppointmentPreparation(true)}
+                className="w-full py-2.5 mb-1 rounded-xl2 border border-feed text-feed text-sm font-semibold"
+              >
+                ✅ Checklist Persiapan Dokter
+              </button>
               <button
                 type="button"
                 onClick={() => setShowConsultation(true)}
@@ -362,6 +371,7 @@ export default function HealthScreen({ child, currentUserId }) {
           }}
         />
       )}
+      {showAppointmentPreparation && <AppointmentPreparation child={child} onClose={() => setShowAppointmentPreparation(false)} />}
 
       {showMedicationSchedule && (
         <MedicationScheduleScreen

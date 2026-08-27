@@ -26,3 +26,4 @@ idna==3.18
 certifi==2026.7.22
 
 qrcode==7.4.2
+Pillow==12.3.0
