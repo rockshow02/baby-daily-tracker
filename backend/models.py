@@ -742,6 +742,44 @@ class FamilyDevelopmentCheckIn(db.Model):
                 "updated_at": self.updated_at.isoformat()+"+07:00"}
 
 
+class AppointmentPreparation(db.Model):
+    """Checklist privat persiapan konsultasi dokter."""
+    __tablename__ = "appointment_preparations"
+    __table_args__ = (
+        db.UniqueConstraint("child_id", "created_by_user_id", "appointment_date",
+                            name="uq_appointment_preparation_caregiver_date"),
+        db.Index("ix_appointment_preparations_child_date", "child_id", "appointment_date"),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    child_id = db.Column(db.Integer, db.ForeignKey("children.id"), nullable=False, index=True)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    appointment_date = db.Column(db.Date, nullable=False)
+    doctor_visit_id = db.Column(db.Integer, db.ForeignKey("doctor_visit_logs.id", ondelete="SET NULL"), nullable=True)
+    checklist = db.Column(db.JSON, nullable=False)
+    questions = db.Column(db.JSON, nullable=False, default=list)
+    source_check_in_ids = db.Column(db.JSON, nullable=False, default=list)
+    created_at = db.Column(db.DateTime, nullable=False, default=now_wib)
+    updated_at = db.Column(db.DateTime, nullable=False, default=now_wib, onupdate=now_wib)
+    creator = db.relationship("User", foreign_keys=[created_by_user_id])
+    doctor_visit = db.relationship("DoctorVisitLog", foreign_keys=[doctor_visit_id])
+    child = db.relationship("Child", backref=db.backref(
+        "appointment_preparations", lazy="dynamic", cascade="all, delete-orphan"))
+
+    def to_dict(self):
+        done = sum(bool(value) for value in (self.checklist or {}).values())
+        total = len(self.checklist or {})
+        status = "ready" if total and done == total else ("in_progress" if done else "not_started")
+        return {"id": self.id, "child_id": self.child_id,
+                "appointment_date": self.appointment_date.isoformat(),
+                "doctor_visit_id": self.doctor_visit_id, "checklist": self.checklist,
+                "questions": self.questions or [], "source_check_in_ids": self.source_check_in_ids or [],
+                "status": status, "completed_items": done, "total_items": total,
+                "created_by_user_id": self.created_by_user_id,
+                "created_by_name": self.creator.name if self.creator else None,
+                "created_at": self.created_at.isoformat()+"+07:00",
+                "updated_at": self.updated_at.isoformat()+"+07:00"}
+
+
 class ChildCaregiver(db.Model):
     """
     Relasi banyak-ke-banyak antara User dan Child — satu anak bisa punya

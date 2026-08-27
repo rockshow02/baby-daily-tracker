@@ -5,7 +5,7 @@ from datetime import date, datetime, time, timedelta
 
 from flask import Blueprint, jsonify, request
 
-from models import (ChildVaccination, DevelopmentGoal, DoctorVisitLog,
+from models import (AppointmentPreparation, ChildVaccination, DevelopmentGoal, DoctorVisitLog,
                     GrowthMeasurement, MedicationSchedule, MemoryJournalEntry,
                     MilestoneLog, Reminder)
 from utils.access import get_accessible_child
@@ -82,6 +82,9 @@ def development_calendar(child_id):
             if row.next_visit_date:
                 items.append(_event("doctor", f"followup-{row.id}", row.next_visit_date,
                                     "Kontrol dokter terjadwal", "Jadwal kontrol berikutnya", "🩺"))
+        for row in rows(AppointmentPreparation, AppointmentPreparation.appointment_date):
+            items.append(_event("doctor", f"preparation-{row.id}", row.appointment_date,
+                                "Persiapan konsultasi", "Checklist persiapan dokter", "✅"))
     if "goal" in categories:
         for row in rows(DevelopmentGoal, DevelopmentGoal.target_date):
             state = "Selesai" if row.completed_at else "Target keluarga"
