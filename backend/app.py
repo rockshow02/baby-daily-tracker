@@ -114,6 +114,7 @@ def create_app(config_overrides=None):
     from routes.family_check_in_routes import family_check_in_bp
     from routes.appointment_preparation_routes import appointment_preparation_bp
     from routes.data_quality_routes import data_quality_bp
+    from routes.family_monthly_review_routes import family_monthly_review_bp
 
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(children_bp, url_prefix="/api")
@@ -144,6 +145,7 @@ def create_app(config_overrides=None):
     app.register_blueprint(family_check_in_bp, url_prefix="/api")
     app.register_blueprint(appointment_preparation_bp, url_prefix="/api")
     app.register_blueprint(data_quality_bp, url_prefix="/api")
+    app.register_blueprint(family_monthly_review_bp, url_prefix="/api")
 
     with app.app_context():
         db.create_all()
