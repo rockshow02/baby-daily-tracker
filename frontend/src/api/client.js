@@ -302,6 +302,7 @@ export const api = {
   createAppointmentPreparation:(childId,payload)=>request(`/children/${childId}/appointment-preparations`,{method:"POST",body:JSON.stringify(payload)}),
   updateAppointmentPreparation:(id,payload)=>request(`/appointment-preparations/${id}`,{method:"PUT",body:JSON.stringify(payload)}),
   deleteAppointmentPreparation:(id)=>request(`/appointment-preparations/${id}`,{method:"DELETE"}),
+  dataQuality:(childId,params={})=>{const search=new URLSearchParams({days:String(params.days||30)});if(params.categories?.length)search.set("categories",params.categories.join(","));return request(`/children/${childId}/data-quality?${search}`);},
   createMemoryJournal: async (childId, { photo, caption, occurredDate }) => {
     const formData = new FormData();
     formData.append("photo", photo);
