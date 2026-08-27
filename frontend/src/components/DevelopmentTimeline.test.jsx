@@ -7,6 +7,7 @@ import { api } from "../api/client";
 vi.mock("../api/client", () => ({
   api: { developmentTimeline: vi.fn(), loadMemoryJournalPhoto: vi.fn() },
 }));
+vi.mock("./DevelopmentHub", () => ({ default: ({ onClose }) => <div>Development Hub terbuka<button onClick={onClose}>Tutup hub</button></div> }));
 
 const child = { id: 7, name: "Nara", nickname: "Nara" };
 
@@ -38,5 +39,14 @@ describe("DevelopmentTimeline", () => {
     render(<DevelopmentTimeline child={child} />);
     expect(await screen.findByText("Linimasa belum dapat dimuat")).toBeInTheDocument();
     expect(screen.queryByText("Belum ada cerita pada filter ini")).not.toBeInTheDocument();
+  });
+
+  it("uses one consolidated hub entry point", async () => {
+    api.developmentTimeline.mockResolvedValue({ items: [], has_more: false });
+    render(<DevelopmentTimeline child={child} />);
+    await screen.findByText("Belum ada cerita pada filter ini");
+    expect(screen.queryByRole("button", { name: "Kalender" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Buka Hub" }));
+    expect(screen.getByText("Development Hub terbuka")).toBeInTheDocument();
   });
 });
